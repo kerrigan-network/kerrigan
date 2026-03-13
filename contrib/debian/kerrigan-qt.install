@@ -1,0 +1,6 @@
+usr/local/bin/kerrigan-qt usr/bin
+share/pixmaps/kerrigan32.xpm usr/share/pixmaps
+share/pixmaps/kerrigan16.xpm usr/share/pixmaps
+share/pixmaps/kerrigan128.png usr/share/pixmaps
+debian/kerrigan-qt.desktop usr/share/applications
+debian/kerrigan-qt.protocol usr/share/kde4/services/

@@ -1,0 +1,65 @@
+Source: kerrigan
+Section: utils
+Priority: optional
+Maintainer: Kerrigan Core Developers <dev@kerrigan.network>
+Uploaders: Kerrigan Core Developers <dev@kerrigan.network>
+Build-Depends: debhelper,
+ devscripts,
+ automake,
+ libtool,
+ bash-completion,
+ libdb4.8++-dev,
+ pkg-config,
+ libevent-dev,
+ libboost-filesystem1.48-dev | libboost-filesystem-dev (>> 1.47),
+ libboost-thread1.48-dev | libboost-thread-dev (>> 1.47),
+ libboost-test1.48-dev | libboost-test-dev (>> 1.47),
+ libminiupnpc8-dev | libminiupnpc-dev,
+ qt4-qmake, libqt4-dev,
+ qttools5-dev-tools, qttools5-dev,
+ libqrencode-dev,
+ python,
+ libzmq3-dev
+Standards-Version: 3.9.2
+Homepage: https://kerrigan.network/
+Vcs-Git: git://github.com/nicholasgasior/kerrigan.git
+Vcs-Browser: https://github.com/nicholasgasior/kerrigan
+
+Package: kerrigand
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: peer-to-peer network based digital currency - daemon
+ Kerrigan is a hybrid cryptocurrency with multi-algo PoW and
+ GPU availability network for AI inference. Kerrigan uses peer-to-peer
+ technology to operate with no central authority: managing transactions
+ and issuing money are carried out collectively by the network. Kerrigan Core
+ is the name of the open source software which enables the use of this currency.
+ .
+ This package provides the daemon, kerrigand, and the CLI tool
+ kerrigan-cli to interact with the daemon.
+
+Package: kerrigan-qt
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: peer-to-peer network based digital currency - Qt GUI
+ Kerrigan is a hybrid cryptocurrency with multi-algo PoW and
+ GPU availability network for AI inference. Kerrigan uses peer-to-peer
+ technology to operate with no central authority: managing transactions
+ and issuing money are carried out collectively by the network. Kerrigan Core
+ is the name of the open source software which enables the use of this currency.
+ .
+ This package provides Kerrigan-Qt, a GUI for Kerrigan based on Qt.
+
+Package: kerrigan-tx
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: peer-to-peer digital currency - standalone transaction tool
+ Kerrigan is a hybrid cryptocurrency with multi-algo PoW and
+ GPU availability network for AI inference. Kerrigan uses peer-to-peer
+ technology to operate with no central authority: managing transactions
+ and issuing money are carried out collectively by the network. Kerrigan Core
+ is the name of the open source software which enables the use of this currency.
+ .
+ This package provides kerrigan-tx, a command-line transaction creation
+ tool which can be used without a kerrigan daemon.  Some means of
+ exchanging minimal transaction data with peers is still required.

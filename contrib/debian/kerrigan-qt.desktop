@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Name=Kerrigan Core
+Comment=Kerrigan P2P Cryptocurrency
+Comment[de]=Verbinde mit dem Kerrigan peer-to-peer Netzwerk
+Comment[fr]=Kerrigan, monnaie virtuelle cryptographique pair à pair
+Comment[tr]=Kerrigan, eşten eşe kriptografik sanal para birimi
+Exec=kerrigan-qt %u
+Terminal=false
+Type=Application
+Icon=kerrigan128
+MimeType=x-scheme-handler/kerrigan;
+Categories=Office;Finance;P2P;Network;Qt;
+StartupWMClass=Kerrigan-qt

@@ -1,0 +1,34 @@
+#ifndef KERRIGAN_CHAINPARAMSSEEDS_H
+#define KERRIGAN_CHAINPARAMSSEEDS_H
+/**
+ * List of fixed seed nodes for the Kerrigan network
+ *
+ * Each entry is a BIP155 serialized (networkID, addr_len, addr, port) tuple.
+ * NetworkID 0x01 = IPv4, addr_len 0x04, port is big-endian.
+ */
+
+// Mainnet seeds (port 7120 = 0x1BD0)
+static const uint8_t chainparams_seed_main[] = {
+    // seed1.kerrigan.network - 217.77.7.16 (USA)
+    0x01, 0x04, 0xD9, 0x4D, 0x07, 0x10, 0x1B, 0xD0,
+    // seed2.kerrigan.network - 194.163.148.99 (India)
+    0x01, 0x04, 0xC2, 0xA3, 0x94, 0x63, 0x1B, 0xD0,
+    // seed3.kerrigan.network - 46.250.255.242 (Japan)
+    0x01, 0x04, 0x2E, 0xFA, 0xFF, 0xF2, 0x1B, 0xD0,
+    // seed4.kerrigan.network - 156.67.111.234 (Germany)
+    0x01, 0x04, 0x9C, 0x43, 0x6F, 0xEA, 0x1B, 0xD0,
+};
+
+// Testnet seeds (port 17120 = 0x42E0)
+static const uint8_t chainparams_seed_test[] = {
+    // seed1.kerrigan.network - 217.77.7.16
+    0x01, 0x04, 0xD9, 0x4D, 0x07, 0x10, 0x42, 0xE0,
+    // seed2.kerrigan.network - 194.163.148.99
+    0x01, 0x04, 0xC2, 0xA3, 0x94, 0x63, 0x42, 0xE0,
+    // seed3.kerrigan.network - 46.250.255.242
+    0x01, 0x04, 0x2E, 0xFA, 0xFF, 0xF2, 0x42, 0xE0,
+    // seed4.kerrigan.network - 156.67.111.234
+    0x01, 0x04, 0x9C, 0x43, 0x6F, 0xEA, 0x42, 0xE0,
+};
+
+#endif // KERRIGAN_CHAINPARAMSSEEDS_H

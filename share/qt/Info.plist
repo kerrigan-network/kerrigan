@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist SYSTEM "file://localhost/System/Library/DTDs/PropertyList.dtd">
+<plist version="0.9">
+<dict>
+  <key>LSMinimumSystemVersion</key>
+  <string>14</string>
+
+  <key>LSArchitecturePriority</key>
+  <array>
+    <string>x86_64</string>
+  </array>
+
+  <key>CFBundleIconFile</key>
+  <string>kerrigan.icns</string>
+
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+
+  <key>CFBundleSupportedPlatforms</key>
+  <array>
+	   <string>MacOSX</string>
+  </array>
+
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.0</string>
+
+  <key>CFBundleVersion</key>
+  <string>1.0.0</string>
+
+  <key>CFBundleSignature</key>
+  <string>????</string>
+
+  <key>CFBundleExecutable</key>
+  <string>Kerrigan-Qt</string>
+  <key>CFBundleName</key>
+  <string>Kerrigan-Qt</string>
+
+  <key>LSHasLocalizedDisplayName</key>
+  <true/>
+
+  <key>CFBundleIdentifier</key>
+  <string>network.kerrigan.Kerrigan-Qt</string>
+
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>CFBundleURLName</key>
+      <string>network.kerrigan.KerriganPayment</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>kerrigan</string>
+      </array>
+    </dict>
+  </array>
+
+  <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+  <key>NSHighResolutionCapable</key>
+    <string>True</string>
+
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright © 2009-2026 The Bitcoin Core developers, 2014-2026 The Kerrigan developers</string>
+  <key>LSApplicationCategoryType</key>
+    <string>public.app-category.finance</string>
+</dict>
+</plist>

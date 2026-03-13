@@ -1,0 +1,22 @@
+QT_TS = \
+  qt/locale/kerrigan_ar.ts \
+  qt/locale/kerrigan_bg.ts \
+  qt/locale/kerrigan_de.ts \
+  qt/locale/kerrigan_en.ts \
+  qt/locale/kerrigan_es.ts \
+  qt/locale/kerrigan_fi.ts \
+  qt/locale/kerrigan_fr.ts \
+  qt/locale/kerrigan_it.ts \
+  qt/locale/kerrigan_ja.ts \
+  qt/locale/kerrigan_ko.ts \
+  qt/locale/kerrigan_nl.ts \
+  qt/locale/kerrigan_pl.ts \
+  qt/locale/kerrigan_pt.ts \
+  qt/locale/kerrigan_ro.ts \
+  qt/locale/kerrigan_ru.ts \
+  qt/locale/kerrigan_sk.ts \
+  qt/locale/kerrigan_th.ts \
+  qt/locale/kerrigan_tr.ts \
+  qt/locale/kerrigan_vi.ts \
+  qt/locale/kerrigan_zh_CN.ts \
+  qt/locale/kerrigan_zh_TW.ts

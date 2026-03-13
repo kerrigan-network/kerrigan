@@ -1,0 +1,58 @@
+# Keys
+genesis_key.txt
+
+# Build artifacts
+Makefile
+Makefile.in
+aclocal.m4
+autom4te.cache/
+config.log
+config.status
+config.h
+configure
+configure~
+libtool
+stamp-h1
+*.o
+*.lo
+*.la
+*.a
+*.so
+*.dylib
+.deps/
+.dirstamp
+.libs/
+*.Plo
+*.Tpo
+
+# Generated pkg-config
+libkerriganconsensus.pc
+
+# Rust build output
+target/
+
+# Compiled binaries
+src/kerrigand
+src/kerrigan-cli
+src/dashd
+src/dash-cli
+src/kerrigan-tx
+src/kerrigan-wallet
+src/kerrigan-util
+src/kerrigan-node
+src/qt/kerrigan-qt
+src/test/test_kerrigan
+src/test/fuzz/fuzz
+src/bench/bench_kerrigan
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+upstream

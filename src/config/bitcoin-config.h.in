@@ -1,0 +1,369 @@
+/* src/config/bitcoin-config.h.in.  Generated from configure.ac by autoheader.  */
+
+#ifndef KERRIGAN_CONFIG_H
+
+#define KERRIGAN_CONFIG_H
+
+/* Define if building universal (internal helper macro) */
+#undef AC_APPLE_UNIVERSAL_BUILD
+
+/* Version Build */
+#undef CLIENT_VERSION_BUILD
+
+/* Version is release */
+#undef CLIENT_VERSION_IS_RELEASE
+
+/* Major version */
+#undef CLIENT_VERSION_MAJOR
+
+/* Minor version */
+#undef CLIENT_VERSION_MINOR
+
+/* Copyright holder(s) before %s replacement */
+#undef COPYRIGHT_HOLDERS
+
+/* Copyright holder(s) */
+#undef COPYRIGHT_HOLDERS_FINAL
+
+/* Replacement for %s in copyright holders string */
+#undef COPYRIGHT_HOLDERS_SUBSTITUTION
+
+/* Copyright year */
+#undef COPYRIGHT_YEAR
+
+/* Define this symbol to use wrapped CXX ABIs for exception stacktraces */
+#undef CRASH_HOOKS_WRAPPED_CXX_ABI
+
+/* Define this symbol to build code that uses ARMv8 AES intrinsics */
+#undef ENABLE_ARM_AES
+
+/* Define this symbol to build code that uses ARM NEON intrinsics */
+#undef ENABLE_ARM_NEON
+
+/* Define this symbol to build code that uses ARMv8 SHA-NI intrinsics */
+#undef ENABLE_ARM_SHANI
+
+/* Define this symbol to build code that uses AVX2 intrinsics */
+#undef ENABLE_AVX2
+
+/* Define this symbol if crash hooks should be enabled */
+#undef ENABLE_CRASH_HOOKS
+
+/* Define if external signer support is enabled */
+#undef ENABLE_EXTERNAL_SIGNER
+
+/* Define this symbol if in-wallet miner should be enabled */
+#undef ENABLE_MINER
+
+/* Define this symbol to build code that uses SSE4.1 intrinsics */
+#undef ENABLE_SSE41
+
+/* Define this symbol to build code that uses SSSE3 intrinsics */
+#undef ENABLE_SSSE3
+
+/* Define this symbol if stacktraces should be enabled */
+#undef ENABLE_STACKTRACES
+
+/* Define to 1 to enable tracepoints for Userspace, Statically Defined Tracing
+   */
+#undef ENABLE_TRACING
+
+/* Define to 1 to enable wallet functions */
+#undef ENABLE_WALLET
+
+/* Define this symbol to build code that uses x86 AES-NI intrinsics */
+#undef ENABLE_X86_AESNI
+
+/* Define this symbol to build code that uses x86 SHA-NI intrinsics */
+#undef ENABLE_X86_SHANI
+
+/* Define this symbol to enable ZMQ functions */
+#undef ENABLE_ZMQ
+
+/* Define to 1 if you have the <backtrace.h> header file. */
+#undef HAVE_BACKTRACE_H
+
+/* define if the Boost library is available */
+#undef HAVE_BOOST
+
+/* Define this symbol if clmul instructions can be used */
+#undef HAVE_CLMUL
+
+/* Define this symbol if the consensus lib has been built */
+#undef HAVE_CONSENSUS_LIB
+
+/* define if the compiler supports basic C++20 syntax */
+#undef HAVE_CXX20
+
+/* Define to 1 if you have the declaration of `fork', and to 0 if you don't.
+   */
+#undef HAVE_DECL_FORK
+
+/* Define to 1 if you have the declaration of `freeifaddrs', and to 0 if you
+   don't. */
+#undef HAVE_DECL_FREEIFADDRS
+
+/* Define to 1 if you have the declaration of `getifaddrs', and to 0 if you
+   don't. */
+#undef HAVE_DECL_GETIFADDRS
+
+/* Define to 1 if you have the declaration of `pipe2', and to 0 if you don't.
+   */
+#undef HAVE_DECL_PIPE2
+
+/* Define to 1 if you have the declaration of `setsid', and to 0 if you don't.
+   */
+#undef HAVE_DECL_SETSID
+
+/* Define to 1 if you have the declaration of `strerror_r', and to 0 if you
+   don't. */
+#undef HAVE_DECL_STRERROR_R
+
+/* Define if the visibility attribute is supported. */
+#undef HAVE_DEFAULT_VISIBILITY_ATTRIBUTE
+
+/* Define to 1 if you have the <dlfcn.h> header file. */
+#undef HAVE_DLFCN_H
+
+/* Define if the dllexport attribute is supported. */
+#undef HAVE_DLLEXPORT_ATTRIBUTE
+
+/* Define this symbol if evhttp_connection_get_peer expects const char** */
+#undef HAVE_EVHTTP_CONNECTION_GET_PEER_CONST_CHAR
+
+/* Define to 1 if you have the <execinfo.h> header file. */
+#undef HAVE_EXECINFO_H
+
+/* Define to 1 if fdatasync is available. */
+#undef HAVE_FDATASYNC
+
+/* Define this symbol if the BSD getentropy system call is available with
+   sys/random.h */
+#undef HAVE_GETENTROPY_RAND
+
+/* Define to 1 if you have the <inttypes.h> header file. */
+#undef HAVE_INTTYPES_H
+
+/* Define to 1 if you have the `advapi32' library (-ladvapi32). */
+#undef HAVE_LIBADVAPI32
+
+/* Define to 1 if you have the `bcrypt' library (-lbcrypt). */
+#undef HAVE_LIBBCRYPT
+
+/* Define to 1 if you have the `comctl32' library (-lcomctl32). */
+#undef HAVE_LIBCOMCTL32
+
+/* Define to 1 if you have the `comdlg32' library (-lcomdlg32). */
+#undef HAVE_LIBCOMDLG32
+
+/* Define to 1 if you have the `gdi32' library (-lgdi32). */
+#undef HAVE_LIBGDI32
+
+/* Define to 1 if you have the `iphlpapi' library (-liphlpapi). */
+#undef HAVE_LIBIPHLPAPI
+
+/* Define to 1 if you have the `kernel32' library (-lkernel32). */
+#undef HAVE_LIBKERNEL32
+
+/* Define to 1 if you have the `ole32' library (-lole32). */
+#undef HAVE_LIBOLE32
+
+/* Define to 1 if you have the `oleaut32' library (-loleaut32). */
+#undef HAVE_LIBOLEAUT32
+
+/* Define to 1 if you have the `psapi' library (-lpsapi). */
+#undef HAVE_LIBPSAPI
+
+/* Define to 1 if you have the `shell32' library (-lshell32). */
+#undef HAVE_LIBSHELL32
+
+/* Define to 1 if you have the `shlwapi' library (-lshlwapi). */
+#undef HAVE_LIBSHLWAPI
+
+/* Define to 1 if you have the `user32' library (-luser32). */
+#undef HAVE_LIBUSER32
+
+/* Define to 1 if you have the `uuid' library (-luuid). */
+#undef HAVE_LIBUUID
+
+/* Define to 1 if you have the `winmm' library (-lwinmm). */
+#undef HAVE_LIBWINMM
+
+/* Define to 1 if you have the `ws2_32' library (-lws2_32). */
+#undef HAVE_LIBWS2_32
+
+/* Define this symbol if you have malloc_info */
+#undef HAVE_MALLOC_INFO
+
+/* Define this symbol if you have mallopt with M_ARENA_MAX */
+#undef HAVE_MALLOPT_ARENA_MAX
+
+/* Define to 1 if you have the <miniupnpc/miniupnpc.h> header file. */
+#undef HAVE_MINIUPNPC_MINIUPNPC_H
+
+/* Define to 1 if you have the <miniupnpc/upnpcommands.h> header file. */
+#undef HAVE_MINIUPNPC_UPNPCOMMANDS_H
+
+/* Define to 1 if you have the <miniupnpc/upnperrors.h> header file. */
+#undef HAVE_MINIUPNPC_UPNPERRORS_H
+
+/* Define to 1 if you have the <natpmp.h> header file. */
+#undef HAVE_NATPMP_H
+
+/* Define to 1 if O_CLOEXEC flag is available. */
+#undef HAVE_O_CLOEXEC
+
+/* Define this symbol if you have posix_fallocate */
+#undef HAVE_POSIX_FALLOCATE
+
+/* Define if you have POSIX threads libraries and header files. */
+#undef HAVE_PTHREAD
+
+/* Have PTHREAD_PRIO_INHERIT. */
+#undef HAVE_PTHREAD_PRIO_INHERIT
+
+/* Define this symbol if platform supports unix domain sockets */
+#undef HAVE_SOCKADDR_UN
+
+/* Define to 1 if you have the <stdint.h> header file. */
+#undef HAVE_STDINT_H
+
+/* Define to 1 if you have the <stdio.h> header file. */
+#undef HAVE_STDIO_H
+
+/* Define to 1 if you have the <stdlib.h> header file. */
+#undef HAVE_STDLIB_H
+
+/* Define if you have `strerror_r'. */
+#undef HAVE_STRERROR_R
+
+/* Define to 1 if you have the <strings.h> header file. */
+#undef HAVE_STRINGS_H
+
+/* Define to 1 if you have the <string.h> header file. */
+#undef HAVE_STRING_H
+
+/* Define this symbol to build code that uses getauxval */
+#undef HAVE_STRONG_GETAUXVAL
+
+/* Define this symbol if the BSD sysctl() is available */
+#undef HAVE_SYSCTL
+
+/* Define this symbol if the BSD sysctl(KERN_ARND) is available */
+#undef HAVE_SYSCTL_ARND
+
+/* Define to 1 if std::system or ::wsystem is available. */
+#undef HAVE_SYSTEM
+
+/* Define this symbol if the Linux getrandom system call is available */
+#undef HAVE_SYS_GETRANDOM
+
+/* Define to 1 if you have the <sys/prctl.h> header file. */
+#undef HAVE_SYS_PRCTL_H
+
+/* Define to 1 if you have the <sys/resources.h> header file. */
+#undef HAVE_SYS_RESOURCES_H
+
+/* Define to 1 if you have the <sys/select.h> header file. */
+#undef HAVE_SYS_SELECT_H
+
+/* Define to 1 if you have the <sys/stat.h> header file. */
+#undef HAVE_SYS_STAT_H
+
+/* Define to 1 if you have the <sys/types.h> header file. */
+#undef HAVE_SYS_TYPES_H
+
+/* Define to 1 if you have the <sys/vmmeter.h> header file. */
+#undef HAVE_SYS_VMMETER_H
+
+/* Define to 1 if you have the <unistd.h> header file. */
+#undef HAVE_UNISTD_H
+
+/* Define to 1 if you have the <vm/vm_param.h> header file. */
+#undef HAVE_VM_VM_PARAM_H
+
+/* Define to the sub-directory where libtool stores uninstalled libraries. */
+#undef LT_OBJDIR
+
+/* Define to the address where bug reports for this package should be sent. */
+#undef PACKAGE_BUGREPORT
+
+/* Define to the full name of this package. */
+#undef PACKAGE_NAME
+
+/* Define to the full name and version of this package. */
+#undef PACKAGE_STRING
+
+/* Define to the one symbol short name of this package. */
+#undef PACKAGE_TARNAME
+
+/* Define to the home page for this package. */
+#undef PACKAGE_URL
+
+/* Define to the version of this package. */
+#undef PACKAGE_VERSION
+
+/* Define to necessary symbol if this constant uses a non-standard name on
+   your system. */
+#undef PTHREAD_CREATE_JOINABLE
+
+/* Define this symbol if the qt platform is android */
+#undef QT_QPA_PLATFORM_ANDROID
+
+/* Define this symbol if the qt platform is cocoa */
+#undef QT_QPA_PLATFORM_COCOA
+
+/* Define this symbol if the minimal qt platform exists */
+#undef QT_QPA_PLATFORM_MINIMAL
+
+/* Define this symbol if the qt platform is windows */
+#undef QT_QPA_PLATFORM_WINDOWS
+
+/* Define this symbol if the qt platform is xcb */
+#undef QT_QPA_PLATFORM_XCB
+
+/* Define to 1 if all of the C90 standard headers exist (not just the ones
+   required in a freestanding environment). This macro is provided for
+   backward compatibility; new code need not use it. */
+#undef STDC_HEADERS
+
+/* Define to 1 if strerror_r returns char *. */
+#undef STRERROR_R_CHAR_P
+
+/* Define if BDB support should be compiled in */
+#undef USE_BDB
+
+/* Define if dbus support should be compiled in */
+#undef USE_DBUS
+
+/* Define to 1 if UPnP support should be compiled in. */
+#undef USE_NATPMP
+
+/* Define if QR support should be compiled in */
+#undef USE_QRCODE
+
+/* Define if sqlite support should be compiled in */
+#undef USE_SQLITE
+
+/* Define to 1 if UPnP support should be compiled in. */
+#undef USE_UPNP
+
+/* Define WORDS_BIGENDIAN to 1 if your processor stores words with the most
+   significant byte first (like Motorola and SPARC, unlike Intel). */
+#if defined AC_APPLE_UNIVERSAL_BUILD
+# if defined __BIG_ENDIAN__
+#  define WORDS_BIGENDIAN 1
+# endif
+#else
+# ifndef WORDS_BIGENDIAN
+#  undef WORDS_BIGENDIAN
+# endif
+#endif
+
+/* Number of bits in a file offset, on hosts where this is settable. */
+#undef _FILE_OFFSET_BITS
+
+/* Define for large files, on AIX-style hosts. */
+#undef _LARGE_FILES
+
+#endif //KERRIGAN_CONFIG_H

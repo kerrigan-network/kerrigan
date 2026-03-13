@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>network.kerrigan.kerrigan-core</id>
+  <name>Kerrigan Core</name>
+  <project_license>MIT</project_license>
+  <metadata_license>CC0-1.0</metadata_license>
+  <summary>Fully validating Kerrigan peer-to-peer network node, wallet and GUI</summary>
+  <url type="homepage">https://kerrigan.network/</url>
+  <url type="bugtracker">https://github.com/nicholasgasior/kerrigan/issues/new?title=[flatpak]</url>
+  <launchable type="desktop-id">network.kerrigan.kerrigan-core.desktop</launchable>
+  <description>
+    <p>
+    Kerrigan Core connects to the Kerrigan peer-to-peer network to download and
+    fully validate blocks and transactions. It also includes a wallet and
+    graphical user interface.
+    </p>
+  </description>
+  <screenshots>
+    <screenshot type="default">
+      <image type="source">https://kerrigan.network/assets/img/kerrigan-logo.png</image>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release date="2026-03-03" version="1.0.0"/>
+  </releases>
+  <content_rating type="oars-1.1">
+    <content_attribute id="money-purchasing">intense</content_attribute>
+  </content_rating>
+  <developer id="network.kerrigan">
+    <name>Kerrigan Core Developers</name>
+  </developer>
+</component>

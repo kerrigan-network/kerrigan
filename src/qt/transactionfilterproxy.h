@@ -1,0 +1,76 @@
+// Copyright (c) 2011-2021 The Bitcoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef BITCOIN_QT_TRANSACTIONFILTERPROXY_H
+#define BITCOIN_QT_TRANSACTIONFILTERPROXY_H
+
+#include <consensus/amount.h>
+#include <qt/transactionrecord.h>
+
+#include <QDateTime>
+#include <QSortFilterProxyModel>
+
+#include <optional>
+
+/** Helper function to convert transaction type enum to bit field */
+constexpr quint32 TransactionTypeToBit(int type) { return 1u << type; }
+
+/** Filter the transaction list according to pre-specified rules. */
+class TransactionFilterProxy : public QSortFilterProxyModel
+{
+    Q_OBJECT
+
+public:
+    explicit TransactionFilterProxy(QObject *parent = nullptr);
+
+    /** Types to exclude from common transaction lists (dust) */
+    static constexpr quint32 EXCLUDED_TYPES =
+        TransactionTypeToBit(TransactionRecord::DustReceive);
+    /** Type filter bit field (all types) */
+    static constexpr quint32 ALL_TYPES = 0xFFFFFFFF;
+    /** Type filter bit field (all types except excluded) */
+    static constexpr quint32 COMMON_TYPES = ALL_TYPES & ~EXCLUDED_TYPES;
+
+    static constexpr quint32 TYPE(int type) { return TransactionTypeToBit(type); }
+
+    enum WatchOnlyFilter
+    {
+        WatchOnlyFilter_All,
+        WatchOnlyFilter_Yes,
+        WatchOnlyFilter_No
+    };
+
+    /** Filter transactions between date range. Use std::nullopt for open range. */
+    void setDateRange(const std::optional<QDateTime>& from, const std::optional<QDateTime>& to);
+    void setSearchString(const QString &);
+    /**
+      @note Type filter takes a bit field created with TYPE() or ALL_TYPES
+     */
+    void setTypeFilter(quint32 modes);
+    void setMinAmount(const CAmount& minimum);
+    void setWatchOnlyFilter(WatchOnlyFilter filter);
+
+    /** Set maximum number of rows returned, -1 if unlimited. */
+    void setLimit(int limit);
+
+    /** Set whether to show conflicted transactions. */
+    void setShowInactive(bool showInactive);
+
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
+
+protected:
+    bool filterAcceptsRow(int source_row, const QModelIndex & source_parent) const override;
+
+private:
+    std::optional<QDateTime> dateFrom;
+    std::optional<QDateTime> dateTo;
+    QString m_search_string;
+    quint32 typeFilter;
+    WatchOnlyFilter watchOnlyFilter{WatchOnlyFilter_All};
+    CAmount minAmount{0};
+    int limitRows{-1};
+    bool showInactive{true};
+};
+
+#endif // BITCOIN_QT_TRANSACTIONFILTERPROXY_H

@@ -1,0 +1,75 @@
+name: Build Kerrigan
+
+on:
+  push:
+    branches: [main, develop]
+    paths: ['src/**', 'configure.ac', 'Makefile.am']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: self-hosted
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check build dependencies
+        run: |
+          gcc --version | head -1
+          g++ --version | head -1
+          autoconf --version | head -1
+
+      - name: Autogen
+        run: ./autogen.sh
+
+      - name: Configure
+        run: ./configure --without-gui
+
+      - name: Build
+        run: make -j$(nproc)
+
+      - name: Smoke test
+        run: |
+          ./src/kerrigand --version
+
+      - name: Unit tests — PoW
+        run: ./src/test/test_kerrigan --run_test=pow_tests
+
+      - name: Unit tests — coinbase split
+        run: ./src/test/test_kerrigan --run_test=coinbase_split_tests
+
+      - name: Unit tests — Sapling
+        run: ./src/test/test_kerrigan --run_test=sapling_tests
+
+      - name: Functional tests — Sapling
+        run: |
+          python3 test/functional/feature_sapling.py
+          python3 test/functional/feature_sapling_fees.py
+          python3 test/functional/feature_sapling_relay.py
+          python3 test/functional/feature_sapling_reorg.py
+          python3 test/functional/feature_sapling_activation.py
+
+      - name: Functional tests — Multi-algo PoW
+        run: |
+          python3 test/functional/feature_multi_algo_mining.py
+          python3 test/functional/feature_multialgo_stress.py
+          python3 test/functional/feature_invalidateblock.py
+
+  lint:
+    runs-on: self-hosted
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check include guards
+        run: |
+          echo "Checking for KERRIGAN include guards in modified files..."
+          grep -r "BITCOIN_" src/pow.h src/primitives/block.h || true
+
+      - name: Check for TODO markers
+        run: |
+          echo "Outstanding TODOs:"
+          grep -rn "TODO" src/primitives/ src/pow.cpp src/pow.h || echo "None found"

@@ -1,0 +1,47 @@
+<svg width="900" height="500" viewBox="0 0 900 500" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Kerrigan Multi-Algorithm Architecture</title>
+  <desc id="desc">Four mining algorithms feed Hivemind Difficulty signals into the Kerrigan Blockchain.</desc>
+
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto" markerUnits="strokeWidth">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#FFFFFF" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="900" height="500" fill="#0F172A" />
+
+  <!-- Algorithm boxes (left column) -->
+  <rect x="60" y="45" width="280" height="90" rx="14" ry="14" fill="#22C55E" stroke="#FFFFFF" stroke-width="1.5" />
+  <text x="200" y="80" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="26" font-weight="700">X11</text>
+  <text x="200" y="106" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="16" font-weight="500">ASIC + GPU</text>
+
+  <rect x="60" y="155" width="280" height="90" rx="14" ry="14" fill="#7C3AED" stroke="#FFFFFF" stroke-width="1.5" />
+  <text x="200" y="190" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="26" font-weight="700">KawPoW</text>
+  <text x="200" y="216" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="16" font-weight="500">GPU (RVN-compat)</text>
+
+  <rect x="60" y="265" width="280" height="90" rx="14" ry="14" fill="#6366F1" stroke="#FFFFFF" stroke-width="1.5" />
+  <text x="200" y="300" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="26" font-weight="700">Equihash 200,9</text>
+  <text x="200" y="326" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="16" font-weight="500">GPU (ZEC-compat)</text>
+
+  <rect x="60" y="375" width="280" height="90" rx="14" ry="14" fill="#3B82F6" stroke="#FFFFFF" stroke-width="1.5" />
+  <text x="200" y="410" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="26" font-weight="700">Equihash 192,7</text>
+  <text x="200" y="436" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="16" font-weight="500">GPU (Zero-compat)</text>
+
+  <!-- Central blockchain box (right side) -->
+  <rect x="560" y="130" width="280" height="240" rx="18" ry="18" fill="#1E293B" stroke="#22C55E" stroke-width="3" />
+  <text x="700" y="260" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="34" font-weight="700">Kerrigan Blockchain</text>
+
+  <!-- Arrows + labels -->
+  <line x1="340" y1="90" x2="560" y2="180" stroke="#FFFFFF" stroke-width="2.5" marker-end="url(#arrowhead)" />
+  <text x="455" y="128" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="14" font-weight="600">Hivemind Difficulty</text>
+
+  <line x1="340" y1="200" x2="560" y2="225" stroke="#FFFFFF" stroke-width="2.5" marker-end="url(#arrowhead)" />
+  <text x="455" y="205" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="14" font-weight="600">Hivemind Difficulty</text>
+
+  <line x1="340" y1="310" x2="560" y2="270" stroke="#FFFFFF" stroke-width="2.5" marker-end="url(#arrowhead)" />
+  <text x="455" y="280" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="14" font-weight="600">Hivemind Difficulty</text>
+
+  <line x1="340" y1="420" x2="560" y2="315" stroke="#FFFFFF" stroke-width="2.5" marker-end="url(#arrowhead)" />
+  <text x="455" y="360" text-anchor="middle" fill="#FFFFFF" font-family="sans-serif" font-size="14" font-weight="600">Hivemind Difficulty</text>
+</svg>

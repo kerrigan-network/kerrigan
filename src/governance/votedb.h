@@ -1,0 +1,83 @@
+// Copyright (c) 2014-2024 The Dash Core developers
+// Distributed under the MIT/X11 software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef BITCOIN_GOVERNANCE_VOTEDB_H
+#define BITCOIN_GOVERNANCE_VOTEDB_H
+
+#include <governance/vote.h>
+#include <serialize.h>
+#include <streams.h>
+#include <uint256.h>
+
+#include <list>
+#include <map>
+#include <vector>
+
+class CDeterministicMNList;
+
+/**
+ * Represents the collection of votes associated with a given CGovernanceObject.
+ * Votes are held in memory with a per-object cap (MAX_VOTES_PER_OBJECT = 2000).
+ * RemoveOldVotes ensures at most one vote per masternode per signal type.
+ */
+class CGovernanceObjectVoteFile
+{
+public: // Types
+    using vote_l_t = std::list<CGovernanceVote>;
+
+    using vote_m_t = std::map<uint256, vote_l_t::iterator>;
+
+    static constexpr int MAX_VOTES_PER_OBJECT = 2000;
+
+private:
+    int nMemoryVotes{0};
+
+    vote_l_t listVotes;
+
+    vote_m_t mapVoteIndex;
+
+public:
+    CGovernanceObjectVoteFile();
+
+    CGovernanceObjectVoteFile(const CGovernanceObjectVoteFile& other);
+
+    /**
+     * Add a vote to the file
+     */
+    void AddVote(const CGovernanceVote& vote);
+
+    /**
+     * Return true if the vote with this hash is currently cached in memory
+     */
+    bool HasVote(const uint256& nHash) const;
+
+    /**
+     * Retrieve a vote cached in memory
+     */
+    bool SerializeVoteToStream(const uint256& nHash, CDataStream& ss) const;
+
+    int GetVoteCount() const
+    {
+        return nMemoryVotes;
+    }
+
+    std::vector<CGovernanceVote> GetVotes() const;
+
+    void RemoveVotesFromMasternode(const COutPoint& outpointMasternode);
+    std::set<uint256> RemoveInvalidVotes(const CDeterministicMNList& tip_mn_list, const COutPoint& outpointMasternode, bool fProposal);
+
+    SERIALIZE_METHODS(CGovernanceObjectVoteFile, obj)
+    {
+        READWRITE(obj.nMemoryVotes, LIMITED_LIST(obj.listVotes, MAX_VOTES_PER_OBJECT));
+        SER_READ(obj, obj.RebuildIndex());
+    }
+
+private:
+    // Drop older votes for the same gobject from the same masternode
+    void RemoveOldVotes(const CGovernanceVote& vote);
+
+    void RebuildIndex();
+};
+
+#endif // BITCOIN_GOVERNANCE_VOTEDB_H

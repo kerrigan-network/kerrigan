@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500" role="img" aria-labelledby="title desc">
+  <title id="title">V2 Block Reward Distribution</title>
+  <desc id="desc">Pie chart showing V2 block reward distribution: 40% AI GPU Inference, 20% Mining, 20% Masternodes, 15% Treasury, 5% Dev/Founders.</desc>
+
+  <rect width="800" height="500" fill="#0F172A"/>
+
+  <text x="400" y="58" text-anchor="middle" fill="white" font-family="sans-serif" font-size="30" font-weight="700">
+    V2 Block Reward Distribution
+  </text>
+
+  <!-- Pie chart -->
+  <g transform="translate(0, 10)">
+    <!-- 40% AI GPU Inference: 0 to 144 degrees -->
+    <path d="M 220 250 L 220 100 A 150 150 0 0 1 308.17 371.35 Z" fill="#22C55E" stroke="#0F172A" stroke-width="2"/>
+
+    <!-- 20% Mining: 144 to 216 degrees -->
+    <path d="M 220 250 L 308.17 371.35 A 150 150 0 0 1 131.83 371.35 Z" fill="#7C3AED" stroke="#0F172A" stroke-width="2"/>
+
+    <!-- 20% Masternodes: 216 to 288 degrees -->
+    <path d="M 220 250 L 131.83 371.35 A 150 150 0 0 1 131.83 128.65 Z" fill="#6366F1" stroke="#0F172A" stroke-width="2"/>
+
+    <!-- 15% Treasury: 288 to 342 degrees -->
+    <path d="M 220 250 L 131.83 128.65 A 150 150 0 0 1 197.64 103.04 Z" fill="#3B82F6" stroke="#0F172A" stroke-width="2"/>
+
+    <!-- 5% Dev/Founders: 342 to 360 degrees -->
+    <path d="M 220 250 L 197.64 103.04 A 150 150 0 0 1 220 100 Z" fill="#14B8A6" stroke="#0F172A" stroke-width="2"/>
+  </g>
+
+  <!-- Legend -->
+  <g font-family="sans-serif" font-size="20" fill="white">
+    <rect x="455" y="145" width="24" height="24" rx="4" fill="#22C55E"/>
+    <text x="490" y="163">AI GPU Inference (40%)</text>
+
+    <rect x="455" y="187" width="24" height="24" rx="4" fill="#7C3AED"/>
+    <text x="490" y="205">Mining (20%)</text>
+
+    <rect x="455" y="229" width="24" height="24" rx="4" fill="#6366F1"/>
+    <text x="490" y="247">Masternodes (20%)</text>
+
+    <rect x="455" y="271" width="24" height="24" rx="4" fill="#3B82F6"/>
+    <text x="490" y="289">Treasury (15%)</text>
+
+    <rect x="455" y="313" width="24" height="24" rx="4" fill="#14B8A6"/>
+    <text x="490" y="331">Dev / Founders (5%)</text>
+  </g>
+</svg>
