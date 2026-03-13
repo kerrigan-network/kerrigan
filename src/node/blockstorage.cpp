@@ -783,7 +783,7 @@ bool ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos, const Consensus::P
     // Check the header using the algo-specific PoW hash (e.g. ProgPoW for KawPoW,
     // X11 for X11/Equihash).  GetHash() alone would fail for KawPoW blocks whose
     // X11 identity hash doesn't meet the target.
-    if (!CheckProofOfWork(block.GetPoWAlgoHash(consensusParams), block.nBits, consensusParams, block.GetAlgo())) {
+    if (!CheckProofOfWork(block.GetPoWAlgoHash(consensusParams), block.nBits, consensusParams)) {
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
     }
 

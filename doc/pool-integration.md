@@ -247,3 +247,10 @@ Starting from stock Miningcore, Kerrigan needs only:
 - Verify daemon is running with `rpcalgoport` configured
 - Test: `curl -u pool:<secret> --data-binary '{"method":"getblocktemplate"}' http://127.0.0.1:1927/`
 - Response should include `coinbasetxn` and correct `equihash_n`/`equihash_k`
+
+**Genesis block rejected by `CheckProofOfWork`:**
+- The mainnet genesis block was mined with Dash-default nBits (`0x1e0ffff0`, target ~2^236), which exceeds the per-algo X11 `powLimitAlgo` (~2^213). Testnet is unaffected because all algo limits are ~2^255.
+- Fix: bypass per-algo limits for the genesis block in three places:
+  1. `src/node/blockstorage.cpp` (`ReadBlockFromDisk`) -- omit algo param so it falls back to global `powLimit`
+  2. `src/validation.cpp` (`CheckBlockHeader`) -- pass `-1` as algo when `hashPrevBlock` is null
+  3. `src/txdb.cpp` (`LoadBlockIndexGuts`) -- pass `-1` as algo when height is 0
