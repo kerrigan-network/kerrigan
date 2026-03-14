@@ -4509,8 +4509,7 @@ static bool CheckBlockHeader(const CBlockHeader& block, const uint256& hash, Blo
 
         // Target check: compute the per-algo PoW hash and compare against nBits
         uint256 powHash = block.GetPoWAlgoHash(consensusParams);
-        int powAlgo = block.hashPrevBlock.IsNull() ? -1 : block.GetAlgo();
-        if (!CheckProofOfWork(powHash, block.nBits, consensusParams, powAlgo))
+        if (!CheckProofOfWork(powHash, block.nBits, consensusParams, block.GetAlgo()))
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
     }
 

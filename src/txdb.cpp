@@ -489,8 +489,7 @@ bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, 
                     hdr.nHeight        = diskindex.nKawPowHeight;
                     hdr.nNonce64       = diskindex.nNonce64;
                     hdr.mix_hash       = diskindex.mix_hash;
-                    int powAlgo = (diskindex.nHeight == 0) ? -1 : diskindex.GetAlgo();
-                    if (!CheckProofOfWork(hdr.GetPoWAlgoHash(consensusParams), diskindex.nBits, consensusParams, powAlgo)) {
+                    if (!CheckProofOfWork(hdr.GetPoWAlgoHash(consensusParams), diskindex.nBits, consensusParams, diskindex.GetAlgo())) {
                         return error("%s: CheckProofOfWork failed at height %d", __func__, diskindex.nHeight);
                     }
                 }
