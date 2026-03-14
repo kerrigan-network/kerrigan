@@ -490,7 +490,7 @@ bool loadFonts()
 
     // Print debug logs for added fonts fetched by the family name
     for (const QString& f : g_font_db->families()) {
-        if (f.contains(MONTSERRAT_FONT_STR)) {
+        if (f.contains(MONTSERRAT_FONT_STR.toString())) {
             for (const QString& style : g_font_db->styles(f)) {
                 qDebug() << qstrprintf("%s: Family: %s, Style: %s", __func__, f.toStdString(), style.toStdString());
             }

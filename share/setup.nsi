@@ -26,7 +26,7 @@ Unicode true
 !define MUI_STARTMENUPAGE_REGISTRY_VALUENAME StartMenuGroup
 !define MUI_STARTMENUPAGE_DEFAULTFOLDER "Kerrigan"
 !define MUI_FINISHPAGE_RUN "$WINDIR\explorer.exe"
-!define MUI_FINISHPAGE_RUN_PARAMETERS $INSTDIR\kerrigan-qt.exe
+!define MUI_FINISHPAGE_RUN_PARAMETERS $INSTDIR\kerrigan-qt
 !define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
 !define MUI_UNWELCOMEFINISHPAGE_BITMAP "/home/raw/kerrigan/share/pixmaps/nsis-wizard.bmp"
 !define MUI_UNFINISHPAGE_NOAUTOCLOSE
@@ -57,12 +57,12 @@ CRCCheck force
 XPStyle on
 BrandingText " "
 ShowInstDetails show
-VIProductVersion 1.0.0.0
+VIProductVersion 1.0.1.0
 VIAddVersionKey ProductName "Kerrigan"
-VIAddVersionKey ProductVersion "1.0.0"
+VIAddVersionKey ProductVersion "1.0.1"
 VIAddVersionKey CompanyName "${COMPANY}"
 VIAddVersionKey CompanyWebsite "${URL}"
-VIAddVersionKey FileVersion "1.0.0"
+VIAddVersionKey FileVersion "1.0.1"
 VIAddVersionKey FileDescription "Installer for Kerrigan"
 VIAddVersionKey LegalCopyright "Copyright (C) 2009-2026 The Kerrigan developers"
 InstallDirRegKey HKCU "${REGKEY}" Path
@@ -72,18 +72,18 @@ ShowUninstDetails show
 Section -Main SEC0000
     SetOutPath $INSTDIR
     SetOverwrite on
-    File /home/raw/kerrigan/release/kerrigan-qt.exe
+    File /home/raw/kerrigan/release/kerrigan-qt
     File /oname=COPYING.txt /home/raw/kerrigan/COPYING
     File /oname=readme.txt /home/raw/kerrigan/doc/README_windows.txt
     File /home/raw/kerrigan/contrib/debian/examples/kerrigan.conf
     SetOutPath $INSTDIR\share\rpcauth
     File /home/raw/kerrigan/share/rpcauth/*.*
     SetOutPath $INSTDIR\daemon
-    File /home/raw/kerrigan/release/kerrigand.exe
-    File /home/raw/kerrigan/release/kerrigan-cli.exe
-    File /home/raw/kerrigan/release/kerrigan-tx.exe
-    File /home/raw/kerrigan/release/kerrigan-wallet.exe
-    File /home/raw/kerrigan/release/test_kerrigan.exe
+    File /home/raw/kerrigan/release/kerrigand
+    File /home/raw/kerrigan/release/kerrigan-cli
+    File /home/raw/kerrigan/release/kerrigan-tx
+    File /home/raw/kerrigan/release/kerrigan-wallet
+    File /home/raw/kerrigan/release/test_kerrigan
     SetOutPath $INSTDIR
     WriteRegStr HKCU "${REGKEY}\Components" Main 1
 SectionEnd
@@ -94,12 +94,12 @@ Section -post SEC0001
     WriteUninstaller $INSTDIR\uninstall.exe
     !insertmacro MUI_STARTMENU_WRITE_BEGIN Application
     CreateDirectory $SMPROGRAMS\$StartMenuGroup
-    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\$(^Name).lnk" $INSTDIR\kerrigan-qt.exe
-    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\Kerrigan (testnet, 64-bit).lnk" "$INSTDIR\kerrigan-qt.exe" "-testnet" "$INSTDIR\kerrigan-qt.exe" 1
+    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\$(^Name).lnk" $INSTDIR\kerrigan-qt
+    CreateShortcut "$SMPROGRAMS\$StartMenuGroup\Kerrigan (testnet, 64-bit).lnk" "$INSTDIR\kerrigan-qt" "-testnet" "$INSTDIR\kerrigan-qt" 1
     CreateShortcut "$SMPROGRAMS\$StartMenuGroup\Uninstall $(^Name).lnk" $INSTDIR\uninstall.exe
     !insertmacro MUI_STARTMENU_WRITE_END
     WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" DisplayName "$(^Name)"
-    WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" DisplayVersion "1.0.0"
+    WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" DisplayVersion "1.0.1"
     WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" Publisher "${COMPANY}"
     WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" URLInfoAbout "${URL}"
     WriteRegStr HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" DisplayIcon $INSTDIR\kerrigan-qt.exe
@@ -108,8 +108,8 @@ Section -post SEC0001
     WriteRegDWORD HKCU "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$(^Name)" NoRepair 1
     WriteRegStr HKCR "kerrigan" "URL Protocol" ""
     WriteRegStr HKCR "kerrigan" "" "URL:Kerrigan"
-    WriteRegStr HKCR "kerrigan\DefaultIcon" "" $INSTDIR\kerrigan-qt.exe
-    WriteRegStr HKCR "kerrigan\shell\open\command" "" '"$INSTDIR\kerrigan-qt.exe" "%1"'
+    WriteRegStr HKCR "kerrigan\DefaultIcon" "" $INSTDIR\kerrigan-qt
+    WriteRegStr HKCR "kerrigan\shell\open\command" "" '"$INSTDIR\kerrigan-qt" "%1"'
 SectionEnd
 
 # Macro for selecting uninstaller sections
@@ -127,7 +127,7 @@ done${UNSECTION_ID}:
 
 # Uninstaller sections
 Section /o -un.Main UNSEC0000
-    Delete /REBOOTOK $INSTDIR\kerrigan-qt.exe
+    Delete /REBOOTOK $INSTDIR\kerrigan-qt
     Delete /REBOOTOK $INSTDIR\COPYING.txt
     Delete /REBOOTOK $INSTDIR\readme.txt
     Delete /REBOOTOK $INSTDIR\kerrigan.conf

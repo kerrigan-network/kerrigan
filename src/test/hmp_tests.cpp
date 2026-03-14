@@ -1460,6 +1460,7 @@ BOOST_AUTO_TEST_CASE(seal_share_zk_proof_created)
     params.nHMPPrivilegeWindow = 100;
     params.nHMPMinBlocksSolved = 1;
     params.nHMPCommitmentOffset = 0;
+    params.nHMPMandatoryProofHeight = 1;  // force proof creation in test
 
     CHMPIdentity identity;
     fs::path testdir = m_node.args->GetDataDirNet();
@@ -1482,6 +1483,7 @@ BOOST_AUTO_TEST_CASE(seal_share_zk_proof_created)
         CHashWriter hw(SER_GETHASH, 0);
         hw << i;
         blockHash = hw.GetHash();
+        manager.OnNewBlock(blockHash, 10, uint256::ZERO);
         share = manager.SignBlock(blockHash, ALGO_X11);
     }
 

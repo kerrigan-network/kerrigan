@@ -380,7 +380,7 @@ std::vector<SecureString> MnemonicVerificationDialog::parseWords()
 
     // Parse words from secure mnemonic string
     QString mnemonicStr{QString::fromUtf8(m_mnemonic.data(), m_mnemonic.size())};
-    QStringList wordList = mnemonicStr.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    QStringList wordList = GUIUtil::SplitSkipEmptyParts(mnemonicStr, QRegularExpression("\\s+"));
 
     // Convert to SecureString vector for secure storage
     m_words.clear();
@@ -408,7 +408,7 @@ int MnemonicVerificationDialog::getWordCount() const
     // This avoids storing words in non-secure memory unnecessarily
     if (m_words.empty()) {
         QString mnemonicStr{QString::fromUtf8(m_mnemonic.data(), m_mnemonic.size())};
-        QStringList words = mnemonicStr.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        QStringList words = GUIUtil::SplitSkipEmptyParts(mnemonicStr, QRegularExpression("\\s+"));
         int count = words.size();
         // Zero before clearing (#662)
         mnemonicStr.fill(QChar(0));

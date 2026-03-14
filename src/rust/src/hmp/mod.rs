@@ -129,7 +129,16 @@ pub fn hmp_verify_proof(
         .map_err(|e| format!("proof deserialization failed: {}", e))?;
 
     let block_scalar = bytes_to_scalar(block_hash);
-    let commitment_scalar = bytes_to_scalar(commitment);
+
+    // The commitment is already a serialized Scalar (produced by scalar_to_bytes /
+    // to_repr in hmp_compute_commitment).  Deserialize it directly instead of
+    // hashing through SHA-512 like raw byte inputs, which would produce a
+    // completely different field element and cause every proof to fail (#1082).
+    let commitment_scalar = {
+        let repr = <Scalar as PrimeField>::Repr::from(*commitment);
+        Option::from(Scalar::from_repr(repr))
+            .ok_or_else(|| "invalid commitment scalar representation".to_string())?
+    };
 
     let public_inputs = vec![block_scalar, commitment_scalar];
 

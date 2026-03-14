@@ -1391,9 +1391,16 @@ static RPCHelpMan submitblock()
 {
     std::shared_ptr<CBlock> blockptr = std::make_shared<CBlock>();
     CBlock& block = *blockptr;
-    if (!DecodeHexBlk(block, request.params[0].get_str())) {
+    const std::string& hexdata = request.params[0].get_str();
+    if (!DecodeHexBlk(block, hexdata)) {
+        LogPrintf("submitblock: decode failed, hex length=%zu, first 40 hex chars: %s\n",
+                  hexdata.size(), hexdata.substr(0, 40));
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
     }
+
+    LogPrintf("submitblock: algo=%d nVersion=0x%08x nBits=0x%08x nTime=%u hash=%s hexlen=%zu vtx=%zu\n",
+              block.GetAlgo(), block.nVersion, block.nBits, block.nTime,
+              block.GetHash().ToString(), hexdata.size(), block.vtx.size());
 
     if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) {
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block does not start with a coinbase");

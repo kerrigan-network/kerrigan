@@ -372,9 +372,18 @@ std::optional<CAssembledSeal> CSealManager::GetSeal(const uint256& blockHash) co
 
 std::optional<CSealShare> CSealManager::SignBlock(const uint256& blockHash, int algo) const
 {
+    SignAttempt attempt;
+    attempt.algo = algo;
+    attempt.timestamp = GetTimeMicros() / 1000;
+
     if (!m_identity || !m_identity->IsValid()) {
+        attempt.failReason = "identity_invalid";
+        LOCK(cs);
+        m_signAttempts.push_back(attempt);
+        while (m_signAttempts.size() > MAX_SIGN_ATTEMPTS) m_signAttempts.pop_front();
         return std::nullopt;
     }
+    attempt.identityValid = true;
 
     // Capture session state under a single lock window. prevSealHash is captured
     // here and equivocation intent is pre-registered so there is no TOCTOU gap
@@ -402,12 +411,17 @@ std::optional<CSealShare> CSealManager::SignBlock(const uint256& blockHash, int 
                 }
             }
         }
+        attempt.height = height;
 
         if (height >= 0) {
             auto it = m_signedBlocks.find(height);
             if (it != m_signedBlocks.end() && it->second != blockHash) {
                 LogPrintf("HMP: EQUIVOCATION PREVENTED -- already signed block %s at height %d, refusing to sign %s\n",
                           it->second.ToString().substr(0, 16), height, blockHash.ToString().substr(0, 16));
+                attempt.equivocationBlocked = true;
+                attempt.failReason = "equivocation";
+                m_signAttempts.push_back(attempt);
+                while (m_signAttempts.size() > MAX_SIGN_ATTEMPTS) m_signAttempts.pop_front();
                 return std::nullopt;
             }
         }
@@ -441,24 +455,60 @@ std::optional<CSealShare> CSealManager::SignBlock(const uint256& blockHash, int 
     HMPPrivilegeTier tier = HMPPrivilegeTier::NEW; // default if no tracker
     if (m_privilege) {
         tier = m_privilege->GetTier(m_identity->GetPublicKey(), algo);
+        attempt.tier = static_cast<int>(tier);
+        LogPrintf("HMP: SignBlock tier=%d for identity=%s algo=%d block=%s\n",
+                  static_cast<int>(tier),
+                  m_identity->GetPublicKey().ToString().substr(0, 16),
+                  algo, blockHash.ToString().substr(0, 16));
         if (tier == HMPPrivilegeTier::UNKNOWN) {
+            attempt.failReason = "unknown_tier";
+            LOCK(cs);
+            m_signAttempts.push_back(attempt);
+            while (m_signAttempts.size() > MAX_SIGN_ATTEMPTS) m_signAttempts.pop_front();
             return std::nullopt; // Not eligible
         }
+    }
+
+    // Check commitment
+    if (m_commitments && m_commitments->IsEnabled()) {
+        attempt.committed = m_commitments->IsCommitted(m_identity->GetPublicKey(), attempt.height);
+        if (!attempt.committed) {
+            LogPrintf("HMP: SignBlock identity not committed at height %d\n", attempt.height);
+            // Don't abort here - commitment is checked in AddSealShare.
+            // But log it for diagnostics.
+        }
+    } else {
+        attempt.committed = true; // commitments disabled, always committed
     }
 
     // Compute VRF and check selection
     CBLSSignature vrfProof = m_identity->SignVRF(blockHash, prevSealHash);
     if (!vrfProof.IsValid()) {
+        LogPrintf("HMP: SignBlock VRF proof invalid for block %s\n",
+                  blockHash.ToString().substr(0, 16));
+        attempt.failReason = "vrf_invalid";
+        LOCK(cs);
+        m_signAttempts.push_back(attempt);
+        while (m_signAttempts.size() > MAX_SIGN_ATTEMPTS) m_signAttempts.pop_front();
         return std::nullopt;
     }
+    attempt.vrfValid = true;
 
     uint256 vrfHash = VRFOutputHash(vrfProof);
     int multiplier = GetVRFTierMultiplier(static_cast<int>(tier));
     if (!IsVRFSelected(vrfHash, multiplier)) {
-        LogPrint(BCLog::NET, "HMP: not VRF-selected for block %s (tier=%d)\n",
-                 blockHash.ToString().substr(0, 16), static_cast<int>(tier));
+        LogPrintf("HMP: not VRF-selected for block %s (tier=%d mult=%d)\n",
+                 blockHash.ToString().substr(0, 16), static_cast<int>(tier), multiplier);
+        attempt.failReason = "vrf_not_selected";
+        LOCK(cs);
+        m_signAttempts.push_back(attempt);
+        while (m_signAttempts.size() > MAX_SIGN_ATTEMPTS) m_signAttempts.pop_front();
         return std::nullopt; // Not selected for this round
     }
+    attempt.vrfSelected = true;
+
+    LogPrintf("HMP: VRF SELECTED for block %s (tier=%d) -- producing seal share\n",
+              blockHash.ToString().substr(0, 16), static_cast<int>(tier));
 
     CSealShare share;
     share.blockHash = blockHash;
@@ -474,8 +524,12 @@ std::optional<CSealShare> CSealManager::SignBlock(const uint256& blockHash, int 
     share.nTimestamp = GetTimeMicros() / 1000;
     share.vrfProof = vrfProof;
 
-    // Create zk-SNARK proof if Groth16 params are initialized
-    if (hmp_proof::IsInitialized()) {
+    // Create zk-SNARK proof if Groth16 params are initialized AND proofs are mandatory.
+    // When nHMPMandatoryProofHeight == 0 (or current height is below it), empty proofs
+    // are accepted by AddSealShare, so skip the expensive proof creation entirely.
+    // This also avoids a scalar round-trip bug in VerifyProof (#1082).
+    bool proofsMandatory = m_mandatoryProofHeight > 0 && attempt.height >= m_mandatoryProofHeight;
+    if (proofsMandatory && hmp_proof::IsInitialized()) {
         uint8_t sk_bytes[32] = {};
         if (m_identity->GetSecretKeyBytes(sk_bytes)) {
             // Bind proof to this block (block_hash) AND to the chain state (prevSealHash).
@@ -495,10 +549,43 @@ std::optional<CSealShare> CSealManager::SignBlock(const uint256& blockHash, int 
     }
 
     if (!share.signature.IsValid()) {
+        attempt.failReason = "signature_invalid";
+        LOCK(cs);
+        m_signAttempts.push_back(attempt);
+        while (m_signAttempts.size() > MAX_SIGN_ATTEMPTS) m_signAttempts.pop_front();
         return std::nullopt;
     }
 
+    attempt.shareAccepted = true;
+    attempt.failReason = "success";
+    {
+        LOCK(cs);
+        m_signAttempts.push_back(attempt);
+        while (m_signAttempts.size() > MAX_SIGN_ATTEMPTS) m_signAttempts.pop_front();
+    }
+
     return share;
+}
+
+std::vector<CSealManager::SignAttempt> CSealManager::GetSignAttempts() const
+{
+    LOCK(cs);
+    return {m_signAttempts.begin(), m_signAttempts.end()};
+}
+
+std::vector<CSealManager::SessionInfo> CSealManager::GetActiveSessions() const
+{
+    LOCK(cs);
+    std::vector<SessionInfo> result;
+    for (const auto& [hash, session] : m_sessions) {
+        SessionInfo info;
+        info.blockHash = hash;
+        info.height = session.blockHeight;
+        info.shareCount = session.shares.size();
+        info.assembled = session.assembled;
+        result.push_back(info);
+    }
+    return result;
 }
 
 HMPAcceptResult CSealManager::AddAssembledSeal(const CAssembledSeal& seal, int height)

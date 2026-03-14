@@ -76,6 +76,38 @@ private:
     // Equivocation detection: track which block hash we signed at each height
     mutable std::map<int, uint256> m_signedBlocks GUARDED_BY(cs);
 
+public:
+    /** Diagnostic: result of a SignBlock attempt */
+    struct SignAttempt {
+        int height{0};
+        int algo{0};
+        int tier{-1};          // -1=not checked, 0=UNKNOWN, 1=NEW, 2=ELDER
+        bool identityValid{false};
+        bool equivocationBlocked{false};
+        bool committed{false};
+        bool vrfValid{false};
+        bool vrfSelected{false};
+        bool shareAccepted{false};
+        std::string failReason;
+        int64_t timestamp{0};
+    };
+
+    /** Get recent sign attempt history */
+    std::vector<SignAttempt> GetSignAttempts() const;
+
+    /** Get active session count and share counts */
+    struct SessionInfo {
+        uint256 blockHash;
+        int height{0};
+        size_t shareCount{0};
+        bool assembled{false};
+    };
+    std::vector<SessionInfo> GetActiveSessions() const;
+
+private:
+    static constexpr size_t MAX_SIGN_ATTEMPTS = 20;
+    mutable std::deque<SignAttempt> m_signAttempts GUARDED_BY(cs);
+
     // Worker thread
     std::thread m_thread;
     std::atomic<bool> m_shutdown{false};

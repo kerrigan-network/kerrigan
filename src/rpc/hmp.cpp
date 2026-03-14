@@ -11,8 +11,10 @@
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
+#include <hmp/commitment.h>
 #include <hmp/identity.h>
 #include <hmp/privilege.h>
+#include <hmp/seal_manager.h>
 #include <univalue.h>
 #include <validation.h>
 
@@ -226,12 +228,173 @@ static RPCHelpMan getsealstatus()
     };
 }
 
+static const char* AlgoToString(int algo)
+{
+    switch (algo) {
+    case ALGO_X11: return "x11";
+    case ALGO_KAWPOW: return "kawpow";
+    case ALGO_EQUIHASH_200: return "equihash200";
+    case ALGO_EQUIHASH_192: return "equihash192";
+    default: return "unknown";
+    }
+}
+
+static RPCHelpMan gethmpdiagnostics()
+{
+    return RPCHelpMan{"gethmpdiagnostics",
+        "Returns detailed HMP diagnostic information including sign attempt history,\n"
+        "commitment status, and active seal sessions. Use this to debug why sealing\n"
+        "is not working.\n",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "identity", "this daemon's HMP public key"},
+                {RPCResult::Type::BOOL, "identity_valid", "whether identity is initialized"},
+                {RPCResult::Type::OBJ, "commitment", "commitment status for this identity",
+                    {
+                        {RPCResult::Type::BOOL, "committed", "whether identity is committed"},
+                        {RPCResult::Type::BOOL, "enabled", "whether commitment system is enabled"},
+                    }
+                },
+                {RPCResult::Type::OBJ, "tiers", "per-algo tier and privilege records",
+                    {
+                        {RPCResult::Type::OBJ, "algo_name", "tier info for this algo",
+                            {
+                                {RPCResult::Type::STR, "tier", "privilege tier"},
+                                {RPCResult::Type::NUM, "blocks_solved", "blocks solved in window"},
+                                {RPCResult::Type::NUM, "seal_participations", "seal signatures in window"},
+                                {RPCResult::Type::NUM, "first_seen_height", "when first seen"},
+                            }
+                        },
+                    }
+                },
+                {RPCResult::Type::ARR, "sign_attempts", "recent SignBlock attempt results",
+                    {{RPCResult::Type::OBJ, "", "",
+                        {
+                            {RPCResult::Type::NUM, "height", "block height"},
+                            {RPCResult::Type::STR, "algo", "mining algorithm"},
+                            {RPCResult::Type::STR, "result", "outcome"},
+                        }
+                    }}
+                },
+                {RPCResult::Type::ARR, "sessions", "active seal sessions",
+                    {{RPCResult::Type::OBJ, "", "",
+                        {
+                            {RPCResult::Type::NUM, "height", "block height"},
+                            {RPCResult::Type::NUM, "shares", "number of shares collected"},
+                        }
+                    }}
+                },
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("gethmpdiagnostics", "")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        {
+            UniValue result(UniValue::VOBJ);
+
+            // Identity
+            if (g_hmp_identity && g_hmp_identity->IsValid()) {
+                result.pushKV("identity", g_hmp_identity->GetPublicKey().ToString());
+                result.pushKV("identity_valid", true);
+            } else {
+                result.pushKV("identity", "not_initialized");
+                result.pushKV("identity_valid", false);
+            }
+
+            // Commitment status
+            UniValue commitObj(UniValue::VOBJ);
+            if (g_hmp_commitments) {
+                commitObj.pushKV("enabled", g_hmp_commitments->IsEnabled());
+                if (g_hmp_identity && g_hmp_identity->IsValid()) {
+                    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+                    int tipHeight;
+                    {
+                        LOCK(cs_main);
+                        tipHeight = chainman.ActiveChain().Height();
+                    }
+                    bool committed = g_hmp_commitments->IsCommitted(g_hmp_identity->GetPublicKey(), tipHeight);
+                    commitObj.pushKV("committed", committed);
+                    commitObj.pushKV("has_commitment", g_hmp_commitments->HasCommitment(g_hmp_identity->GetPublicKey()));
+                    commitObj.pushKV("checked_at_height", tipHeight);
+                } else {
+                    commitObj.pushKV("committed", false);
+                }
+            } else {
+                commitObj.pushKV("enabled", false);
+                commitObj.pushKV("committed", true); // disabled means always committed
+            }
+            result.pushKV("commitment", commitObj);
+
+            // Per-algo tier and records
+            UniValue tiersObj(UniValue::VOBJ);
+            if (g_hmp_privilege && g_hmp_identity && g_hmp_identity->IsValid()) {
+                const auto& pk = g_hmp_identity->GetPublicKey();
+                const int algos[] = {ALGO_X11, ALGO_KAWPOW, ALGO_EQUIHASH_200, ALGO_EQUIHASH_192};
+                const char* names[] = {"x11", "kawpow", "equihash200", "equihash192"};
+                for (int i = 0; i < 4; i++) {
+                    UniValue algoObj(UniValue::VOBJ);
+                    algoObj.pushKV("tier", TierToString(g_hmp_privilege->GetTier(pk, algos[i])));
+                    auto rec = g_hmp_privilege->GetRecord(pk, algos[i]);
+                    algoObj.pushKV("blocks_solved", rec.blocks_solved);
+                    algoObj.pushKV("seal_participations", rec.seal_participations);
+                    algoObj.pushKV("first_seen_height", rec.first_seen_height);
+                    tiersObj.pushKV(names[i], algoObj);
+                }
+                tiersObj.pushKV("window_height", g_hmp_privilege->GetTipHeight());
+            }
+            result.pushKV("tiers", tiersObj);
+
+            // Sign attempts
+            UniValue attemptsArr(UniValue::VARR);
+            if (g_seal_manager) {
+                auto attempts = g_seal_manager->GetSignAttempts();
+                for (const auto& a : attempts) {
+                    UniValue obj(UniValue::VOBJ);
+                    obj.pushKV("height", a.height);
+                    obj.pushKV("algo", AlgoToString(a.algo));
+                    obj.pushKV("identity_valid", a.identityValid);
+                    obj.pushKV("tier", a.tier);
+                    obj.pushKV("committed", a.committed);
+                    obj.pushKV("equivocation_blocked", a.equivocationBlocked);
+                    obj.pushKV("vrf_valid", a.vrfValid);
+                    obj.pushKV("vrf_selected", a.vrfSelected);
+                    obj.pushKV("share_produced", a.shareAccepted);
+                    obj.pushKV("result", a.failReason);
+                    attemptsArr.push_back(obj);
+                }
+            }
+            result.pushKV("sign_attempts", attemptsArr);
+
+            // Active sessions
+            UniValue sessionsArr(UniValue::VARR);
+            if (g_seal_manager) {
+                auto sessions = g_seal_manager->GetActiveSessions();
+                for (const auto& s : sessions) {
+                    UniValue obj(UniValue::VOBJ);
+                    obj.pushKV("blockhash", s.blockHash.ToString().substr(0, 16));
+                    obj.pushKV("height", s.height);
+                    obj.pushKV("shares", (uint64_t)s.shareCount);
+                    obj.pushKV("assembled", s.assembled);
+                    sessionsArr.push_back(obj);
+                }
+            }
+            result.pushKV("sessions", sessionsArr);
+
+            return result;
+        }
+    };
+}
+
 void RegisterHMPRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"hmp", &gethmpinfo},
         {"hmp", &gethmpprivilegedset},
         {"hmp", &getsealstatus},
+        {"hmp", &gethmpdiagnostics},
     };
     for (const auto& c : commands) {
         t.appendCommand(c.name, &c);
