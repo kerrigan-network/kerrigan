@@ -118,7 +118,7 @@ static constexpr int32_t MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT = 4;
 /** Timeout for (unprotected) outbound peers to sync to our chainwork */
 static constexpr auto CHAIN_SYNC_TIMEOUT{20min};
 /** How frequently to check for stale tips */
-static constexpr auto STALE_CHECK_INTERVAL{120s}; // 2 minutes (= nPowTargetSpacing)
+static constexpr auto STALE_CHECK_INTERVAL{120s}; // #734: 2 minutes (= nPowTargetSpacing)
 /** How frequently to check for extra outbound peers and disconnect */
 static constexpr auto EXTRA_PEER_CHECK_INTERVAL{45s};
 /** Minimum time an outbound-peer-eviction candidate must be connected for, in order to evict */
@@ -138,10 +138,12 @@ static const unsigned int MAX_LOCATOR_SZ = 101;
 /** Number of blocks that can be requested at any given time from a single peer. */
 static const int MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16;
 /** Default time during which a peer must stall block download progress before being disconnected.
- * the actual timeout is increased temporarily if peers are disconnected for hitting the timeout */
-static constexpr auto BLOCK_STALLING_TIMEOUT_DEFAULT{2s};
-/** Maximum timeout for stalling block download. */
-static constexpr auto BLOCK_STALLING_TIMEOUT_MAX{64s};
+ * the actual timeout is increased temporarily if peers are disconnected for hitting the timeout.
+ * Kerrigan: raised from 2s to 30s because Equihash verification is CPU-bound (30-60s on consumer hardware). */
+static constexpr auto BLOCK_STALLING_TIMEOUT_DEFAULT{30s};
+/** Maximum timeout for stalling block download.
+ * Kerrigan: raised from 64s to 300s for Equihash IBD on slower machines. */
+static constexpr auto BLOCK_STALLING_TIMEOUT_MAX{300s};
 /** Maximum depth of blocks we're willing to serve as compact blocks to peers
  *  when requested. For older blocks, a regular BLOCK response will be sent. */
 static const int MAX_CMPCTBLOCK_DEPTH = 5;
@@ -407,16 +409,16 @@ struct Peer {
     /** Time of the last getblocks message from this peer */
     std::atomic<std::chrono::microseconds> m_last_getblocks_timestamp{0us};
 
-    /** Per-peer HMP message dedup */
+    /** Per-peer HMP message dedup (#531) */
     Mutex m_hmp_seen_mutex;
     std::set<uint256> m_hmp_seen GUARDED_BY(m_hmp_seen_mutex);
-    std::deque<uint256> m_hmp_seen_order GUARDED_BY(m_hmp_seen_mutex);  // FIFO eviction order
+    std::deque<uint256> m_hmp_seen_order GUARDED_BY(m_hmp_seen_mutex);  // #690: FIFO eviction order
     static constexpr size_t MAX_HMP_SEEN{2000};
 
     bool HMPMarkSeen(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(!m_hmp_seen_mutex) {
         LOCK(m_hmp_seen_mutex);
         if (m_hmp_seen.count(hash)) return false;
-        // FIFO eviction instead of full-clear to prevent relay replay window
+        // #690: FIFO eviction instead of full-clear to prevent relay replay window
         while (m_hmp_seen.size() >= MAX_HMP_SEEN) {
             m_hmp_seen.erase(m_hmp_seen_order.front());
             m_hmp_seen_order.pop_front();
@@ -840,23 +842,23 @@ private:
     // TODO: consider further refactoring ChainlockHandler to NetHandler to avoid boiler code in PeerManager
     chainlock::ChainlockHandler& m_clhandler;
 
-    /** Per-IP cooldown for GETMNLISTDIFF requests (keyed by CNetAddr) */
+    /** Per-IP cooldown for GETMNLISTDIFF requests (#510: keyed by CNetAddr) */
     std::map<CNetAddr, std::chrono::seconds> m_mnlistdiff_last_request GUARDED_BY(cs_main);
     static constexpr std::chrono::seconds MNLISTDIFF_COOLDOWN{5};
 
-    /** Per-IP cooldown for GETQUORUMROTATIONINFO requests */
+    /** Per-IP cooldown for GETQUORUMROTATIONINFO requests (#436, #510) */
     std::map<CNetAddr, std::chrono::seconds> m_qrinfo_last_request GUARDED_BY(cs_main);
     static constexpr std::chrono::seconds QRINFO_COOLDOWN{5};
 
     /** Per-node rate-limit maps for HMP messages. Uses NodeId to avoid
-     *  collapsing distinct nodes behind NAT/Tor. Per-CNetAddr aggregate
-     *  limits prevent reconnect-based bypass. */
+     *  collapsing distinct nodes behind NAT/Tor (#513). Per-CNetAddr aggregate
+     *  limits prevent reconnect-based bypass (#489). */
     Mutex m_hmp_rate_mutex;
     std::map<NodeId, int64_t> m_sealasm_last_request GUARDED_BY(m_hmp_rate_mutex);
     std::map<NodeId, int64_t> m_sealshare_last_request GUARDED_BY(m_hmp_rate_mutex);
     std::map<NodeId, int64_t> m_pubkeycommit_last_request GUARDED_BY(m_hmp_rate_mutex);
     /** Per-IP per-message-type aggregate: prevents reconnect-based bypass without
-     *  cross-message-type suppression. */
+     *  cross-message-type suppression (#603). */
     std::map<CNetAddr, int64_t> m_hmp_ip_sealshare GUARDED_BY(m_hmp_rate_mutex);
     std::map<CNetAddr, int64_t> m_hmp_ip_sealasm GUARDED_BY(m_hmp_rate_mutex);
     std::map<CNetAddr, int64_t> m_hmp_ip_pubkeycommit GUARDED_BY(m_hmp_rate_mutex);
@@ -1464,7 +1466,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // Make sure pindexBestKnownBlock is up to date, we'll need it.
     ProcessBlockAvailability(peer.m_id);
 
-    if (state->pindexBestKnownBlock == nullptr || state->pindexBestKnownBlock->nChainWork < m_chainman.ActiveChain().Tip()->nChainWork || state->pindexBestKnownBlock->nChainWork < nMinimumChainWork) {
+    if (state->pindexBestKnownBlock == nullptr || state->pindexBestKnownBlock->nChainSealWork < m_chainman.ActiveChain().Tip()->nChainSealWork || state->pindexBestKnownBlock->nChainWork < nMinimumChainWork) {
         // This peer has nothing interesting.
         return;
     }
@@ -1835,7 +1837,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node) {
         m_sealasm_last_request.erase(nodeid);
         m_pubkeycommit_last_request.erase(nodeid);
 
-        // Prune stale per-IP HMP rate-limit entries
+        // Prune stale per-IP HMP rate-limit entries (#1057)
         const int64_t nNow = GetTime<std::chrono::microseconds>().count();
         static constexpr int64_t IP_RATE_STALE_EXPIRY = 3600'000'000; // 3600s in microseconds
         auto prune = [&](std::map<CNetAddr, int64_t>& m) {
@@ -3252,7 +3254,7 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom,
     // thus always subject to eviction under the bad/lagging chain logic.
     // See ChainSyncTimeoutState.
     if (!pfrom.fDisconnect && pfrom.IsFullOutboundConn() && nodestate->pindexBestKnownBlock != nullptr) {
-        if (m_outbound_peers_with_protect_from_disconnect < MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT && nodestate->pindexBestKnownBlock->nChainWork >= m_chainman.ActiveChain().Tip()->nChainWork && !nodestate->m_chain_sync.m_protect) {
+        if (m_outbound_peers_with_protect_from_disconnect < MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT && nodestate->pindexBestKnownBlock->nChainSealWork >= m_chainman.ActiveChain().Tip()->nChainSealWork && !nodestate->m_chain_sync.m_protect) {
             LogPrint(BCLog::NET, "Protecting outbound peer=%d from eviction\n", pfrom.GetId());
             nodestate->m_chain_sync.m_protect = true;
             ++m_outbound_peers_with_protect_from_disconnect;
@@ -3966,7 +3968,7 @@ void PeerManagerImpl::ProcessMessage(
 
         // HMP: push pending pubkey commitments to new outbound peers only.
         // Inbound connections are untrusted; pushing unsolicited data to them
-        // allows connection-flood amplification.
+        // allows connection-flood amplification (#490).
         // Don't push pkcommits during IBD: the BLS serialization scheme depends
         // on chain tip height, so a syncing node would send legacy-encoded objects
         // that post-V19 peers can't deserialize.
@@ -4219,7 +4221,7 @@ void PeerManagerImpl::ProcessMessage(
     }
 
     if (msg_type == NetMsgType::INV) {
-        // Read count before allocating to reject oversized messages pre-deserialization
+        // Read count before allocating to reject oversized messages pre-deserialization (#902)
         uint64_t nCount = ReadCompactSize(vRecv);
         if (nCount > MAX_INV_SZ) {
             Misbehaving(pfrom.GetId(), 20, strprintf("inv message size = %u", nCount));
@@ -4328,7 +4330,7 @@ void PeerManagerImpl::ProcessMessage(
     }
 
     if (msg_type == NetMsgType::GETDATA) {
-        // Read count before allocating to reject oversized messages pre-deserialization
+        // Read count before allocating to reject oversized messages pre-deserialization (#902)
         uint64_t nCount = ReadCompactSize(vRecv);
         if (nCount > MAX_INV_SZ) {
             Misbehaving(pfrom.GetId(), 20, strprintf("getdata message size = %u", nCount));
@@ -4862,7 +4864,7 @@ void PeerManagerImpl::ProcessMessage(
                 PartiallyDownloadedBlock tempBlock(&m_mempool);
                 ReadStatus status = tempBlock.InitData(cmpctblock, vExtraTxnForCompact);
                 if (status == READ_STATUS_INVALID) {
-                    // Score peers sending structurally invalid compact blocks
+                    // #752: Score peers sending structurally invalid compact blocks
                     Misbehaving(pfrom.GetId(), 100, "invalid compact block/unrequested");
                     return;
                 } else if (status != READ_STATUS_OK) {
@@ -5293,7 +5295,7 @@ void PeerManagerImpl::ProcessMessage(
         CGetSimplifiedMNListDiff cmd;
         vRecv >> cmd;
 
-        // Removed process-global 1-second rate limiter that allowed a single
+        // #1044: Removed process-global 1-second rate limiter that allowed a single
         // peer to starve all others. Per-peer cooldown below is sufficient.
 
         LOCK(cs_main);
@@ -5353,12 +5355,12 @@ void PeerManagerImpl::ProcessMessage(
             return;
         }
 
-        // Removed process-global 1-second rate limiter (cross-peer starvation).
+        // #1044: Removed process-global 1-second rate limiter (cross-peer starvation).
         // Per-peer cooldown below is sufficient.
 
         LOCK(cs_main);
 
-        // Rate limit: 5s cooldown per peer, matching GETMNLISTDIFF
+        // Rate limit: 5s cooldown per peer, matching GETMNLISTDIFF (#436)
         {
             auto now = GetTime<std::chrono::seconds>();
             auto& last = m_qrinfo_last_request[pfrom.addr];
@@ -5387,7 +5389,7 @@ void PeerManagerImpl::ProcessMessage(
         return;
     }
     if (msg_type == NetMsgType::NOTFOUND) {
-        // Read count before allocating to reject oversized messages pre-deserialization
+        // Read count before allocating to reject oversized messages pre-deserialization (#902)
         uint64_t nCount = ReadCompactSize(vRecv);
         if (nCount > MAX_INV_SZ) {
             Misbehaving(pfrom.GetId(), 20, strprintf("notfound message size = %u", nCount));
@@ -5456,7 +5458,7 @@ void PeerManagerImpl::ProcessMessage(
 
         if (msg_type == NetMsgType::CLSIG) {
             if (m_chainlocks.IsEnabled()) {
-                // Local try/catch for deserialization (matches HMP handler pattern)
+                // #733: Local try/catch for deserialization (matches HMP handler pattern)
                 chainlock::ChainLockSig clsig;
                 try {
                     vRecv >> clsig;
@@ -5475,7 +5477,7 @@ void PeerManagerImpl::ProcessMessage(
         if (msg_type == NetMsgType::SEALSHARE) {
             // Skip HMP messages during IBD; state depends on chain tip context.
             if (m_chainman.ActiveChainstate().IsInitialBlockDownload()) return;
-            // Skip before Stage 3 -- seals are not embedded in blocks yet
+            // Skip before Stage 3 — seals are not embedded in blocks yet (#1084)
             {
                 LOCK(cs_main);
                 if (m_chainman.ActiveChain().Height() < m_chainman.GetParams().GetConsensus().nHMPStage3Height) return;
@@ -5528,7 +5530,7 @@ void PeerManagerImpl::ProcessMessage(
         if (msg_type == NetMsgType::SEALASM) {
             // Skip HMP messages during IBD.
             if (m_chainman.ActiveChainstate().IsInitialBlockDownload()) return;
-            // Skip before Stage 3 -- seals are not embedded in blocks yet
+            // Skip before Stage 3 — seals are not embedded in blocks yet (#1084)
             {
                 LOCK(cs_main);
                 if (m_chainman.ActiveChain().Height() < m_chainman.GetParams().GetConsensus().nHMPStage3Height) return;
@@ -5584,7 +5586,7 @@ void PeerManagerImpl::ProcessMessage(
         if (msg_type == NetMsgType::PUBKEYCOMMIT) {
             // Skip HMP messages during IBD.
             if (m_chainman.ActiveChainstate().IsInitialBlockDownload()) return;
-            // Require active SPORK_25 and spork manager
+            // Require active SPORK_25 and spork manager (#1069)
             if (!g_sporkman || !g_sporkman->IsSporkActive(SPORK_25_HMP_ENABLED)) return;
             if (g_hmp_commit_pool) {
                 // Deserialize before consuming rate limit; malformed messages
@@ -5770,13 +5772,13 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
         // their chain has more work than ours, we should sync to it,
         // unless it's invalid, in which case we should find that out and
         // disconnect from them elsewhere).
-        if (state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainWork >= m_chainman.ActiveChain().Tip()->nChainWork) {
+        if (state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainSealWork >= m_chainman.ActiveChain().Tip()->nChainSealWork) {
             if (state.m_chain_sync.m_timeout != 0s) {
                 state.m_chain_sync.m_timeout = 0s;
                 state.m_chain_sync.m_work_header = nullptr;
                 state.m_chain_sync.m_sent_getheaders = false;
             }
-        } else if (state.m_chain_sync.m_timeout == 0s || (state.m_chain_sync.m_work_header != nullptr && state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainWork >= state.m_chain_sync.m_work_header->nChainWork)) {
+        } else if (state.m_chain_sync.m_timeout == 0s || (state.m_chain_sync.m_work_header != nullptr && state.pindexBestKnownBlock != nullptr && state.pindexBestKnownBlock->nChainSealWork >= state.m_chain_sync.m_work_header->nChainSealWork)) {
             // Our best block known by this peer is behind our tip, and we're either noticing
             // that for the first time, OR this peer was able to catch up to some earlier point
             // where we checked against our tip.
@@ -5955,7 +5957,7 @@ void PeerManagerImpl::CheckForStaleTipAndEvictPeers()
         m_initial_sync_finished = true;
     }
 
-    // Purge stale rate-limit entries
+    // Purge stale rate-limit entries (#498, #510)
     {
         LOCK(m_hmp_rate_mutex);
         int64_t nNow = GetTime<std::chrono::microseconds>().count();

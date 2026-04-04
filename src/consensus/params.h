@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2021 The Bitcoin Core developers
 // Copyright (c) 2014-2025 The Dash Core developers
-// Copyright (c) 2026 Kerrigan Network
+// Copyright (c) 2026 The Kerrigan developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -155,6 +155,9 @@ struct Params {
     int WithdrawalsHeight;
     /** Block height at which Sapling (zk-SNARK shielded transactions) becomes active */
     int SaplingHeight;
+    /** Block height at which SaplingDB consistency checks become hard rejections.
+     *  Below this height, mismatches are logged but tolerated (pre-v8 compat). */
+    int nSaplingStrictnessHeight{0};
     /** Block height at which Hivemind Protocol becomes active */
     int HMPHeight;
     /** 4-stage HMP bootstrap activation heights.
@@ -207,20 +210,21 @@ struct Params {
     uint256 powLimit;
     /** Per-algorithm difficulty floors (minimum difficulty / maximum target).
      * Calibrated to cheapest available hardware so 1 unit produces ~1 block/480s:
-     *   X11:             Antminer D3 (19.3 GH/s)  = target ~2^213
-     *   KawPoW:          GTX 1060 (10 MH/s)       = target ~2^224
-     *   Equihash(200,9): Z9 Mini (13 kSol/s)      = target ~2^233
-     *   Equihash(192,7): GTX 1060 (~10 Sol/s)     = target ~2^244
+     *   X11:             Antminer D3 (15 GH/s)    = target ~2^213
+     *   KawPoW:          GTX 1080 (18 MH/s)       = target ~2^224
+     *   Equihash(200,9): Z9 Mini (17.5 kSol/s)    = target ~2^233
+     *   Equihash(192,7): GTX 1080 (30 Sol/s)      = target ~2^244
      * powLimit is set to the easiest per-algo floor for CheckProofOfWork().
      * Set all entries to powLimit on test networks (no per-algo floors).
      */
     uint256 powLimitAlgo[4 /* NUM_ALGOS */];
-    /** Height-activated per-algo difficulty floor.
+    /** Height-activated per-algo difficulty floor (#851).
      * After nDiffFloorHeight, the DAA output is clamped to powLimitFloorAlgo[]
      * instead of the permissive powLimitAlgo[]. This allows testnet to start
      * with easy powLimits for CPU mining but switch to hardware-calibrated
-     * floors once real miners connect. nDiffFloorHeight=0 disables (mainnet
-     * already uses tight powLimitAlgo[] directly). */
+     * floors once real miners connect. nDiffFloorHeight=0 disables floors.
+     * Mainnet activates at block 14000, testnet at block 2260.
+     * Also lowers the algo-gap recovery threshold from 240 to 40 blocks. */
     int nDiffFloorHeight{0};
     uint256 powLimitFloorAlgo[4 /* NUM_ALGOS */];
     bool fPowAllowMinDifficultyBlocks;

@@ -26,7 +26,7 @@ unsigned int PowLimitForAlgo(const Consensus::Params& params, int algo)
 }
 
 // Return the effective powLimit for an algo, applying the tighter difficulty
-// floor when the chain has passed the activation height.
+// floor when the chain has passed the activation height (#851).
 static unsigned int EffectivePowLimitForAlgo(const Consensus::Params& params, int algo, int nHeight)
 {
     if (params.nDiffFloorHeight > 0 && nHeight >= params.nDiffFloorHeight &&
@@ -56,7 +56,7 @@ const CBlockIndex* GetLastBlockIndexForAlgo(const CBlockIndex* pindex, const Con
     return nullptr;
 }
 
-// Hivemind per-algo DAA (DigiByte-derived).
+// Hivemind per-algo DAA (DigiByte-derived). See #382 for time-warp analysis.
 unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo)
 {
     const int nAveragingInterval = 10;
@@ -85,11 +85,20 @@ unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& pa
         return EffectivePowLimitForAlgo(params, algo, nNextHeight);
     }
 
-    // If no block for this algo has been mined in a very long time,
+    // #524: If no block for this algo has been mined in a very long time,
     // the stored difficulty is stale and may be unreachable. Reset to
     // powLimit so the algo can recover.
+    //
+    // Pre-nDiffFloorHeight: 240 blocks (4*10*6) — ~80 hours at 2min blocks
+    // when only one algo is mining. Too slow under hashrate volatility.
+    // Post-nDiffFloorHeight: 40 blocks (4*10*1) — ~1.3 hours. Equals one
+    // full averaging window (NUM_ALGOS * nAveragingInterval), the minimum
+    // safe value before the DAA oscillates. See #970.
+    const int nGapThreshold = (nNextHeight >= params.nDiffFloorHeight && params.nDiffFloorHeight > 0)
+        ? NUM_ALGOS * nAveragingInterval       // 40 blocks post-activation
+        : NUM_ALGOS * nAveragingInterval * 6;  // 240 blocks pre-activation
     int algoGap = pindexLast->nHeight - pindexPrevAlgo->nHeight;
-    if (algoGap >= NUM_ALGOS * nAveragingInterval * 6) {
+    if (algoGap >= nGapThreshold) {
         return EffectivePowLimitForAlgo(params, algo, nNextHeight);
     }
 
@@ -143,9 +152,9 @@ unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& pa
         bnNew = UintToArith256(params.powLimitAlgo[algo]);
     }
 
-    // Height-activated difficulty floor: clamp DAA output to
+    // Height-activated difficulty floor (#851): clamp DAA output to
     // hardware-calibrated floor after activation height.
-    // Use nNextHeight (the block being mined), not tip height.
+    // Use nNextHeight (the block being mined), not tip height (#876).
     if (params.nDiffFloorHeight > 0 && nNextHeight >= params.nDiffFloorHeight &&
         algo >= 0 && algo < NUM_ALGOS) {
         const arith_uint256 bnFloor = UintToArith256(params.powLimitFloorAlgo[algo]);

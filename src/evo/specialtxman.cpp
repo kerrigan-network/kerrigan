@@ -592,8 +592,6 @@ bool CSpecialTxProcessor::ProcessSpecialTxsInBlock(const CBlock& block, const CB
 
             const auto ptr_tx = block.vtx[i];
             TxValidationState tx_state;
-            // At this moment CheckSpecialTx() may fail by 2 possible ways:
-            // consensus failures and "TX_BAD_SPECIAL"
             if (!CheckSpecialTxInner(m_dmnman, m_qsnapman, m_chainman, m_qman, *ptr_tx, pindex->pprev, view, indexes,
                                      fCheckCbTxMerkleRoots, tx_state)) {
                 assert(tx_state.GetResult() == TxValidationResult::TX_CONSENSUS || tx_state.GetResult() == TxValidationResult::TX_BAD_SPECIAL);
@@ -606,27 +604,23 @@ bool CSpecialTxProcessor::ProcessSpecialTxsInBlock(const CBlock& block, const CB
         nTimeLoop += nTime3 - nTime2;
         LogPrint(BCLog::BENCHMARK, "      - Loop: %.2fms [%.2fs]\n", 0.001 * (nTime3 - nTime2), nTimeLoop * 0.000001);
 
-        // Skip Sapling DB operations during VerifyDB (level-4 reconnect).
-        // Sapling writes directly to its own LevelDB (no EvoDB-style transaction
-        // rollback), so we must avoid any Sapling state changes during verification
-        // to prevent permanent corruption on crash.
+        // Skip Sapling DB during VerifyDB -- writes to LevelDB without rollback
         if (!fVerifyOnly) {
-            // Verify Sapling state consistency before processing.
-            // Tolerate SaplingDB being ahead of coin-state: after a crash where
-            // SaplingDB committed but CoinsTip did not, the rollforward loop
-            // re-processes blocks that SaplingDB already has. ProcessBlock
-            // handles this idempotently.
+            // Tolerate SaplingDB ahead of coin-state after crash
             if (sapling::IsSaplingActive(m_consensus_params, pindex->nHeight) && pindex->pprev) {
                 if (!m_sapling_state.VerifyBestBlock(pindex->pprev->GetBlockHash())) {
                     int saplingHeight = m_sapling_state.GetBestBlockHeight();
                     if (saplingHeight < pindex->nHeight) {
-                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-sapling-state-inconsistency",
-                                             "Sapling state inconsistency detected, you must reindex");
+                        if (pindex->nHeight >= m_consensus_params.nSaplingStrictnessHeight) {
+                            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-sapling-state-inconsistency",
+                                                 "Sapling state inconsistency detected, you must reindex");
+                        }
+                        LogPrintf("WARNING: SaplingDB mismatch at height %d (saplingHeight=%d), tolerating pre-v8 block\n",
+                                  pindex->nHeight, saplingHeight);
                     }
                 }
             }
 
-            // Process Sapling nullifiers and commitment tree
             if (!m_sapling_state.ProcessBlock(block, pindex, m_consensus_params, fJustCheck)) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-sapling-state",
                                      "Failed to process Sapling state");
@@ -731,8 +725,7 @@ bool CSpecialTxProcessor::ProcessSpecialTxsInBlock(const CBlock& block, const CB
                  nTimeMnehf * 0.000001);
 
         if (DeploymentActiveAfter(pindex, m_consensus_params, Consensus::DEPLOYMENT_V19) && bls::bls_legacy_scheme.load()) {
-            // NOTE: The block next to the activation is the one that is using new rules.
-            // V19 just activated, so we must switch to the new rules here.
+            // V19 just activated -- switch to basic BLS scheme
             bls::bls_legacy_scheme.store(false);
             LogPrintf("CSpecialTxProcessor::%s -- bls_legacy_scheme=%d\n", __func__, bls::bls_legacy_scheme.load());
         }
@@ -741,7 +734,6 @@ bool CSpecialTxProcessor::ProcessSpecialTxsInBlock(const CBlock& block, const CB
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "failed-procspectxsinblock");
     }
 
-    // Success: keep the scheme value (including any V19 toggle).
     schemeGuard.commit();
     return true;
 }
@@ -751,14 +743,11 @@ bool CSpecialTxProcessor::UndoSpecialTxsInBlock(const CBlock& block, const CBloc
 {
     AssertLockHeld(::cs_main);
 
-    // RAII guard: restores bls_legacy_scheme on any failure/exception path.
-    // On success we commit() so the V19 scheme revert (if any) is kept.
     bls::BLSSchemeGuard schemeGuard;
 
     try {
         if (!DeploymentActiveAt(*pindex, m_consensus_params, Consensus::DEPLOYMENT_V19) && !bls::bls_legacy_scheme.load()) {
-            // NOTE: The block next to the activation is the one that is using new rules.
-            // Removing the activation block here, so we must switch back to the old rules.
+            // Undoing V19 activation block -- revert to legacy scheme
             bls::bls_legacy_scheme.store(true);
             LogPrintf("CSpecialTxProcessor::%s -- bls_legacy_scheme=%d\n", __func__, bls::bls_legacy_scheme.load());
         }
@@ -775,19 +764,9 @@ bool CSpecialTxProcessor::UndoSpecialTxsInBlock(const CBlock& block, const CBloc
             return false;
         }
 
-        // Skip Sapling DB writes during VerifyDB (level-3 disconnect).
-        // VerifyDB operates on an in-memory UTXO cache that is discarded, but
-        // Sapling writes directly to its own LevelDB with fSync=true.  If the
-        // node crashes between a level-3 disconnect and a level-4 reconnect,
-        // the Sapling DB would be permanently corrupted (nullifiers erased,
-        // tree roots lost) while UTXO state is unchanged.  Skipping Sapling
-        // undo keeps the Sapling LevelDB consistent with the actual chain tip.
+        // Skip Sapling DB during VerifyDB -- writes to LevelDB without rollback
         if (!fVerifyOnly) {
-            // Verify Sapling state consistency before undo.
-            // Tolerate SaplingDB being ahead: after a crash where SaplingDB
-            // committed but CoinsTip did not, the rollback loop may disconnect
-            // blocks that SaplingDB already unwound past. UndoBlock handles
-            // this idempotently (mirrors connect-path fix).
+            // Tolerate SaplingDB ahead after crash (#1012, mirrors #1007)
             if (sapling::IsSaplingActive(m_consensus_params, pindex->nHeight)) {
                 if (!m_sapling_state.VerifyBestBlock(pindex->GetBlockHash())) {
                     int saplingHeight = m_sapling_state.GetBestBlockHeight();
@@ -798,17 +777,14 @@ bool CSpecialTxProcessor::UndoSpecialTxsInBlock(const CBlock& block, const CBloc
                 }
             }
 
-            // Undo Sapling state last (reverse of ProcessBlock connect order)
             if (!m_sapling_state.UndoBlock(block, pindex, m_consensus_params)) {
                 return false;
             }
         }
     } catch (const std::exception& e) {
-        // schemeGuard destructor will restore the original scheme value.
         return error(strprintf("CSpecialTxProcessor::%s -- FAILURE! %s\n", __func__, e.what()).c_str());
     }
 
-    // Success: keep the scheme value (including any V19 revert).
     schemeGuard.commit();
     return true;
 }
@@ -859,7 +835,7 @@ static bool CheckService(const ProTx& proTx, TxValidationState& state)
         return state.Invalid(TxValidationResult::TX_BAD_SPECIAL, "bad-protx-netinfo-bad");
     case NetInfoStatus::Success:
         return true;
-    // These statuses are reachable via crafted ProTx payloads (e.g. duplicate
+    // #768: These statuses are reachable via crafted ProTx payloads (e.g. duplicate
     // addresses). Return proper validation errors instead of assert (UB in release builds).
     case NetInfoStatus::BadInput:
         return state.Invalid(TxValidationResult::TX_BAD_SPECIAL, "bad-protx-netinfo-bad-input");

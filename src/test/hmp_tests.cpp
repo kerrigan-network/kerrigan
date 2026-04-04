@@ -1,4 +1,4 @@
-// Copyright (c) 2026 Kerrigan Network
+// Copyright (c) 2026 The Kerrigan developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -646,26 +646,32 @@ BOOST_AUTO_TEST_CASE(seal_multiplier_full_coverage)
 
     CHMPPrivilegeTracker tracker(params);
 
-    // Create 4 signers, one per algo, to be Elders
-    CBLSSecretKey sks[4];
-    CBLSPublicKey pks[4];
-    for (int i = 0; i < 4; i++) {
+    // Create 5 signers: 2 on X11 (so elderCount >= 2 activates HMP for X11),
+    // and 1 each on KAWPOW, EQUIHASH_200, EQUIHASH_192.
+    // ComputeSealMultiplier requires elderCount >= 2 for the block algo before
+    // awarding any bonus; with only 1 Elder it falls back to pure-PoW (10000).
+    CBLSSecretKey sks[5];
+    CBLSPublicKey pks[5];
+    for (int i = 0; i < 5; i++) {
         sks[i].MakeNewKey();
         pks[i] = sks[i].GetPublicKey();
     }
 
-    // Mine blocks and participate in sealing to become Elders
-    for (int i = 0; i < 4; i++) {
-        tracker.BlockConnected(i, i, pks[i], {pks[i]});
-    }
+    // pks[0] and pks[4] both become Elders on ALGO_X11 (algo 0).
+    // pks[1..3] become Elders on KAWPOW, EQUIHASH_200, EQUIHASH_192 respectively.
+    tracker.BlockConnected(0, ALGO_X11,         pks[0], {pks[0]});
+    tracker.BlockConnected(1, ALGO_KAWPOW,       pks[1], {pks[1]});
+    tracker.BlockConnected(2, ALGO_EQUIHASH_200, pks[2], {pks[2]});
+    tracker.BlockConnected(3, ALGO_EQUIHASH_192, pks[3], {pks[3]});
+    tracker.BlockConnected(4, ALGO_X11,         pks[4], {pks[4]});
 
-    // All 4 sign the seal
-    std::vector<CBLSPublicKey> signers(pks, pks + 4);
-    std::vector<uint8_t> algos = {ALGO_X11, ALGO_KAWPOW, ALGO_EQUIHASH_200, ALGO_EQUIHASH_192};
+    // All 5 sign the seal (both X11 Elders + 1 per cross-algo)
+    std::vector<CBLSPublicKey> signers = {pks[0], pks[1], pks[2], pks[3], pks[4]};
+    std::vector<uint8_t> algos = {ALGO_X11, ALGO_KAWPOW, ALGO_EQUIHASH_200, ALGO_EQUIHASH_192, ALGO_X11};
 
     uint64_t mult = ComputeSealMultiplier(signers, algos, ALGO_X11, &tracker);
 
-    // Graduated ladder: 1 X11 Elder present out of 1 total ->full shade (18000)
+    // Both X11 Elders present (2 of 2) -> full shade baseMult = 15000+(2*3000)/2 = 18000
     // Cross-algo bonus: 3 additional algos * 500 = +1500
     // Total: 18000 + 1500 = 19500
     BOOST_CHECK(mult > 10000u);
@@ -683,17 +689,22 @@ BOOST_AUTO_TEST_CASE(seal_multiplier_graceful_degradation)
 
     CHMPPrivilegeTracker tracker(params);
 
-    // Only 1 Elder, with 1 Elder now getting full shade benefit
-    CBLSSecretKey sk;
-    sk.MakeNewKey();
-    CBLSPublicKey pk = sk.GetPublicKey();
-    tracker.BlockConnected(0, ALGO_X11, pk, {pk});
+    // Need at least 2 X11 Elders: ComputeSealMultiplier returns pure-PoW (10000)
+    // when elderCount <= 1 regardless of participation.  With 2 Elders both
+    // signing, eldersPresent (2) >= elderCount (2) -> full shade baseMult 18000.
+    CBLSSecretKey sk1, sk2;
+    sk1.MakeNewKey();
+    sk2.MakeNewKey();
+    CBLSPublicKey pk1 = sk1.GetPublicKey();
+    CBLSPublicKey pk2 = sk2.GetPublicKey();
+    tracker.BlockConnected(0, ALGO_X11, pk1, {pk1});
+    tracker.BlockConnected(1, ALGO_X11, pk2, {pk2});
 
-    std::vector<CBLSPublicKey> signers = {pk};
-    std::vector<uint8_t> algos = {ALGO_X11};
+    std::vector<CBLSPublicKey> signers = {pk1, pk2};
+    std::vector<uint8_t> algos = {ALGO_X11, ALGO_X11};
 
     uint64_t mult = ComputeSealMultiplier(signers, algos, ALGO_X11, &tracker);
-    // 1 Elder present out of 1 required ->full shade tier (15000-18000)
+    // 2 Elders present out of 2 total -> full shade tier (15000-18000)
     BOOST_CHECK(mult >= 15000u);
     BOOST_CHECK(mult <= 18000u);
 
@@ -1836,7 +1847,7 @@ BOOST_AUTO_TEST_CASE(commit_pool_cleanup_on_connect)
         commit.pubKey = sks[i].GetPublicKey();
         uint256 msgHash = CPubKeyCommit::SignatureHash(commit.pubKey);
         commit.signature = sks[i].Sign(msgHash, false);
-        commit.nTimestamp = GetTimeMicros() / 1000;
+        commit.nTimestamp = GetTime<std::chrono::seconds>().count();
         BOOST_CHECK(HMPAccepted(pool.Add(commit)));
     }
     BOOST_CHECK_EQUAL(pool.Size(), 3u);
@@ -1873,7 +1884,7 @@ BOOST_AUTO_TEST_CASE(commit_pool_get_pending_commits)
         commit.pubKey = sks[i].GetPublicKey();
         uint256 msgHash = CPubKeyCommit::SignatureHash(commit.pubKey);
         commit.signature = sks[i].Sign(msgHash, false);
-        commit.nTimestamp = GetTimeMicros() / 1000;
+        commit.nTimestamp = GetTime<std::chrono::seconds>().count();
         BOOST_CHECK(HMPAccepted(pool.Add(commit)));
     }
 
@@ -1919,7 +1930,7 @@ BOOST_AUTO_TEST_CASE(commit_pool_rejects_onchain_replay)
     commit1.pubKey = sk1.GetPublicKey();
     uint256 msgHash1 = CPubKeyCommit::SignatureHash(commit1.pubKey);
     commit1.signature = sk1.Sign(msgHash1, false);
-    commit1.nTimestamp = GetTimeMicros() / 1000;
+    commit1.nTimestamp = GetTime<std::chrono::seconds>().count();
     BOOST_CHECK_EQUAL(static_cast<int>(pool.Add(commit1)),
                       static_cast<int>(HMPAcceptResult::REJECTED_BENIGN));
     BOOST_CHECK_EQUAL(pool.Size(), 0u);
@@ -1931,7 +1942,7 @@ BOOST_AUTO_TEST_CASE(commit_pool_rejects_onchain_replay)
     commit2.pubKey = sk2.GetPublicKey();
     uint256 msgHash2 = CPubKeyCommit::SignatureHash(commit2.pubKey);
     commit2.signature = sk2.Sign(msgHash2, false);
-    commit2.nTimestamp = GetTimeMicros() / 1000;
+    commit2.nTimestamp = GetTime<std::chrono::seconds>().count();
     BOOST_CHECK(HMPAccepted(pool.Add(commit2)));
     BOOST_CHECK_EQUAL(pool.Size(), 1u);
 

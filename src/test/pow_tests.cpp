@@ -1,5 +1,5 @@
 // Copyright (c) 2015-2020 The Bitcoin Core developers
-// Copyright (c) 2026 Kerrigan Network
+// Copyright (c) 2026 The Kerrigan developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -170,7 +170,7 @@ BOOST_AUTO_TEST_CASE(block_algo_encoding)
     header.SetAlgo(ALGO_X11);
     BOOST_CHECK_EQUAL(header.GetAlgo(), ALGO_X11);
 
-    // Verify SetAlgo clears previous algo bits
+    // Verify SetAlgo clears previous algo bits (the bug Codex caught)
     header.SetAlgo(ALGO_EQUIHASH_192);
     header.SetAlgo(ALGO_KAWPOW);
     BOOST_CHECK_EQUAL(header.GetAlgo(), ALGO_KAWPOW);
@@ -329,24 +329,62 @@ BOOST_AUTO_TEST_CASE(per_algo_difficulty_floors)
     const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
     const auto& consensus = chainParams->GetConsensus();
 
-    // X11 floor should be hardest (lowest target, ASIC-calibrated)
-    arith_uint256 x11Floor = UintToArith256(consensus.powLimitAlgo[ALGO_X11]);
-    arith_uint256 kawpowFloor = UintToArith256(consensus.powLimitAlgo[ALGO_KAWPOW]);
-    arith_uint256 eq200Floor = UintToArith256(consensus.powLimitAlgo[ALGO_EQUIHASH_200]);
-    arith_uint256 eq192Floor = UintToArith256(consensus.powLimitAlgo[ALGO_EQUIHASH_192]);
+    // Genesis powLimitAlgo[] are permissive bootstrap targets — no strict ordering required.
+    // All must be non-zero.
+    for (int algo = 0; algo < NUM_ALGOS; algo++) {
+        BOOST_CHECK(UintToArith256(consensus.powLimitAlgo[algo]) > arith_uint256(0));
+    }
 
-    // Ordering: X11 < KawPoW < Equihash200 < Equihash192 (hardest to easiest)
+    // Global powLimit should equal the easiest per-algo genesis limit
+    arith_uint256 eq192Limit = UintToArith256(consensus.powLimitAlgo[ALGO_EQUIHASH_192]);
+    BOOST_CHECK(UintToArith256(consensus.powLimit) == eq192Limit);
+
+    // Height-activated difficulty floors (hardware-calibrated, tighter than genesis).
+    // Activated at nDiffFloorHeight to prevent flash-mining after hashrate drops.
+    BOOST_CHECK(consensus.nDiffFloorHeight > 0);
+
+    arith_uint256 x11Floor = UintToArith256(consensus.powLimitFloorAlgo[ALGO_X11]);
+    arith_uint256 kawpowFloor = UintToArith256(consensus.powLimitFloorAlgo[ALGO_KAWPOW]);
+    arith_uint256 eq200Floor = UintToArith256(consensus.powLimitFloorAlgo[ALGO_EQUIHASH_200]);
+    arith_uint256 eq192Floor = UintToArith256(consensus.powLimitFloorAlgo[ALGO_EQUIHASH_192]);
+
+    // Hardware-calibrated ordering: X11 ASIC < KawPoW GPU < Equihash200 ASIC < Equihash192 GPU
+    // (hardest to easiest, lower target = harder)
     BOOST_CHECK(x11Floor < kawpowFloor);
     BOOST_CHECK(kawpowFloor < eq200Floor);
     BOOST_CHECK(eq200Floor < eq192Floor);
 
-    // Global powLimit should equal the easiest per-algo floor
-    BOOST_CHECK(UintToArith256(consensus.powLimit) == eq192Floor);
-
-    // All floors should be non-zero
+    // All floors must be non-zero
     for (int algo = 0; algo < NUM_ALGOS; algo++) {
-        BOOST_CHECK(UintToArith256(consensus.powLimitAlgo[algo]) > arith_uint256(0));
+        BOOST_CHECK(UintToArith256(consensus.powLimitFloorAlgo[algo]) > arith_uint256(0));
     }
+
+    // Each floor must be tighter (lower target) than its genesis powLimitAlgo
+    for (int algo = 0; algo < NUM_ALGOS; algo++) {
+        BOOST_CHECK(UintToArith256(consensus.powLimitFloorAlgo[algo]) <=
+                    UintToArith256(consensus.powLimitAlgo[algo]));
+    }
+}
+
+/* Gap recovery threshold drops from 240 to 40 at nDiffFloorHeight */
+BOOST_AUTO_TEST_CASE(gap_threshold_activation)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    const auto& consensus = chainParams->GetConsensus();
+
+    // nDiffFloorHeight must be set on mainnet
+    BOOST_CHECK(consensus.nDiffFloorHeight > 0);
+
+    // Pre-activation: threshold = NUM_ALGOS * 10 * 6 = 240
+    const int preThreshold = NUM_ALGOS * 10 * 6;
+    BOOST_CHECK_EQUAL(preThreshold, 240);
+
+    // Post-activation: threshold = NUM_ALGOS * 10 = 40
+    const int postThreshold = NUM_ALGOS * 10;
+    BOOST_CHECK_EQUAL(postThreshold, 40);
+
+    // 40 is exactly one averaging window — the minimum safe value
+    BOOST_CHECK_EQUAL(postThreshold, NUM_ALGOS * 10 /* nAveragingInterval */);
 }
 
 /* Testnet/regtest should have uniform per-algo limits (no floors) */

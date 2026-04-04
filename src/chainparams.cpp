@@ -229,6 +229,7 @@ public:
         consensus.MN_RRHeight = 2100000000; // Effectively never (no MN reward reallocation in Kerrigan)
         consensus.WithdrawalsHeight = 2100000000; // Effectively never
         consensus.SaplingHeight = 500; // Sapling activates after ~16 hours of mining (500 blocks * 120s)
+        consensus.nSaplingStrictnessHeight = 15500; // Tolerate pre-v8 SaplingDB mismatches below this height
         consensus.HMPHeight = 100; // Hivemind HMP Stage 2 (commitments) at block 100
         // 4-stage HMP bootstrap:
         // Stage 1 (< 100): Pure PoW, no HMP processing (pre-activation)
@@ -245,15 +246,28 @@ public:
         // but never required until Phase 2 activates via a future hard fork.
         consensus.nHMPMandatoryProofHeight = 0;
         consensus.MinBIP9WarningHeight = 0;
-        // Per-algo difficulty floors, calibrated to cheapest available mining hardware
-        // so 1 unit of minimum hardware produces ~1 block per 480s (per-algo target).
+        // Per-algo genesis powLimits — permissive targets for chain bootstrapping.
+        // These are intentionally easy so the first miner on each algo can produce blocks.
+        // After nDiffFloorHeight, the tighter powLimitFloorAlgo[] values take over.
         // Formula: floor_target = 2^256 / (hashrate_H_per_s * 480)
-        consensus.powLimitAlgo[ALGO_X11]          = uint256S("00000ffff0000000000000000000000000000000000000000000000000000000"); // genesis nBits=0x1e0ffff0, tightens via DGW after launch
-        consensus.powLimitAlgo[ALGO_KAWPOW]       = uint256S("0000000100000000000000000000000000000000000000000000000000000000"); // ~2^224, GTX 1060 (10 MH/s)
-        consensus.powLimitAlgo[ALGO_EQUIHASH_200] = uint256S("0000020000000000000000000000000000000000000000000000000000000000"); // ~2^233, Z9 Mini (13 kSol/s)
-        consensus.powLimitAlgo[ALGO_EQUIHASH_192] = uint256S("0010000000000000000000000000000000000000000000000000000000000000"); // ~2^244, GTX 1060 (~10 Sol/s)
+        consensus.powLimitAlgo[ALGO_X11]          = uint256S("00000ffff0000000000000000000000000000000000000000000000000000000"); // genesis nBits=0x1e0ffff0
+        consensus.powLimitAlgo[ALGO_KAWPOW]       = uint256S("0000000100000000000000000000000000000000000000000000000000000000"); // ~2^224
+        consensus.powLimitAlgo[ALGO_EQUIHASH_200] = uint256S("0000020000000000000000000000000000000000000000000000000000000000"); // ~2^233
+        consensus.powLimitAlgo[ALGO_EQUIHASH_192] = uint256S("0010000000000000000000000000000000000000000000000000000000000000"); // ~2^244
         // Global powLimit = easiest per-algo floor (for CheckProofOfWork range validation)
         consensus.powLimit = consensus.powLimitAlgo[ALGO_EQUIHASH_192];
+
+        // Height-activated difficulty floor: after nDiffFloorHeight, the DAA output
+        // is clamped to hardware-calibrated floors instead of the permissive genesis
+        // powLimitAlgo[]. Prevents flash-mining after hashrate drops (incident at
+        // block 10879 where X11 diff dropped to 0.0002 and ~500 blocks were mined
+        // in 30 minutes). Floors calibrated so 1 unit of minimum hardware for each
+        // algo produces ~1 block per 480s (per-algo target spacing).
+        consensus.nDiffFloorHeight = 14000;
+        consensus.powLimitFloorAlgo[ALGO_X11]          = uint256S("0000000000271700000000000000000000000000000000000000000000000000"); // Antminer D3, 15 GH/s
+        consensus.powLimitFloorAlgo[ALGO_KAWPOW]       = uint256S("000000007f420000000000000000000000000000000000000000000000000000"); // GTX 1080, 18 MH/s
+        consensus.powLimitFloorAlgo[ALGO_EQUIHASH_200] = uint256S("0000020000000000000000000000000000000000000000000000000000000000"); // ~17.5 kSol/s (same as genesis cap — already tight for Z9 Mini)
+        consensus.powLimitFloorAlgo[ALGO_EQUIHASH_192] = uint256S("00048d1000000000000000000000000000000000000000000000000000000000"); // GTX 1080, 30 Sol/s
         consensus.nPowTargetTimespan = 24 * 60 * 60; // Kerrigan: 1 day
         consensus.nPowTargetSpacing = 120; // Kerrigan: 2 minutes
         consensus.fPowAllowMinDifficultyBlocks = false;
@@ -440,6 +454,7 @@ public:
         consensus.MN_RRHeight = 2100000000;
         consensus.WithdrawalsHeight = 2100000000;
         consensus.SaplingHeight = 100; // Sapling active early on testnet
+        consensus.nSaplingStrictnessHeight = 15500;
         consensus.HMPHeight = 20; // Hivemind HMP Stage 2 at block 20
         // 4-stage HMP bootstrap:
         consensus.nHMPStage2Height = 20;   // commitments open (faster for testing)
@@ -638,6 +653,7 @@ public:
         consensus.MN_RRHeight = 2;   // MN_RR activated immediately on devnet
         consensus.WithdrawalsHeight = 2;   // withdrawals activated immediately on devnet
         consensus.SaplingHeight = 2;       // Sapling activated immediately on devnet
+        consensus.nSaplingStrictnessHeight = 0; // Strict from genesis on devnet
         consensus.HMPHeight = 2;            // Hivemind HMP Stage 2 at block 2
         // 4-stage HMP bootstrap:
         consensus.nHMPStage2Height = 2;    // commitments open early on devnet
@@ -901,6 +917,7 @@ public:
         consensus.MN_RRHeight = consensus.V20Height; // MN_RR does not really have effect before v20 activation
         consensus.WithdrawalsHeight = 600;
         consensus.SaplingHeight = 0; // Sapling active from genesis on regtest
+        consensus.nSaplingStrictnessHeight = 0; // Strict from genesis on regtest
         consensus.HMPHeight = 0;    // Hivemind HMP active from genesis on regtest
         // 4-stage HMP bootstrap: all active immediately for unit tests
         consensus.nHMPStage2Height = 0;

@@ -1,6 +1,6 @@
 // Copyright (c) 2016 Jack Grigg
 // Copyright (c) 2016-2023 The Zcash developers
-// Copyright (c) 2024-2026 Kerrigan Network
+// Copyright (c) 2024-2026 The Kerrigan developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php .
 
@@ -19,7 +19,6 @@
 
 #include <compat/endian.h>
 #include <crypto/equihash.h>
-#include <logging.h>
 
 #include <algorithm>
 #include <iostream>
@@ -346,7 +345,6 @@ bool Equihash<N,K>::BasicSolve(const eh_HashState& base_state,
     eh_index init_size { 1 << (CollisionBitLength + 1) };
 
     // 1) Generate first list
-    LogPrint(BCLog::ALL, "Generating first list\n");
     size_t hashLen = HashLength;
     size_t lenIndices = sizeof(eh_index);
     std::vector<FullStepRow<FullWidth>> X;
@@ -363,13 +361,10 @@ bool Equihash<N,K>::BasicSolve(const eh_HashState& base_state,
 
     // 3) Repeat step 2 until 2n/(k+1) bits remain
     for (int r = 1; r < K && X.size() > 0; r++) {
-        LogPrint(BCLog::ALL, "Round %d:\n", r);
         // 2a) Sort the list
-        LogPrint(BCLog::ALL, "- Sorting list\n");
         std::sort(X.begin(), X.end(), CompareSR(CollisionByteLength));
         if (cancelled(ListSorting)) throw solver_cancelled;
 
-        LogPrint(BCLog::ALL, "- Finding collisions\n");
         int i = 0;
         int posFree = 0;
         std::vector<FullStepRow<FullWidth>> Xc;
@@ -421,12 +416,9 @@ bool Equihash<N,K>::BasicSolve(const eh_HashState& base_state,
     }
 
     // k+1) Find a collision on last 2n(k+1) bits
-    LogPrint(BCLog::ALL, "Final round:\n");
     if (X.size() > 1) {
-        LogPrint(BCLog::ALL, "- Sorting list\n");
         std::sort(X.begin(), X.end(), CompareSR(hashLen));
         if (cancelled(FinalSorting)) throw solver_cancelled;
-        LogPrint(BCLog::ALL, "- Finding collisions\n");
         int i = 0;
         while (i < X.size() - 1) {
             int j = 1;
@@ -451,8 +443,7 @@ bool Equihash<N,K>::BasicSolve(const eh_HashState& base_state,
             i += j;
             if (cancelled(FinalColliding)) throw solver_cancelled;
         }
-    } else
-        LogPrint(BCLog::ALL, "- List is empty\n");
+    }
 
     return false;
 }
@@ -525,7 +516,6 @@ bool Equihash<N,K>::OptimisedSolve(const eh_HashState& base_state,
     {
 
         // 1) Generate first list
-        LogPrint(BCLog::ALL, "Generating first list\n");
         size_t hashLen = HashLength;
         size_t lenIndices = sizeof(eh_trunc);
         std::vector<TruncatedStepRow<TruncatedWidth>> Xt;
@@ -542,13 +532,10 @@ bool Equihash<N,K>::OptimisedSolve(const eh_HashState& base_state,
 
         // 3) Repeat step 2 until 2n/(k+1) bits remain
         for (int r = 1; r < K && Xt.size() > 0; r++) {
-            LogPrint(BCLog::ALL, "Round %d:\n", r);
             // 2a) Sort the list
-            LogPrint(BCLog::ALL, "- Sorting list\n");
             std::sort(Xt.begin(), Xt.end(), CompareSR(CollisionByteLength));
             if (cancelled(ListSorting)) throw solver_cancelled;
 
-            LogPrint(BCLog::ALL, "- Finding collisions\n");
             int i = 0;
             int posFree = 0;
             std::vector<TruncatedStepRow<TruncatedWidth>> Xc;
@@ -606,12 +593,9 @@ bool Equihash<N,K>::OptimisedSolve(const eh_HashState& base_state,
         }
 
         // k+1) Find a collision on last 2n(k+1) bits
-        LogPrint(BCLog::ALL, "Final round:\n");
         if (Xt.size() > 1) {
-            LogPrint(BCLog::ALL, "- Sorting list\n");
             std::sort(Xt.begin(), Xt.end(), CompareSR(hashLen));
             if (cancelled(FinalSorting)) throw solver_cancelled;
-            LogPrint(BCLog::ALL, "- Finding collisions\n");
             int i = 0;
             while (i < Xt.size() - 1) {
                 int j = 1;
@@ -634,15 +618,11 @@ bool Equihash<N,K>::OptimisedSolve(const eh_HashState& base_state,
                 i += j;
                 if (cancelled(FinalColliding)) throw solver_cancelled;
             }
-        } else
-            LogPrint(BCLog::ALL, "- List is empty\n");
+        }
 
     } // Ensure Xt goes out of scope and is destroyed
 
-    LogPrint(BCLog::ALL, "Found %d partial solutions\n", partialSolns.size());
-
     // Now for each solution run the algorithm again to recreate the indices
-    LogPrint(BCLog::ALL, "Culling solutions\n");
     for (std::shared_ptr<eh_trunc> partialSoln : partialSolns) {
         std::set<std::vector<unsigned char>> solns;
         size_t hashLen;
@@ -725,8 +705,6 @@ bool Equihash<N,K>::OptimisedSolve(const eh_HashState& base_state,
 invalidsolution:
         invalidCount++;
     }
-    LogPrint(BCLog::ALL, "- Number of invalid solutions found: %d\n", invalidCount);
-
     return false;
 }
 #endif // ENABLE_MINER
@@ -735,8 +713,6 @@ template<unsigned int N, unsigned int K>
 bool Equihash<N,K>::IsValidSolution(const eh_HashState& base_state, std::vector<unsigned char> soln)
 {
     if (soln.size() != SolutionWidth) {
-        LogPrint(BCLog::ALL, "Invalid solution length: %d (expected %d)\n",
-                 soln.size(), SolutionWidth);
         return false;
     }
 
@@ -755,17 +731,12 @@ bool Equihash<N,K>::IsValidSolution(const eh_HashState& base_state, std::vector<
         std::vector<FullStepRow<FinalFullWidth>> Xc;
         for (size_t i = 0; i < X.size(); i += 2) {
             if (!HasCollision(X[i], X[i+1], CollisionByteLength)) {
-                LogPrint(BCLog::ALL, "Invalid solution: invalid collision length between StepRows\n");
-                LogPrint(BCLog::ALL, "X[i]   = %s\n", X[i].GetHex(hashLen));
-                LogPrint(BCLog::ALL, "X[i+1] = %s\n", X[i+1].GetHex(hashLen));
                 return false;
             }
             if (X[i+1].IndicesBefore(X[i], hashLen, lenIndices)) {
-                LogPrint(BCLog::ALL, "Invalid solution: Index tree incorrectly ordered\n");
                 return false;
             }
             if (!DistinctIndices(X[i], X[i+1], hashLen, lenIndices)) {
-                LogPrint(BCLog::ALL, "Invalid solution: duplicate indices\n");
                 return false;
             }
             Xc.emplace_back(X[i], X[i+1], hashLen, lenIndices, CollisionByteLength);

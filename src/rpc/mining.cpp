@@ -22,10 +22,10 @@
 #include <llmq/blockprocessor.h>
 #include <llmq/context.h>
 #include <evo/evodb.h>
-#include <governance/governance.h>
 #include <net.h>
 #include <node/context.h>
 #include <node/miner.h>
+#include <governance/governance.h>
 #include <pow.h>
 #include <rpc/blockchain.h>
 #include <rpc/mining.h>
@@ -48,6 +48,7 @@
 #include <warnings.h>
 
 #include <governance/classes.h>
+#include <governance/governance.h>
 #include <masternode/sync.h>
 
 #include <memory>
@@ -57,14 +58,6 @@ using node::BlockAssembler;
 using node::CBlockTemplate;
 using node::NodeContext;
 using node::UpdateTime;
-
-/** Default per-algo lookback for hashrate estimates (~3 hours on a 4-algo 120s chain). */
-static constexpr int DEFAULT_HASHRATE_AVG_BLOCKS = 23;
-
-static int GetHashrateAvgBlocks()
-{
-    return gArgs.GetIntArg("-hashrateavgblocks", DEFAULT_HASHRATE_AVG_BLOCKS);
-}
 
 /**
  * Parse an algo name from a UniValue parameter and validate it.
@@ -134,7 +127,7 @@ static double GetNetworkHashPSForAlgo(int lookup, int height, const CChain& acti
     if (height >= 0 && height < active_chain.Height())
         pb = active_chain[height];
     if (!pb || !pb->nHeight) return 0;
-    if (lookup <= 0) lookup = 120;
+    if (lookup <= 0) lookup = 120; // ~16 hours per-algo on a 4-algo chain
 
     // Walk backward collecting blocks that match this algo,
     // summing per-algo work (not nChainWork which includes all algos).
@@ -168,7 +161,7 @@ static RPCHelpMan getnetworkhashps()
                 "Pass in [height] to estimate the network speed at the time when a certain block was found.\n"
                 "Pass in [algo] to get the estimate for a specific mining algorithm only.\n",
                 {
-                    {"nblocks", RPCArg::Type::NUM, RPCArg::Default{120}, "The number of blocks, or -1 for blocks since last difficulty change. Defaults to -hashrateavgblocks (23) when algo is specified."},
+                    {"nblocks", RPCArg::Type::NUM, RPCArg::Default{120}, "The number of blocks, or -1 for blocks since last difficulty change. Defaults to 480 when algo is specified."},
                     {"height", RPCArg::Type::NUM, RPCArg::Default{-1}, "To estimate at the time of the given height."},
                     {"algo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Mining algorithm: x11, kawpow, equihash200, equihash192. Omit for combined hashrate."},
                 },
@@ -176,7 +169,7 @@ static RPCHelpMan getnetworkhashps()
                     RPCResult::Type::NUM, "", "Hashes per second estimated"},
                 RPCExamples{
                     HelpExampleCli("getnetworkhashps", "")
-            + HelpExampleCli("getnetworkhashps", "23 -1 \"kawpow\"")
+            + HelpExampleCli("getnetworkhashps", "480 -1 \"kawpow\"")
             + HelpExampleRpc("getnetworkhashps", "")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
@@ -191,7 +184,7 @@ static RPCHelpMan getnetworkhashps()
     if (!request.params[2].isNull()) {
         int algo = GetAlgoByName(request.params[2].get_str(), -1);
         if (algo < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Unknown algorithm: " + request.params[2].get_str());
-        int lookup = !request.params[0].isNull() ? request.params[0].getInt<int>() : GetHashrateAvgBlocks();
+        int lookup = !request.params[0].isNull() ? request.params[0].getInt<int>() : 480;
         int height = !request.params[1].isNull() ? request.params[1].getInt<int>() : -1;
         return GetNetworkHashPSForAlgo(lookup, height, chainman.ActiveChain(), algo);
     }
@@ -230,7 +223,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
             int epoch_number = ethash::get_epoch_number(height);
             const ethash::epoch_context_full& ctx = ethash::get_global_epoch_context_full(epoch_number);
 
-            // ProgPoW seed hash: sha256d of 80-byte header (RVN standard).
+            // ProgPoW seed hash: sha256d of 80-byte header (RVN standard). (#801)
             ethash::hash256 header_h;
             CHashWriter hw(SER_GETHASH, PROTOCOL_VERSION);
             hw << block.nVersion << block.hashPrevBlock << block.hashMerkleRoot
@@ -706,20 +699,20 @@ static RPCHelpMan getmininginfo()
     // On algo-specific RPC ports, return algo-specific networkhashps
     if (algoPortIt != g_rpc_algo_ports.end()) {
         int algo = algoPortIt->second;
-        obj.pushKV("networkhashps", GetNetworkHashPSForAlgo(GetHashrateAvgBlocks(), -1, active_chain, algo));
+        obj.pushKV("networkhashps", GetNetworkHashPSForAlgo(120, -1, active_chain, algo));
     } else {
         obj.pushKV("networkhashps", getnetworkhashps().HandleRequest(request));
     }
 
+    // 120-block per-algo lookback (~16 hours on a 4-algo chain).
     UniValue difficulties(UniValue::VOBJ);
     UniValue hashrates(UniValue::VOBJ);
     const Consensus::Params& consensusParams = chainman.GetConsensus();
-    const int avgBlocks = GetHashrateAvgBlocks();
     for (int a = 0; a < NUM_ALGOS; a++) {
         std::string name = GetAlgoName(a);
         const CBlockIndex* pAlgo = GetLastBlockIndexForAlgo(active_chain.Tip(), consensusParams, a);
         difficulties.pushKV(name, pAlgo ? (double)GetDifficulty(pAlgo) : 0.0);
-        hashrates.pushKV(name, GetNetworkHashPSForAlgo(avgBlocks, -1, active_chain, a));
+        hashrates.pushKV(name, GetNetworkHashPSForAlgo(120, -1, active_chain, a));
     }
     obj.pushKV("difficulties", difficulties);
     obj.pushKV("networkhashps_per_algo", hashrates);
@@ -998,7 +991,7 @@ static RPCHelpMan getblocktemplate()
     }
 
     // Parse pooladdress: when provided, coinbasetxn is included for all algos
-    // and the pool's payout output uses this address instead of OP_TRUE.
+    // and the pool's payout output uses this address instead of OP_TRUE. (#871)
     CScript poolScript;
     bool hasPoolAddress = false;
     if (!request.params[0].isNull()) {
@@ -1034,7 +1027,7 @@ static RPCHelpMan getblocktemplate()
         && CSuperblock::IsValidBlockHeight(active_chain.Height() + 1))
             throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, PACKAGE_NAME " is syncing with network...");
 
-    static std::map<int, unsigned int> nTransactionsUpdatedLastMap; // per-algo
+    static std::map<int, unsigned int> nTransactionsUpdatedLastMap; // per-algo (#939)
     const CTxMemPool& mempool = EnsureMemPool(node);
 
     if (!lpval.isNull())
@@ -1086,7 +1079,7 @@ static RPCHelpMan getblocktemplate()
 
     const Consensus::Params& consensusParams = Params().GetConsensus();
 
-    // Per-algo template cache: each algo gets its own cached template
+    // Per-algo template cache (#916): each algo gets its own cached template
     // to avoid cross-algo contamination when pools query multiple algos.
     static std::map<int, CBlockIndex*> pindexPrevMap;
     static std::map<int, int64_t> nStartMap;
@@ -1230,7 +1223,7 @@ static RPCHelpMan getblocktemplate()
     result.pushKV("previousblockhash", pblock->hashPrevBlock.GetHex());
     result.pushKV("transactions", transactions);
     result.pushKV("coinbaseaux", aux);
-    // coinbasetxn mode: equihash always, others when pooladdress set or client requests
+    // coinbasetxn mode: equihash always, others when pooladdress set or client requests (#871, #874)
     int cbAlgo = pblock->GetAlgo();
     bool isEquihash = IsEquihash(cbAlgo);
     bool hasCoinbaseTxn = isEquihash || hasPoolAddress || setClientCaps.count("coinbasetxn");
@@ -1240,7 +1233,7 @@ static RPCHelpMan getblocktemplate()
     // Pool's share (vout[0]) for pool software that uses coinbasevalue for payout accounting
     result.pushKV("coinbasevalue_miner", (int64_t)pblock->vtx[0]->vout[0].nValue);
 
-    // Emit pre-built coinbase when in coinbasetxn mode
+    // Emit pre-built coinbase when in coinbasetxn mode (#874)
     if (hasCoinbaseTxn) {
         UniValue coinbasetxnObj(UniValue::VOBJ);
         coinbasetxnObj.pushKV("data", EncodeHexTx(*pblock->vtx[0]));
@@ -1265,11 +1258,11 @@ static RPCHelpMan getblocktemplate()
 
     result.pushKV("algo", GetAlgoName(algo));
 
-    // Equihash fields for Zcash-compatible pool software
+    // Equihash fields for Zcash-compatible pool software (#788)
     if (isEquihash) {
         result.pushKV("finalsaplingroothash", pblock->hashReserved.GetHex());
 
-        // N,K parameters + personalization string
+        // N,K parameters + personalization string (#802)
         if (cbAlgo == ALGO_EQUIHASH_200) {
             result.pushKV("equihash_n", 200);
             result.pushKV("equihash_k", 9);
@@ -1280,7 +1273,7 @@ static RPCHelpMan getblocktemplate()
             result.pushKV("personalization", "kerrigan");
         }
 
-        // 140-byte header: CEquihashInput(108) + nNonce256(32)
+        // 140-byte header: CEquihashInput(108) + nNonce256(32) (#794)
         CEquihashInput I{*pblock};
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
         ss << I;
@@ -1329,7 +1322,7 @@ static RPCHelpMan getblocktemplate()
 
     result.pushKV("coinbase_payload", HexStr(pblock->vtx[0]->vExtraPayload));
 
-    // Kerrigan uses X11 for block identity hashes regardless of mining algo
+    // Kerrigan uses X11 for block identity hashes regardless of mining algo (#875)
     result.pushKV("blockhash_algorithm", "x11");
 
     // X11 identity hash of this template for post-submitblock lookups

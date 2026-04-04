@@ -122,7 +122,7 @@ void CSaplingState::RebuildAnchorIndex()
             uint256 root;
             if (pcursor->GetValue(root)) {
                 int h = static_cast<int>(key.second);
-                m_anchor_heights[root].insert(h);  // Multiple heights per root
+                m_anchor_heights[root].insert(h);  // #667: multiple heights per root
                 if (h > m_lastFrontierHeight) m_lastFrontierHeight = h;
             }
             pcursor->Next();
@@ -325,6 +325,20 @@ bool CSaplingState::ProcessBlock(const CBlock& block, const CBlockIndex* pindex,
                     m_pendingBatch->Write(TreeRootKey(pindex->nHeight), prevRoot);
                     m_pendingTreeRoot = prevRoot;
                 }
+            } else {
+                // First Sapling-active block with no txs: write empty tree
+                // root so the carry-forward chain has a starting point and
+                // m_lastFrontierHeight can be recovered from DB on restart.
+                auto emptyFrontier = sapling::tree::new_sapling_frontier();
+                auto rootArr = sapling::tree::frontier_root(*emptyFrontier);
+                uint256 emptyRoot;
+                std::memcpy(emptyRoot.begin(), rootArr.data(), 32);
+                m_pendingBatch->Write(TreeRootKey(pindex->nHeight), emptyRoot);
+                m_pendingTreeRoot = emptyRoot;
+
+                auto serialized = sapling::tree::frontier_serialize(*emptyFrontier);
+                std::vector<uint8_t> treeData(serialized.begin(), serialized.end());
+                m_pendingBatch->Write(TreeDataKey(pindex->nHeight), treeData);
             }
 
             m_pendingBatch->Write(DB_BEST_BLOCK, pindex->GetBlockHash());
@@ -542,7 +556,7 @@ bool CSaplingState::UndoBlock(const CBlock& block, const CBlockIndex* pindex,
             return false;
         }
 
-        // Update in-memory anchor reverse index (remove only this height).
+        // Update in-memory anchor reverse index (#667: remove only this height).
         if (hasRoot) {
             auto ait = m_anchor_heights.find(erasedRoot);
             if (ait != m_anchor_heights.end()) {
@@ -615,7 +629,7 @@ bool CSaplingState::UndoBlock(const CBlock& block, const CBlockIndex* pindex,
         return false;
     }
 
-    // Update in-memory anchor reverse index (remove only this height).
+    // Update in-memory anchor reverse index (#667: remove only this height).
     if (hasRoot) {
         auto ait = m_anchor_heights.find(erasedRoot);
         if (ait != m_anchor_heights.end()) {

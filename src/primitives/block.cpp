@@ -1,7 +1,7 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
 // Copyright (c) 2009-2019 The Bitcoin Core developers
 // Copyright (c) 2014-2025 The DigiByte Core developers (multi-algo)
-// Copyright (c) 2026 Kerrigan Network
+// Copyright (c) 2026 The Kerrigan developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -12,7 +12,6 @@
 #include <hash.h>
 #include <hash_x11.h>
 #include <streams.h>
-#include <logging.h>
 #include <tinyformat.h>
 
 int CBlockHeader::GetAlgo() const
@@ -23,8 +22,6 @@ int CBlockHeader::GetAlgo() const
         case BLOCK_VERSION_EQUIHASH_200: return ALGO_EQUIHASH_200;
         case BLOCK_VERSION_EQUIHASH_192: return ALGO_EQUIHASH_192;
     }
-    LogPrintf("WARNING: CBlockHeader::GetAlgo(): unmapped algo bits 0x%03x in nVersion=0x%08x\n",
-              nVersion & BLOCK_VERSION_ALGO, nVersion);
     return ALGO_INVALID;
 }
 
@@ -110,7 +107,7 @@ uint256 CBlockHeader::GetPoWAlgoHash(const Consensus::Params& params) const
             // Byte order: ethash::hash256 is big-endian (bytes[0]=MSB), uint256 is little-endian
             // (begin()=LSB). We must reverse bytes at every conversion boundary.
             // ProgPoW seed hash: sha256d of the 80-byte header (RVN standard).
-            // GetHash() returns X11 which no KawPoW miner uses.
+            // GetHash() returns X11 which no KawPoW miner uses. (#804, #801)
             ethash::hash256 header_h;
             static_assert(sizeof(header_h.bytes) == sizeof(uint256));
             CHashWriter hw(SER_GETHASH, PROTOCOL_VERSION);
