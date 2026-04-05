@@ -57,7 +57,7 @@ const CBlockIndex* GetLastBlockIndexForAlgo(const CBlockIndex* pindex, const Con
 }
 
 // Hivemind per-algo DAA (DigiByte-derived). See #382 for time-warp analysis.
-unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo)
+unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo, int gapThresholdOverride)
 {
     const int nAveragingInterval = 10;
     const int64_t nMaxAdjustDown = 16; // percent
@@ -94,9 +94,11 @@ unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& pa
     // Post-nDiffFloorHeight: 40 blocks (4*10*1) — ~1.3 hours. Equals one
     // full averaging window (NUM_ALGOS * nAveragingInterval), the minimum
     // safe value before the DAA oscillates. See #970.
-    const int nGapThreshold = (nNextHeight >= params.nDiffFloorHeight && params.nDiffFloorHeight > 0)
-        ? NUM_ALGOS * nAveragingInterval       // 40 blocks post-activation
-        : NUM_ALGOS * nAveragingInterval * 6;  // 240 blocks pre-activation
+    const int nGapThreshold = (gapThresholdOverride > 0)
+        ? gapThresholdOverride
+        : (nNextHeight >= params.nDiffFloorHeight && params.nDiffFloorHeight > 0)
+            ? NUM_ALGOS * nAveragingInterval       // 40 blocks post-activation
+            : NUM_ALGOS * nAveragingInterval * 6;  // 240 blocks pre-activation
     int algoGap = pindexLast->nHeight - pindexPrevAlgo->nHeight;
     if (algoGap >= nGapThreshold) {
         return EffectivePowLimitForAlgo(params, algo, nNextHeight);

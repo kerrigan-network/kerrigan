@@ -264,6 +264,7 @@ public:
         // in 30 minutes). Floors calibrated so 1 unit of minimum hardware for each
         // algo produces ~1 block per 480s (per-algo target spacing).
         consensus.nDiffFloorHeight = 14000;
+        consensus.nGapThresholdHeight = 16500; // Tighter 40-block gap threshold activates here
         consensus.powLimitFloorAlgo[ALGO_X11]          = uint256S("0000000000271700000000000000000000000000000000000000000000000000"); // Antminer D3, 15 GH/s
         consensus.powLimitFloorAlgo[ALGO_KAWPOW]       = uint256S("000000007f420000000000000000000000000000000000000000000000000000"); // GTX 1080, 18 MH/s
         consensus.powLimitFloorAlgo[ALGO_EQUIHASH_200] = uint256S("0000020000000000000000000000000000000000000000000000000000000000"); // ~17.5 kSol/s (same as genesis cap — already tight for Z9 Mini)
@@ -476,6 +477,7 @@ public:
         // is clamped to per-algo floors. Testnet floors recalibrated for CPU
         // mining (mainnet uses harder values).
         consensus.nDiffFloorHeight = 2260;
+        consensus.nGapThresholdHeight = 2260; // Testnet: activate immediately with floor
         consensus.powLimitFloorAlgo[ALGO_X11]          = uint256S("00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");  // ~2^236, testnet CPU-minable
         consensus.powLimitFloorAlgo[ALGO_KAWPOW]       = uint256S("000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");  // ~2^244, testnet CPU-minable
         consensus.powLimitFloorAlgo[ALGO_EQUIHASH_200] = uint256S("0007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");  // ~2^241, testnet CPU-minable

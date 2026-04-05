@@ -226,6 +226,9 @@ struct Params {
      * Mainnet activates at block 14000, testnet at block 2260.
      * Also lowers the algo-gap recovery threshold from 240 to 40 blocks. */
     int nDiffFloorHeight{0};
+    /** Height at which the tighter 40-block algo-gap threshold activates.
+     * Before this height, the legacy 240-block threshold is used. */
+    int nGapThresholdHeight{0};
     uint256 powLimitFloorAlgo[4 /* NUM_ALGOS */];
     bool fPowAllowMinDifficultyBlocks;
     bool fPowNoRetargeting;

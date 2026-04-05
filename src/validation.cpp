@@ -4887,8 +4887,27 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
     }
 
     // Check proof of work (strict for all blocks, no legacy DGW tolerance)
-    if (block.nBits != GetNextWorkRequired(pindexPrev, &block, chainman.GetConsensus(), block.GetAlgo())) {
-        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", strprintf("incorrect proof of work at %d", nHeight));
+    //
+    // Transition tolerance: between nDiffFloorHeight and
+    // nGapThresholdHeight, blocks may have been mined under either the old
+    // 240-block or new 40-block algo-gap threshold. Accept either result
+    // during this window to allow new nodes to sync the historical chain.
+    {
+        const auto& cons = chainman.GetConsensus();
+        const int algo = block.GetAlgo();
+        unsigned int nExpected = GetNextWorkRequired(pindexPrev, &block, cons, algo);
+        bool fValid = (block.nBits == nExpected);
+
+        if (!fValid && cons.nGapThresholdHeight > 0 &&
+            nHeight >= cons.nDiffFloorHeight && nHeight < cons.nGapThresholdHeight) {
+            // Try with the legacy 240-block gap threshold
+            unsigned int nLegacy = Hivemind(pindexPrev, cons, algo, NUM_ALGOS_GAP_LEGACY);
+            fValid = (block.nBits == nLegacy);
+        }
+
+        if (!fValid) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", strprintf("incorrect proof of work at %d", nHeight));
+        }
     }
 
     // Algo rate limit removed: DAA + HMP seal weight handle rebalancing.

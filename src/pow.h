@@ -16,11 +16,18 @@ class CBlockHeader;
 class CBlockIndex;
 class uint256;
 
+/** Legacy gap threshold (240 blocks) used by v1.0.2 and earlier.
+ *  NUM_ALGOS(4) * nAveragingInterval(10) * 6 = 240. */
+static constexpr int NUM_ALGOS_GAP_LEGACY = 240;
+
 /** Get the next required work (difficulty) for a given algorithm */
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&, int algo);
 
-/** Hivemind difficulty adjustment for per-algo retargeting */
-unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo);
+/** Hivemind difficulty adjustment for per-algo retargeting.
+ *  gapThresholdOverride, if > 0, forces that value as the algo-gap threshold
+ *  instead of the height-based default. Used during the v1.0.2/v1.0.3
+ *  transition period to validate blocks mined under either threshold. */
+unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo, int gapThresholdOverride = 0);
 
 /** Walk chain backward to find the last block mined by the given algorithm.
  *  maxDepth limits the search to avoid walking the entire chain (default 240). */
