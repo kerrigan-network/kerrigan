@@ -18,6 +18,7 @@
 #include <deploymentstatus.h>
 #include <evo/chainhelper.h>
 #include <sapling/sapling_state.h>
+#include <sapling/sapling_tx_payload.h>
 #include <fs.h>
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
@@ -2278,6 +2279,11 @@ static RPCHelpMan getblockstats()
 
             CAmount txfee = tx_total_in - tx_total_out;
 
+            if (tx->nType == TRANSACTION_SAPLING) {
+                if (const auto payload = GetTxPayload<SaplingTxPayload>(*tx)) {
+                    txfee += payload->valueBalance;
+                }
+            }
             if (tx->IsPlatformTransfer()) {
                 auto payload = GetTxPayload<CAssetUnlockPayload>(*tx);
                 CHECK_NONFATAL(payload);

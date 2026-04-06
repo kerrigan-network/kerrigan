@@ -334,6 +334,14 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
 
     if (have_undo) {
         CAmount fee = amt_total_in - amt_total_out;
+        // Sapling: valueBalance is positive when value enters the transparent pool
+        // (z->t) and negative when it leaves (t->z). Add it to the fee so that
+        // shielded value flows are accounted for in the transparent balance.
+        if (tx.nType == TRANSACTION_SAPLING) {
+            if (const auto payload = GetTxPayload<SaplingTxPayload>(tx)) {
+                fee += payload->valueBalance;
+            }
+        }
         if (tx.IsPlatformTransfer()) {
             auto payload = GetTxPayload<CAssetUnlockPayload>(tx);
             CHECK_NONFATAL(payload);
