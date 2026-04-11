@@ -52,6 +52,7 @@
 #include <QDateTime>
 #include <QDragEnterEvent>
 #include <QElapsedTimer>
+#include <QDebug>
 #include <QInputDialog>
 #include <QKeySequence>
 #include <QMenu>
@@ -2243,7 +2244,10 @@ static bool ThreadSafeMessageBox(BitcoinGUI* gui, const bilingual_str& message, 
                                Q_ARG(unsigned int, style),
                                Q_ARG(bool*, &ret),
                                Q_ARG(QString, detailed_message));
-    assert(invoked);
+    if (!invoked) {
+        qWarning() << "ThreadSafeMessageBox: failed to invoke on GUI thread";
+        return false;
+    }
     return ret;
 }
 

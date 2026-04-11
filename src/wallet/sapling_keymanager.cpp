@@ -970,7 +970,7 @@ CAmount SaplingKeyManager::GetSaplingBalance() const
     CAmount total = 0;
     for (const auto& [key, nd] : mapSaplingNotes) {
         // Also require witnessData; notes with cleared witnesses (post-reorg) are unspendable
-        if (!nd.isSpent && nd.blockHeight >= 0 && !nd.witnessData.empty()) {
+        if (!nd.isSpent && nd.blockHeight >= 0 && !nd.witnessData.empty() && !m_reservedNotes.count(key)) {
             if (!MoneyRange(total + nd.value)) {
                 LogPrintf("WARNING: Sapling balance overflow, capping at MAX_MONEY\n");
                 return MAX_MONEY;
@@ -986,7 +986,7 @@ CAmount SaplingKeyManager::GetSaplingBalance(const sapling::SaplingPaymentAddres
     LOCK(cs);
     CAmount total = 0;
     for (const auto& [key, nd] : mapSaplingNotes) {
-        if (!nd.isSpent && nd.blockHeight >= 0 && !nd.witnessData.empty() && nd.recipient == addr) {
+        if (!nd.isSpent && nd.blockHeight >= 0 && !nd.witnessData.empty() && nd.recipient == addr && !m_reservedNotes.count(key)) {
             if (!MoneyRange(total + nd.value)) {
                 LogPrintf("WARNING: Sapling balance overflow, capping at MAX_MONEY\n");
                 return MAX_MONEY;

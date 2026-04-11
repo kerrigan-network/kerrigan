@@ -26,6 +26,7 @@
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDebug>
 #include <QPainter>
 #include <QScreen>
 
@@ -41,9 +42,9 @@ SplashScreen::SplashScreen(const NetworkStyle* networkStyle)
     // no window decorations
     setWindowFlags(Qt::FramelessWindowHint);
 
-    // Splash screen uses the full-color splash.png directly (logo + branding baked in)
-    int width = 380;
-    int height = 420;
+    // Splash screen uses the wide banner image (splash.png)
+    int width = 520;
+    int height = 220;
 
     float scale = qApp->devicePixelRatio();
     const QString& titleAddText = networkStyle->getTitleAddText();
@@ -54,16 +55,15 @@ SplashScreen::SplashScreen(const NetworkStyle* networkStyle)
 
     pixmap = QPixmap(width * scale, height * scale);
     pixmap.setDevicePixelRatio(scale);
-    pixmap.fill(GUIUtil::getThemedQColor(GUIUtil::ThemedColor::BORDER_WIDGET));
+    pixmap.fill(Qt::black);
 
     QPainter pixPaint(&pixmap);
 
-    QRect rect = QRect(1, 1, width - 2, height - 2);
-    pixPaint.fillRect(rect, GUIUtil::getThemedQColor(GUIUtil::ThemedColor::BACKGROUND_WIDGET));
-
-    // Draw splash image centered, filling most of the window
-    int logoSize = width - 40;
-    pixPaint.drawPixmap((width - logoSize) / 2, 10, pixmapLogo.scaled(logoSize * scale, logoSize * scale, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    // Draw banner centered -- scale to fill height, then center horizontally
+    QPixmap scaled = pixmapLogo.scaled(width * scale, height * scale, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    int xOffset = (width * scale - scaled.width()) / 2;
+    int yOffset = (height * scale - scaled.height()) / 2;
+    pixPaint.drawPixmap(xOffset / scale, yOffset / scale, scaled);
 
     // draw additional text if special network (testnet/devnet/regtest badge)
     if(!titleAddText.isEmpty()) {
@@ -126,7 +126,10 @@ static void InitMessage(SplashScreen *splash, const std::string &message)
         Q_ARG(QString, QString::fromStdString(message)),
         Q_ARG(int, Qt::AlignBottom | Qt::AlignHCenter),
         Q_ARG(QColor, GUIUtil::getThemedQColor(GUIUtil::ThemedColor::DEFAULT)));
-    assert(invoked);
+    if (!invoked) {
+        qWarning() << "SplashScreen: failed to invoke on GUI thread";
+        return;
+    }
 }
 
 static void ShowProgress(SplashScreen *splash, const std::string &title, int nProgress, bool resume_possible)

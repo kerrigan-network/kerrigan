@@ -496,8 +496,28 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
     CAmount shieldedBal = model->getShieldedBalance();
     QString fromAddress;
     if (shieldedBal > 0 && !saplingAddrs.empty()) {
-        // Has shielded funds, send z->z
-        fromAddress = QString::fromStdString(saplingAddrs[0]);
+        // Has shielded funds, send z->z -- pick the address with the highest balance
+        // so we don't fail with "Insufficient shielded funds" when the first address
+        // alphabetically has no balance but another one does.
+        std::map<std::string, CAmount> addrBalances;
+        for (const auto& addr : saplingAddrs) {
+            addrBalances[addr] = 0;
+        }
+        auto notes = model->wallet().getShieldedNoteHistory();
+        for (const auto& note : notes) {
+            if (!note.isSpent && addrBalances.count(note.address)) {
+                addrBalances[note.address] += note.value;
+            }
+        }
+        std::string bestAddr = saplingAddrs[0];
+        CAmount bestBal = 0;
+        for (const auto& [addr, bal] : addrBalances) {
+            if (bal > bestBal) {
+                bestBal = bal;
+                bestAddr = addr;
+            }
+        }
+        fromAddress = QString::fromStdString(bestAddr);
     } else {
         // No shielded funds (or no z-addrs), use transparent address for t->z
         auto walletAddrs = model->wallet().getAddresses();

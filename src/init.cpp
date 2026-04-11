@@ -2815,6 +2815,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     connOptions.nSendBufferMaxSize = 1000 * args.GetIntArg("-maxsendbuffer", DEFAULT_MAXSENDBUFFER);
     connOptions.nReceiveFloodSize = 1000 * args.GetIntArg("-maxreceivebuffer", DEFAULT_MAXRECEIVEBUFFER);
     connOptions.m_added_nodes = args.GetArgs("-addnode");
+    // Kerrigan: always add seed nodes so the wallet connects even without DNS seeder
+    if (!args.IsArgSet("-connect")) {
+        connOptions.m_added_nodes.push_back("seed1.kerrigan.network");
+        connOptions.m_added_nodes.push_back("seed2.kerrigan.network");
+        connOptions.m_added_nodes.push_back("seed3.kerrigan.network");
+        connOptions.m_added_nodes.push_back("seed4.kerrigan.network");
+    }
     connOptions.nMaxOutboundLimit = *opt_max_upload;
     connOptions.m_peer_connect_timeout = peer_connect_timeout;
     connOptions.socketEventsMode = ::g_socket_events_mode;
