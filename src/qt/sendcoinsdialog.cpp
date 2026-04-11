@@ -255,6 +255,15 @@ void SendCoinsDialog::setModel(WalletModel *_model)
 
 SendCoinsDialog::~SendCoinsDialog()
 {
+    // If a shielded send thread is still running (Groth16 proof generation),
+    // ask it to quit and wait for it to finish before destroying the dialog.
+    // Without this, the thread's signal connections back to `this` would
+    // fire into a destroyed object.
+    if (m_shieldedThread && m_shieldedThread->isRunning()) {
+        m_shieldedThread->quit();
+        m_shieldedThread->wait();
+    }
+
     QSettings settings;
     if (fKeepChangeAddress) {
         settings.setValue("sCustomChangeAddress", ui->lineEditCoinControlChange->text());
@@ -538,6 +547,10 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
     auto* worker = new ShieldedSendWorker(model, fromAddress, shieldedRecipients);
     worker->moveToThread(thread);
 
+    // Track the thread so the destructor can wait for it if the dialog
+    // is closed while Groth16 proof generation is still running.
+    m_shieldedThread = thread;
+
     // Use QPointer to guard against use-after-free if wallet model is destroyed
     // while Groth16 proof generation runs on the background thread.
     QPointer<WalletModel> safeModel(model);
@@ -555,6 +568,8 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
         accept();
         fNewRecipientAllowed = true;
         thread->quit();
+        thread->wait();
+        m_shieldedThread = nullptr;
     });
     connect(worker, &ShieldedSendWorker::error, this, [this, relockOnComplete, safeModel, progress, thread, worker](const QString& message) {
         progress->close();
@@ -565,6 +580,8 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
         QMessageBox::critical(this, tr("Shielded Send Failed"), message);
         fNewRecipientAllowed = true;
         thread->quit();
+        thread->wait();
+        m_shieldedThread = nullptr;
     });
     connect(thread, &QThread::finished, worker, &QObject::deleteLater);
     connect(thread, &QThread::finished, thread, &QObject::deleteLater);

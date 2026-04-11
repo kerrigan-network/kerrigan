@@ -74,6 +74,7 @@ QT_MOC_CPP = \
   qt/moc_macnotificationhandler.cpp \
   qt/moc_masternodelist.cpp \
   qt/moc_masternodemodel.cpp \
+  qt/moc_masternodewizard.cpp \
   qt/moc_mnemonicverificationdialog.cpp \
   qt/moc_modaloverlay.cpp \
   qt/moc_networkwidget.cpp \
@@ -165,6 +166,7 @@ BITCOIN_QT_H = \
   qt/macos_appnap.h \
   qt/masternodelist.h \
   qt/masternodemodel.h \
+  qt/masternodewizard.h \
   qt/mnemonicverificationdialog.h \
   qt/modaloverlay.h \
   qt/networkstyle.h \
@@ -305,6 +307,7 @@ BITCOIN_QT_WALLET_CPP = \
   qt/descriptiondialog.cpp \
   qt/editaddressdialog.cpp \
   qt/masternodelist.cpp \
+  qt/masternodewizard.cpp \
   qt/mnemonicverificationdialog.cpp \
   qt/openuridialog.cpp \
   qt/overviewpage.cpp \

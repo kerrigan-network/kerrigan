@@ -132,27 +132,29 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(interfaces::Nod
 
         if (fAllFromMe && fAllToMe)
         {
-            // Payment to self
-            // TODO: this section still not accurate but covers most cases,
-            // might need some additional work however
+            // Payment to self -- the only real cost is the transaction fee.
+            // For masternode collateral creation (10,000 KRGN to self) or
+            // change-only transactions, display fee as the debit amount.
+            CAmount nFee = nDebit - nCredit;
 
             TransactionRecord sub(hash, nTime);
-            // Payment to self by default
             sub.type = TransactionRecord::SendToSelf;
-            sub.strAddress = "";
-            for (auto it = wtx.txout_address.begin(); it != wtx.txout_address.end(); ++it) {
-                if (it != wtx.txout_address.begin()) sub.strAddress += ", ";
-                sub.strAddress += EncodeDestination(*it);
-            }
-
             sub.idx = parts.size();
 
-            CAmount nChange = wtx.change;
+            // Use the first output address for display (e.g. the collateral
+            // destination for masternode setup), falling back to all addresses
+            // when no outputs exist.
+            sub.strAddress = "";
+            if (!wtx.txout_address.empty()) {
+                sub.strAddress = EncodeDestination(wtx.txout_address[0]);
+                sub.txDest = wtx.txout_address[0];
+            }
+            sub.updateLabel(wallet);
 
-            sub.debit = -(nDebit - nChange);
-            sub.credit = nCredit - nChange;
+            sub.debit = -nFee;
+            sub.credit = 0;
+            sub.involvesWatchAddress = involvesWatchAddress;
             parts.append(sub);
-            parts.last().involvesWatchAddress = involvesWatchAddress;   // maybe pass to TransactionRecord as constructor argument
         }
         else if (fAllFromMe)
         {

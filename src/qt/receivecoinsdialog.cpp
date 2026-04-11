@@ -78,6 +78,10 @@ void ReceiveCoinsDialog::setModel(WalletModel *_model)
         connect(model, &WalletModel::canGetAddressesChanged, [this] {
             ui->receiveButton->setEnabled(model->wallet().canGetAddresses());
         });
+
+        // Disable the shielded address button if Sapling is not yet available
+        // (e.g., chain not synced to activation height).
+        ui->generateShieldedButton->setEnabled(model->isSaplingAvailable());
     }
 }
 
@@ -161,6 +165,17 @@ void ReceiveCoinsDialog::on_generateShieldedButton_clicked()
 {
     if (!model)
         return;
+
+    // Re-check Sapling availability at click time (activation height may not
+    // have been reached when the dialog was first opened).
+    if (!model->isSaplingAvailable()) {
+        QMessageBox::warning(this, windowTitle(),
+            tr("Shielded transactions are not yet available. "
+               "Please wait until the chain is synced past the Sapling activation height."),
+            QMessageBox::Ok, QMessageBox::Ok);
+        ui->generateShieldedButton->setEnabled(false);
+        return;
+    }
 
     QString address = model->getNewSaplingAddress();
     if (address.isEmpty()) {

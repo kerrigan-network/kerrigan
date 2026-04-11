@@ -113,16 +113,18 @@ public:
         assert(!m_loaded || force);
         cachedWallet.clear();
         try {
-            // Guard against null walletModel or optionsModel during teardown
-            if (!parent->walletModel || !parent->walletModel->getOptionsModel()) {
+            // Capture local copies to avoid TOCTOU race during wallet teardown
+            WalletModel* wm = parent->walletModel;
+            OptionsModel* om = wm ? wm->getOptionsModel() : nullptr;
+            if (!wm || !om) {
                 parent->endResetModel();
                 return;
             }
-            bool dustProtection = parent->walletModel->getOptionsModel()->getDustProtection();
-            qint64 dustThreshold = parent->walletModel->getOptionsModel()->getDustProtectionThreshold();
+            bool dustProtection = om->getDustProtection();
+            qint64 dustThreshold = om->getDustProtectionThreshold();
             for (const auto& wtx : wallet.getWalletTxs()) {
                 if (TransactionRecord::showTransaction()) {
-                    cachedWallet.append(TransactionRecord::decomposeTransaction(parent->walletModel->node(), wallet, wtx, dustProtection, dustThreshold));
+                    cachedWallet.append(TransactionRecord::decomposeTransaction(wm->node(), wallet, wtx, dustProtection, dustThreshold));
                 }
             }
         } catch(const std::exception& e) {

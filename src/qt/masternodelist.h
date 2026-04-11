@@ -1,4 +1,5 @@
-// Copyright (c) 2016-2025 The Dash Core developers
+// Copyright (c) 2016-2026 The Dash Core developers
+// Copyright (c) 2026 The Kerrigan developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -19,6 +20,7 @@
 
 class ClientModel;
 class MasternodeFeed;
+class MasternodeWizard;
 class WalletModel;
 struct MasternodeData;
 namespace interfaces {
@@ -106,6 +108,7 @@ private Q_SLOTS:
     void filterByOwnerAddress();
     void filterByPayoutAddress();
     void filterByVotingAddress();
+    void on_btnDeployMasternode_clicked();
     void on_checkBoxHideBanned_stateChanged(int state);
     void on_checkBoxOwned_stateChanged(int state);
     void on_comboBoxType_currentIndexChanged(int index);
@@ -113,6 +116,9 @@ private Q_SLOTS:
     void showContextMenuDIP3(const QPoint&);
     void updateFilteredCount();
     void updateMasternodeList();
+    void updateService_clicked();
+    void updateRegistrar_clicked();
+    void revokeMasternode_clicked();
 };
 
 #endif // BITCOIN_QT_MASTERNODELIST_H

@@ -1,10 +1,12 @@
-// Copyright (c) 2016-2025 The Dash Core developers
+// Copyright (c) 2016-2026 The Dash Core developers
+// Copyright (c) 2026 The Kerrigan developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <qt/masternodelist.h>
 #include <qt/forms/ui_masternodelist.h>
 
+#include <interfaces/node.h>
 #include <script/standard.h>
 
 #include <qt/clientfeeds.h>
@@ -12,15 +14,21 @@
 #include <qt/descriptiondialog.h>
 #include <qt/guiutil.h>
 #include <qt/guiutil_font.h>
+#include <qt/masternodewizard.h>
 #include <qt/walletmodel.h>
 
 #include <QApplication>
 #include <QClipboard>
 #include <QDebug>
 #include <QHeaderView>
+#include <QInputDialog>
+#include <QMessageBox>
 #include <QMetaObject>
 #include <QSettings>
 #include <QThread>
+#include <QUrl>
+
+#include <univalue.h>
 
 #include <set>
 
@@ -125,6 +133,11 @@ MasternodeList::MasternodeList(QWidget* parent) :
     filterMenu->addAction(tr("Payout Address"), this, &MasternodeList::filterByPayoutAddress);
     filterMenu->addAction(tr("Owner Address"), this, &MasternodeList::filterByOwnerAddress);
     filterMenu->addAction(tr("Voting Address"), this, &MasternodeList::filterByVotingAddress);
+
+    contextMenuDIP3->addSeparator();
+    contextMenuDIP3->addAction(tr("Update Service..."), this, &MasternodeList::updateService_clicked);
+    contextMenuDIP3->addAction(tr("Update Registrar..."), this, &MasternodeList::updateRegistrar_clicked);
+    contextMenuDIP3->addAction(tr("Revoke..."), this, &MasternodeList::revokeMasternode_clicked);
 
     connect(ui->tableViewMasternodes, &QTableView::customContextMenuRequested, this, &MasternodeList::showContextMenuDIP3);
     connect(ui->tableViewMasternodes, &QTableView::doubleClicked, this, &MasternodeList::extraInfoDIP3_clicked);
@@ -382,5 +395,192 @@ void MasternodeList::filterByVotingAddress()
     const auto* entry = GetSelectedEntry();
     if (entry) {
         ui->filterText->setText(entry->votingAddress());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deploy wizard
+// ---------------------------------------------------------------------------
+
+void MasternodeList::on_btnDeployMasternode_clicked()
+{
+    if (!walletModel) {
+        QMessageBox::warning(this, tr("No Wallet"),
+                             tr("A wallet is required to deploy a masternode."));
+        return;
+    }
+
+    auto* wizard = new MasternodeWizard(walletModel, this);
+    wizard->setAttribute(Qt::WA_DeleteOnClose);
+    wizard->setWindowModality(Qt::WindowModal);
+    wizard->show();
+}
+
+// ---------------------------------------------------------------------------
+// Context-menu: Update Service
+// ---------------------------------------------------------------------------
+
+void MasternodeList::updateService_clicked()
+{
+    const auto* entry = GetSelectedEntry();
+    if (!entry || !walletModel) return;
+
+    bool ok = false;
+    QString newService = QInputDialog::getText(this, tr("Update Service Address"),
+        tr("Enter the new IP:port for masternode %1:").arg(entry->proTxHash().left(12) + "..."),
+        QLineEdit::Normal, entry->service(), &ok);
+
+    if (!ok || newService.trimmed().isEmpty()) return;
+
+    // Need operator BLS secret key
+    QString blsSecret = QInputDialog::getText(this, tr("Operator BLS Secret Key"),
+        tr("Enter the operator BLS secret key:"),
+        QLineEdit::Password, {}, &ok);
+
+    if (!ok || blsSecret.trimmed().isEmpty()) return;
+
+    WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+    if (!ctx.isValid()) return;
+
+    try {
+        // coreP2PAddrs is an array parameter
+        UniValue addrArr(UniValue::VARR);
+        addrArr.push_back(newService.toStdString());
+
+        UniValue params(UniValue::VARR);
+        params.push_back(entry->proTxHash().toStdString());
+        params.push_back(addrArr);
+        params.push_back(blsSecret.toStdString());
+
+        QByteArray encoded = QUrl::toPercentEncoding(walletModel->getWalletName());
+        std::string uri = "/wallet/" + std::string(encoded.constData(), encoded.length());
+
+        UniValue result = walletModel->node().executeRpc("protx update_service", params, uri);
+        QMessageBox::information(this, tr("Service Updated"),
+            tr("Service address updated successfully.\nTransaction: %1")
+                .arg(QString::fromStdString(result.isStr() ? result.get_str() : result.write())));
+    } catch (const UniValue& e) {
+        QString msg = e.isObject() && e.find_value("message").isStr()
+            ? QString::fromStdString(e.find_value("message").get_str()) : tr("RPC error");
+        QMessageBox::critical(this, tr("Update Failed"), msg);
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, tr("Update Failed"),
+                              QString::fromStdString(e.what()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context-menu: Update Registrar
+// ---------------------------------------------------------------------------
+
+void MasternodeList::updateRegistrar_clicked()
+{
+    const auto* entry = GetSelectedEntry();
+    if (!entry || !walletModel) return;
+
+    bool ok = false;
+    QString newOperatorPubKey = QInputDialog::getText(this, tr("Update Registrar"),
+        tr("Enter the new operator public key (leave blank to keep current):"),
+        QLineEdit::Normal, {}, &ok);
+
+    if (!ok) return;
+
+    QString newVotingAddr = QInputDialog::getText(this, tr("Update Voting Address"),
+        tr("Enter the new voting address (leave blank to keep current):"),
+        QLineEdit::Normal, {}, &ok);
+
+    if (!ok) return;
+
+    QString newPayoutAddr = QInputDialog::getText(this, tr("Update Payout Address"),
+        tr("Enter the new payout address (leave blank to keep current):"),
+        QLineEdit::Normal, {}, &ok);
+
+    if (!ok) return;
+
+    // At least one field must be specified
+    if (newOperatorPubKey.trimmed().isEmpty() &&
+        newVotingAddr.trimmed().isEmpty() &&
+        newPayoutAddr.trimmed().isEmpty())
+    {
+        QMessageBox::information(this, tr("No Changes"),
+                                 tr("No fields were changed."));
+        return;
+    }
+
+    WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+    if (!ctx.isValid()) return;
+
+    try {
+        UniValue params(UniValue::VARR);
+        params.push_back(entry->proTxHash().toStdString());
+        params.push_back(newOperatorPubKey.trimmed().isEmpty() ? "" : newOperatorPubKey.toStdString());
+        params.push_back(newVotingAddr.trimmed().isEmpty() ? "" : newVotingAddr.toStdString());
+        params.push_back(newPayoutAddr.trimmed().isEmpty() ? "" : newPayoutAddr.toStdString());
+
+        QByteArray encoded = QUrl::toPercentEncoding(walletModel->getWalletName());
+        std::string uri = "/wallet/" + std::string(encoded.constData(), encoded.length());
+
+        UniValue result = walletModel->node().executeRpc("protx update_registrar", params, uri);
+        QMessageBox::information(this, tr("Registrar Updated"),
+            tr("Registrar information updated successfully.\nTransaction: %1")
+                .arg(QString::fromStdString(result.isStr() ? result.get_str() : result.write())));
+    } catch (const UniValue& e) {
+        QString msg = e.isObject() && e.find_value("message").isStr()
+            ? QString::fromStdString(e.find_value("message").get_str()) : tr("RPC error");
+        QMessageBox::critical(this, tr("Update Failed"), msg);
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, tr("Update Failed"),
+                              QString::fromStdString(e.what()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context-menu: Revoke
+// ---------------------------------------------------------------------------
+
+void MasternodeList::revokeMasternode_clicked()
+{
+    const auto* entry = GetSelectedEntry();
+    if (!entry || !walletModel) return;
+
+    if (QMessageBox::question(this, tr("Revoke Masternode"),
+            tr("Are you sure you want to revoke masternode %1?\n\n"
+               "This will remove the masternode from the network. "
+               "The collateral will remain locked until the revocation confirms.")
+                .arg(entry->proTxHash().left(12) + "..."),
+            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    bool ok = false;
+    QString blsSecret = QInputDialog::getText(this, tr("Operator BLS Secret Key"),
+        tr("Enter the operator BLS secret key to authorize revocation:"),
+        QLineEdit::Password, {}, &ok);
+
+    if (!ok || blsSecret.trimmed().isEmpty()) return;
+
+    WalletModel::UnlockContext ctx(walletModel->requestUnlock());
+    if (!ctx.isValid()) return;
+
+    try {
+        UniValue params(UniValue::VARR);
+        params.push_back(entry->proTxHash().toStdString());
+        params.push_back(blsSecret.toStdString());
+
+        QByteArray encoded = QUrl::toPercentEncoding(walletModel->getWalletName());
+        std::string uri = "/wallet/" + std::string(encoded.constData(), encoded.length());
+
+        UniValue result = walletModel->node().executeRpc("protx revoke", params, uri);
+        QMessageBox::information(this, tr("Masternode Revoked"),
+            tr("Masternode revocation submitted.\nTransaction: %1")
+                .arg(QString::fromStdString(result.isStr() ? result.get_str() : result.write())));
+    } catch (const UniValue& e) {
+        QString msg = e.isObject() && e.find_value("message").isStr()
+            ? QString::fromStdString(e.find_value("message").get_str()) : tr("RPC error");
+        QMessageBox::critical(this, tr("Revocation Failed"), msg);
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, tr("Revocation Failed"),
+                              QString::fromStdString(e.what()));
     }
 }

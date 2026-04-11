@@ -9,8 +9,10 @@
 
 #include <QDialog>
 #include <QMessageBox>
+#include <QPointer>
 #include <QProgressDialog>
 #include <QString>
+#include <QThread>
 #include <QTimer>
 
 static const int MAX_SEND_POPUP_ENTRIES = 10;
@@ -72,6 +74,9 @@ private:
     bool send(const QList<SendCoinsRecipient>& recipients, QString& question_string, QString& informative_text, QString& detailed_text);
     bool fFeeMinimized{true};
     bool fKeepChangeAddress;
+
+    // Active shielded send thread, tracked so the destructor can wait for it.
+    QPointer<QThread> m_shieldedThread;
 
     // Returns true if any recipient address is a Sapling z-address
     bool hasShieldedRecipient(const QList<SendCoinsRecipient>& recipients) const;

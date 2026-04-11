@@ -330,9 +330,9 @@ bool OptionsModel::Init(bilingual_str& error)
         settings.setValue("fKeepChangeAddress", false);
     fKeepChangeAddress = settings.value("fKeepChangeAddress", false).toBool();
 
-    if (!settings.contains("fShowMasternodesTab"))
-        settings.setValue("fShowMasternodesTab", false);
-    m_enable_masternodes = settings.value("fShowMasternodesTab", false).toBool();
+    // Kerrigan: masternodes are a core feature, always show the tab
+    settings.setValue("fShowMasternodesTab", true);
+    m_enable_masternodes = true;
 
     if (!settings.contains("show_governance_clock"))
         settings.setValue("show_governance_clock", false);

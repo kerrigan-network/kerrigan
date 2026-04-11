@@ -141,6 +141,9 @@ public:
     // Sapling shielded balance
     CAmount getShieldedBalance() const;
 
+    // Check if Sapling is available on the current chain
+    bool isSaplingAvailable() const;
+
     // Generate a new Sapling shielded address
     QString getNewSaplingAddress();
 

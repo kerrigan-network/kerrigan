@@ -111,6 +111,7 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const NetworkStyle* networkStyle,
     }
 
     setContextMenuPolicy(Qt::PreventContextMenu);
+    setMinimumSize(980, 600);
 
 #ifdef ENABLE_WALLET
     enableWallet = WalletModel::isWalletEnabled();
@@ -219,6 +220,7 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const NetworkStyle* networkStyle,
     progressBarLabel = new QLabel();
     progressBarLabel->setVisible(true);
     progressBarLabel->setObjectName("lblStatusBarProgress");
+    progressBarLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     progressBar = new GUIUtil::ProgressBar();
     progressBar->setAlignment(Qt::AlignCenter);
     progressBar->setVisible(true);
@@ -1597,7 +1599,12 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, const QStri
     if (walletFrame) {
         if(secs < MAX_BLOCK_TIME_GAP) {
             modalOverlay->showHide(true, true);
-            // TODO instead of hiding it forever, we should add meaningful information about MN sync to the overlay
+            // Blockchain is synced -- show masternode count in status bar before hiding overlay
+            const auto [dmn, pindex] = m_node.evo().getListAtChainTip();
+            if (dmn) {
+                const auto counts = dmn->getCounts();
+                statusBar()->showMessage(tr("Masternodes: %1 enabled").arg(counts.enabled()), 10000);
+            }
             modalOverlay->hideForever();
         } else {
             modalOverlay->showHide();

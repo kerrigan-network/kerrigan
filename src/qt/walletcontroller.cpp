@@ -149,7 +149,12 @@ WalletModel* WalletController::getOrCreateWallet(std::unique_ptr<interfaces::Wal
     // Qt because of startTimer. Considering the current thread can be a RPC
     // thread, better delegate the calling to Qt with Qt::AutoConnection.
     const bool called = QMetaObject::invokeMethod(wallet_model, "startPollBalance");
-    if (!called) qWarning() << "WalletController: failed to invoke startPollBalance";
+    if (!called) {
+        qWarning() << "WalletController: failed to invoke startPollBalance, retrying...";
+        QTimer::singleShot(100, wallet_model, [wallet_model]() {
+            QMetaObject::invokeMethod(wallet_model, "startPollBalance");
+        });
+    }
 
     connect(wallet_model, &WalletModel::unload, this, [this, wallet_model] {
         // Defer removeAndDeleteWallet when no modal widget is active.

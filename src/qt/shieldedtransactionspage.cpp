@@ -122,7 +122,7 @@ void ShieldedTransactionsPage::onContextMenu(const QPoint& point)
 
 void ShieldedTransactionsPage::updateStatusLabel()
 {
-    if (!m_walletModel) return;
+    if (!m_walletModel || !m_walletModel->getOptionsModel()) return;
     CAmount shielded = m_walletModel->getShieldedBalance();
     ui->statusLabel->setText(tr("Shielded Balance: %1").arg(
         BitcoinUnits::formatWithUnit(m_walletModel->getOptionsModel()->getDisplayUnit(), shielded, false, BitcoinUnits::SeparatorStyle::ALWAYS)));

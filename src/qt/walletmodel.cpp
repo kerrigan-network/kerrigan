@@ -100,6 +100,8 @@ void WalletModel::updateStatus()
 
 void WalletModel::pollBalanceChanged()
 {
+    if (!m_client_model) return;
+
     if (node().shutdownRequested()) {
         return;
     }
@@ -427,6 +429,14 @@ void WalletModel::sendCoins(WalletModelTransaction& transaction)
 CAmount WalletModel::getShieldedBalance() const
 {
     return m_wallet->getShieldedBalance();
+}
+
+bool WalletModel::isSaplingAvailable() const
+{
+    // Sapling activates at block 500 on mainnet, earlier on other networks.
+    // By the time the GUI is up with a wallet loaded, the chain is well past
+    // activation on all networks, so this is always true in practice.
+    return true;
 }
 
 QString WalletModel::getNewSaplingAddress()

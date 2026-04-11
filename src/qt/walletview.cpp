@@ -40,6 +40,7 @@ WalletView::WalletView(WalletModel* wallet_model, QWidget* parent)
       walletModel(wallet_model)
 {
     assert(walletModel);
+    if (!walletModel) return;
 
     // Create tabs
     overviewPage = new OverviewPage();
