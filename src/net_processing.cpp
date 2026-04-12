@@ -5477,7 +5477,7 @@ void PeerManagerImpl::ProcessMessage(
         if (msg_type == NetMsgType::SEALSHARE) {
             // Skip HMP messages during IBD; state depends on chain tip context.
             if (m_chainman.ActiveChainstate().IsInitialBlockDownload()) return;
-            // Skip before Stage 3 — seals are not embedded in blocks yet (#1084)
+            // Skip before Stage 3 -- seals are not embedded in blocks yet (#1084)
             {
                 LOCK(cs_main);
                 if (m_chainman.ActiveChain().Height() < m_chainman.GetParams().GetConsensus().nHMPStage3Height) return;
@@ -5530,7 +5530,7 @@ void PeerManagerImpl::ProcessMessage(
         if (msg_type == NetMsgType::SEALASM) {
             // Skip HMP messages during IBD.
             if (m_chainman.ActiveChainstate().IsInitialBlockDownload()) return;
-            // Skip before Stage 3 — seals are not embedded in blocks yet (#1084)
+            // Skip before Stage 3 -- seals are not embedded in blocks yet (#1084)
             {
                 LOCK(cs_main);
                 if (m_chainman.ActiveChain().Height() < m_chainman.GetParams().GetConsensus().nHMPStage3Height) return;

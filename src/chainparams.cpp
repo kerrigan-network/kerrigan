@@ -246,7 +246,7 @@ public:
         // but never required until Phase 2 activates via a future hard fork.
         consensus.nHMPMandatoryProofHeight = 0;
         consensus.MinBIP9WarningHeight = 0;
-        // Per-algo genesis powLimits — permissive targets for chain bootstrapping.
+        // Per-algo genesis powLimits -- permissive targets for chain bootstrapping.
         // These are intentionally easy so the first miner on each algo can produce blocks.
         // After nDiffFloorHeight, the tighter powLimitFloorAlgo[] values take over.
         // Formula: floor_target = 2^256 / (hashrate_H_per_s * 480)
@@ -267,7 +267,7 @@ public:
         consensus.nGapThresholdHeight = 16500; // Tighter 40-block gap threshold activates here
         consensus.powLimitFloorAlgo[ALGO_X11]          = uint256S("0000000000271700000000000000000000000000000000000000000000000000"); // Antminer D3, 15 GH/s
         consensus.powLimitFloorAlgo[ALGO_KAWPOW]       = uint256S("000000007f420000000000000000000000000000000000000000000000000000"); // GTX 1080, 18 MH/s
-        consensus.powLimitFloorAlgo[ALGO_EQUIHASH_200] = uint256S("0000020000000000000000000000000000000000000000000000000000000000"); // ~17.5 kSol/s (same as genesis cap — already tight for Z9 Mini)
+        consensus.powLimitFloorAlgo[ALGO_EQUIHASH_200] = uint256S("0000020000000000000000000000000000000000000000000000000000000000"); // ~17.5 kSol/s (same as genesis cap -- already tight for Z9 Mini)
         consensus.powLimitFloorAlgo[ALGO_EQUIHASH_192] = uint256S("00048d1000000000000000000000000000000000000000000000000000000000"); // GTX 1080, 30 Sol/s
         consensus.nPowTargetTimespan = 24 * 60 * 60; // Kerrigan: 1 day
         consensus.nPowTargetSpacing = 120; // Kerrigan: 2 minutes

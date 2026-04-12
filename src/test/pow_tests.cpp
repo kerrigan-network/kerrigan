@@ -329,7 +329,7 @@ BOOST_AUTO_TEST_CASE(per_algo_difficulty_floors)
     const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
     const auto& consensus = chainParams->GetConsensus();
 
-    // Genesis powLimitAlgo[] are permissive bootstrap targets — no strict ordering required.
+    // Genesis powLimitAlgo[] are permissive bootstrap targets -- no strict ordering required.
     // All must be non-zero.
     for (int algo = 0; algo < NUM_ALGOS; algo++) {
         BOOST_CHECK(UintToArith256(consensus.powLimitAlgo[algo]) > arith_uint256(0));
@@ -383,7 +383,7 @@ BOOST_AUTO_TEST_CASE(gap_threshold_activation)
     const int postThreshold = NUM_ALGOS * 10;
     BOOST_CHECK_EQUAL(postThreshold, 40);
 
-    // 40 is exactly one averaging window — the minimum safe value
+    // 40 is exactly one averaging window -- the minimum safe value
     BOOST_CHECK_EQUAL(postThreshold, NUM_ALGOS * 10 /* nAveragingInterval */);
 }
 

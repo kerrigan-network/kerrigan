@@ -89,9 +89,9 @@ unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& pa
     // the stored difficulty is stale and may be unreachable. Reset to
     // powLimit so the algo can recover.
     //
-    // Pre-nDiffFloorHeight: 240 blocks (4*10*6) — ~80 hours at 2min blocks
+    // Pre-nDiffFloorHeight: 240 blocks (4*10*6) -- ~80 hours at 2min blocks
     // when only one algo is mining. Too slow under hashrate volatility.
-    // Post-nDiffFloorHeight: 40 blocks (4*10*1) — ~1.3 hours. Equals one
+    // Post-nDiffFloorHeight: 40 blocks (4*10*1) -- ~1.3 hours. Equals one
     // full averaging window (NUM_ALGOS * nAveragingInterval), the minimum
     // safe value before the DAA oscillates. See #970.
     const int nGapThreshold = (gapThresholdOverride > 0)
