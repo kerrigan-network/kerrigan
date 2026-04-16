@@ -91,7 +91,7 @@ install_tools() {
             sudo apt-get update -qq
             sudo apt-get install -y \
                 build-essential git cmake curl pkg-config \
-                autoconf automake libtool bsdmainutils \
+                autoconf automake libtool libtool-bin bsdmainutils \
                 python3 ca-certificates patch
             ;;
         fedora|rocky|almalinux|rhel|centos)

@@ -49,7 +49,7 @@ are needed:
 
 ```sh
 sudo apt-get install build-essential git cmake curl pkg-config \
-    autoconf automake libtool bsdmainutils python3
+    autoconf automake libtool libtool-bin bsdmainutils python3
 ```
 
 GCC 11+ or Clang 16+ is required (C++20). Ubuntu 22.04 ships GCC 11, which is
