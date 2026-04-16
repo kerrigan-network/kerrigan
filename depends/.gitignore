@@ -1,7 +1,12 @@
 SDKs/
 work/
 built/
-sources/
+# Downloaded / generated source tarballs live here. Most are fetched
+# on demand and ignored, but the vendored-crates tarball is committed
+# so reproducible builds work offline without needing cargo at build time.
+sources/*
+!sources/.gitkeep
+!sources/vendored-crates-*.tar.gz
 config.site
 x86_64*
 amd64*
