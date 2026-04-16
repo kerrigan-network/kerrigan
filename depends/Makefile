@@ -46,7 +46,10 @@ NO_NATPMP ?=
 MULTIPROCESS ?=
 LTO ?=
 NO_HARDEN ?=
-FALLBACK_DOWNLOAD_PATH ?= http://dash-depends-sources.s3-website-us-west-2.amazonaws.com
+# No fallback mirror: primary URLs are SHA256-verified and an insecure
+# plaintext-HTTP fallback would only add attack surface. Packages that
+# need an alternate source should list it in their own *_download_path.
+FALLBACK_DOWNLOAD_PATH ?=
 
 C_STANDARD ?= c11
 CXX_STANDARD ?= c++20
@@ -59,6 +62,12 @@ DOWNLOAD_CONNECT_TIMEOUT:=30
 DOWNLOAD_RETRIES:=3
 HOST_ID_SALT ?= salt
 BUILD_ID_SALT ?= salt
+
+# Location into which `cargo vendor` stages the offline crate registry.
+# Referenced by depends/funcs.mk::vendor_crate_deps and by individual
+# Rust package preprocess rules that emit .cargo/config.toml. Keep this
+# in sync with RUST_VENDORED_SOURCES in depends/config.site.in.
+CRATE_REGISTRY := vendored-sources
 
 ifneq ($(DEBUG),)
 release_type=debug
@@ -242,6 +251,7 @@ $(host_prefix)/share/config.site : config.site.in $(host_prefix)/.stamp_$(final_
             -e 's|@WINDRES@|$(host_WINDRES)|' \
             -e 's|@build_os@|$(build_os)|' \
             -e 's|@host_os@|$(host_os)|' \
+            -e 's|@rust_target@|$(call rust_target,native_rust,$(canonical_host),$(host_os))|' \
             -e 's|@CFLAGS@|$(strip $(host_CFLAGS) $(host_$(release_type)_CFLAGS))|' \
             -e 's|@CXXFLAGS@|$(strip $(host_CXXFLAGS) $(host_$(release_type)_CXXFLAGS))|' \
             -e 's|@CPPFLAGS@|$(strip $(host_CPPFLAGS) $(host_$(release_type)_CPPFLAGS))|' \
