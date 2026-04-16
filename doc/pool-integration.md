@@ -311,3 +311,78 @@ Stock S-NOMP does not support `useCoinbasetxn` or equihash192. The following pat
 - Kerrigan uses X11 for all block identity hashes regardless of mining algo
 - `getblock` and `getbestblockhash` always return X11 hashes
 - The `template_hash` field in GBT matches the X11 identity hash
+
+
+## Building Coinbase From Scratch
+
+If your pool must rebuild the coinbase instead of using `coinbasetxn`, the
+following details are mandatory. Getting any of them wrong orphans every block.
+
+### masternode[] Output Array
+
+GBT returns a `masternode` array with **4 entries** (not 1 like stock Dash):
+
+| Index | Recipient | Typical share |
+|-------|-----------|---------------|
+| 0 | Growth escrow (consensus-locked P2SH) | 40% |
+| 1 | Masternode payment | 20% |
+| 2 | Dev fund | 5% |
+| 3 | Founders fund | 5% |
+
+The miner receives the remainder (typically 30%). Use `coinbasevalue_miner`
+for the miner output amount, NOT `coinbasevalue` (which is the full block
+reward including all 4 mandatory outputs).
+
+### CCbTx Payload (nVersion and vExtraPayload)
+
+Kerrigan coinbase transactions use Dash v3 special transaction format:
+
+- `nVersion` must be `0x00050003` (version 3 with type 5 = TRANSACTION_COINBASE)
+- `vExtraPayload` must contain the `coinbase_payload` hex from GBT verbatim
+
+The payload encodes the deterministic masternode list merkle root and block
+height. The daemon generates it; the pool just preserves the bytes. Do NOT
+modify or recompute the payload.
+
+### coinbase_payload and HMP
+
+The `coinbase_payload` may include HMP (Hivemind Protocol) seal identity
+data. Pools do not need to understand HMP internals. The payload bytes pass
+through verbatim from GBT to the submitted block. The seal signs over the
+previous block's state (prevSealHash), not the current coinbase, so
+reusing the payload on a pool-rebuilt coinbase is consensus-valid.
+
+### Pseudocode: Rebuilding a Coinbase
+
+```
+# 1. Request GBT with pooladdress
+gbt = rpc("getblocktemplate", {"pooladdress": POOL_ADDR})
+
+# 2. Build outputs
+outputs = []
+for mn in gbt["masternode"]:
+    outputs.append(TxOut(mn["amount"], decode_script(mn["script"])))
+miner_amount = gbt["coinbasevalue_miner"]
+outputs.append(TxOut(miner_amount, pay_to_address(POOL_ADDR)))
+
+# 3. Build coinbase input
+scriptsig = serialize_height(gbt["height"]) + extranonce1 + extranonce2
+coinbase_in = TxIn(prevout=NULL_OUTPOINT, scriptsig=scriptsig, sequence=0xffffffff)
+
+# 4. Assemble transaction with CCbTx payload
+tx = Transaction()
+tx.nVersion = 0x00050003          # TRANSACTION_COINBASE v3
+tx.vin = [coinbase_in]
+tx.vout = outputs
+tx.nLockTime = 0
+tx.vExtraPayload = hex_decode(gbt["coinbase_payload"])  # verbatim
+
+# 5. Submit block with this coinbase
+block = assemble_block(gbt, tx)
+rpc("submitblock", block.serialize_hex())
+```
+
+**Simpler alternative:** Use `coinbasetxn` from GBT directly and skip all of
+the above. The daemon handles the entire coinbase construction including
+masternode outputs, CbTx payload, and HMP data. The pool only needs to inject
+extranonce into the scriptSig for share uniqueness.
