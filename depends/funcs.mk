@@ -34,8 +34,48 @@ define fetch_file_inner
 endef
 
 define fetch_file
-    ( $(call fetch_file_inner,$(1),$(2),$(3),$(4),$(5)) || \
-      $(call fetch_file_inner,$(1),$(FALLBACK_DOWNLOAD_PATH),$(4),$(4),$(5)))
+    $(if $(FALLBACK_DOWNLOAD_PATH),\
+      ( $(call fetch_file_inner,$(1),$(2),$(3),$(4),$(5)) || \
+        $(call fetch_file_inner,$(1),$(FALLBACK_DOWNLOAD_PATH),$(4),$(4),$(5))),\
+      $(call fetch_file_inner,$(1),$(2),$(3),$(4),$(5)))
+endef
+
+# Vendor the crate dependencies of a Rust package into a deterministic tarball
+# stored next to the upstream source tarball. Arguments:
+#   $(1) package name (e.g. native_cxxbridge)
+#   $(2) upstream source tarball file name
+#   $(3) path to a committed Cargo.lock to seed the vendor resolution
+#   $(4) relative path (inside the extracted source tree) to the Cargo.toml
+#   $(5) output vendored tarball file name
+# The archive is produced from a sorted file list so the result is byte
+# reproducible.
+#
+# Common case (offline / release): the vendored tarball is shipped in
+# depends/sources/ and this macro short-circuits immediately via `test -f`.
+#
+# Cold case (regeneration): the macro will try to run `cargo vendor` using
+# the native_rust cache tarball. That tarball is produced by the native_rust
+# package build, so it is NOT available during the fetch phase on a fresh
+# tree. If a developer hits this path, the macro emits a clear error and
+# directs them at ./download-crates.sh, which is the supported way to
+# rebuild the vendored tarball ahead of time.
+define vendor_crate_deps
+(test -f $$($(1)_source_dir)/$(5) || \
+  ( if test ! -f "$(native_rust_cached)"; then \
+      echo "error: $(1) vendored tarball $(5) is missing and native_rust is not yet cached." >&2; \
+      echo "hint:  run ./download-crates.sh (or Zcash-style regeneration) to rebuild $(5)" >&2; \
+      echo "       before invoking the depends/ build, then commit the result to depends/sources/." >&2; \
+      exit 1; \
+    fi; \
+    mkdir -p $$($(1)_download_dir)/$(1) && echo Vendoring dependencies for $(1)... && \
+    tar -xf $(native_rust_cached) -C $$($(1)_download_dir) && \
+    tar --strip-components=1 -xf $$($(1)_source_dir)/$(2) -C $$($(1)_download_dir)/$(1) && \
+    cp $(3) $$($(1)_download_dir)/$(1)/Cargo.lock && \
+    $$($(1)_download_dir)/native/bin/cargo vendor --locked --manifest-path $$($(1)_download_dir)/$(1)/$(4) $$($(1)_download_dir)/$(CRATE_REGISTRY) && \
+    cd $$($(1)_download_dir) && \
+    find $(CRATE_REGISTRY) | sort | tar --no-recursion -czf $$($(1)_download_dir)/$(5).temp -T - && \
+    mv $$($(1)_download_dir)/$(5).temp $$($(1)_source_dir)/$(5) && \
+    rm -rf $$($(1)_download_dir) ))
 endef
 
 define int_get_build_recipe_hash
