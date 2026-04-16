@@ -26,8 +26,8 @@ zcash_encoding = "0.3"
 zip32 = "0.2"
 
 # Supporting crypto
-blake2b_simd = "1"
-blake2s_simd = "1"
+blake2b_simd = "=1.0.3"
+blake2s_simd = "=1.0.3"
 group = "0.13"
 subtle = "2.2"
 rand_core = "0.6"
