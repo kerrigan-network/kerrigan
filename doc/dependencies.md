@@ -1,58 +1,148 @@
 # Dependencies
 
-These are the dependencies used by Kerrigan.
-You can find installation instructions in the `build-*.md` file for your platform.
-"Runtime" and "Version Used" are both in reference to the release binaries.
+Every dependency listed here is built from source via `depends/` with a
+pinned version and SHA256. Release binaries have zero distro-package library
+dependencies beyond glibc and the kernel.
 
-| Dependency | Minimum required |
-| --- | --- |
-| [Autoconf](https://www.gnu.org/software/autoconf/) | [2.69](https://github.com/bitcoin/bitcoin/pull/17769) |
-| [Automake](https://www.gnu.org/software/automake/) | [1.13](https://github.com/bitcoin/bitcoin/pull/18290) |
-| [Clang](https://clang.llvm.org) | [16.0](https://github.com/bitcoin/bitcoin/pull/30263) |
-| [GCC](https://gcc.gnu.org) | [11.1](https://github.com/bitcoin/bitcoin/pull/29091) |
-| [Python](https://www.python.org) (scripts, tests) | [3.10](https://github.com/bitcoin/bitcoin/pull/30527) |
-| [Rust](https://www.rust-lang.org/) (Sapling zk-SNARK) | 1.81+ (via [rustup](https://rustup.rs/)) |
-| [cxxbridge](https://cxx.rs/) (C++/Rust FFI) | 1.0.186 (exact: `cargo install cxxbridge-cmd --version 1.0.186`) |
-| [systemtap](https://sourceware.org/systemtap/) ([tracing](tracing.md))| N/A |
+"Runtime" is whether the library is linked dynamically into the release
+binary. Everything in Kerrigan 1.1.1 release tarballs is statically linked
+except glibc.
 
-## Required
+"Stability" is an operational call: how often this package is expected to
+need a version bump.
 
-| Dependency | Releases | Version used | Minimum required | Runtime |
+- **stable**: pinned version is expected to survive multi-year cadence
+  without a CVE or platform compatibility break.
+- **cutting-edge**: expected to need version bumps on annual or faster
+  cadence (security churn, LLVM cadence, Apple SDK churn).
+
+## Host Build Tools
+
+These live on the build host, not in `depends/`, and are not shipped.
+
+| Dependency | Minimum required | Stability |
+| --- | --- | --- |
+| [Autoconf](https://www.gnu.org/software/autoconf/) | 2.69 | stable |
+| [Automake](https://www.gnu.org/software/automake/) | 1.13 | stable |
+| [Clang](https://clang.llvm.org) | 16.0 | cutting-edge |
+| [GCC](https://gcc.gnu.org) | 11.1 | cutting-edge |
+| [Python](https://www.python.org) (scripts, tests) | 3.10 | stable |
+| [CMake](https://cmake.org) (Rust build scripts) | 3.16 | stable |
+| [pkg-config](https://www.freedesktop.org/wiki/Software/pkg-config/) | 0.29 | stable |
+
+The Rust toolchain is staged by `depends/`, not from the host. See
+`depends/packages/native_rust.mk`.
+
+## Built via `depends/`
+
+Every package below is built from pinned source in the `depends/` tree. The
+main Kerrigan build consumes these via `depends/<triple>/share/config.site`.
+
+### Rust Toolchain
+
+| Dependency | Package file | Version | Stability |
+| --- | --- | --- | --- |
+| Rust compiler + rust-std | `depends/packages/native_rust.mk` | 1.81.0 | cutting-edge |
+| cxxbridge (C++/Rust FFI) | `depends/packages/native_cxxbridge.mk` | 1.0.186 | cutting-edge |
+| cxx.h header | `depends/packages/rustcxx.mk` | 1.0.186 | cutting-edge |
+| Vendored crates tarball | `depends/packages/vendored_crates.mk` | 1.1.1 | cutting-edge |
+
+Rust cadence means 1.81.0 will likely be bumped during each Kerrigan
+release cycle. Update procedure is in
+[build-reproducibility.md](build-reproducibility.md).
+
+### Required C/C++ Libraries
+
+| Dependency | Package file | Version | Stability | Runtime |
 | --- | --- | --- | --- | --- |
-| [Boost](../depends/packages/boost.mk) | [link](https://www.boost.org/users/download/) | 1.81.0 | [1.73.0](https://github.com/bitcoin/bitcoin/pull/29066) | No |
-| [libevent](../depends/packages/libevent.mk) | [link](https://github.com/libevent/libevent/releases) | [2.1.12-stable](https://github.com/bitcoin/bitcoin/pull/21991) | [2.1.8](https://github.com/bitcoin/bitcoin/pull/24681) | No |
-| [libsodium](https://doc.libsodium.org/) | [link](https://download.libsodium.org/libsodium/releases/) | 1.0.18 | 1.0.18 | No |
-| glibc | [link](https://www.gnu.org/software/libc/) | N/A | [2.31](https://github.com/bitcoin/bitcoin/pull/29987) | Yes |
+| [Boost](../depends/packages/boost.mk) | `boost.mk` | 1.81.0 | stable | No |
+| [libevent](../depends/packages/libevent.mk) | `libevent.mk` | 2.1.12-stable | stable | No |
+| [libsodium](../depends/packages/libsodium.mk) | `libsodium.mk` | 1.0.20 | stable | No |
+| [libbacktrace](../depends/packages/backtrace.mk) | `backtrace.mk` | commit `b9e4006` | stable | No |
+| glibc (host) | N/A | 2.31+ | stable | Yes |
 
-## Optional
+### Optional
 
-| Dependency | Releases | Version used | Minimum required | Runtime |
+| Dependency | Package file | Version | Stability | Runtime |
 | --- | --- | --- | --- | --- |
-| libgmp | [link](https://gmplib.org/download/gmp/)<sup>[ \* ](#note1)</sup> | 6.3.0 | [6.2.0](https://github.com/dashpay/bls-signatures/pull/92) | No |
+| [libgmp](../depends/packages/gmp.mk) | `gmp.mk` | 6.3.0 | stable | No |
 
 ### GUI
-| Dependency | Releases | Version used | Minimum required | Runtime |
+
+| Dependency | Package file | Version | Stability | Runtime |
 | --- | --- | --- | --- | --- |
-| [Fontconfig](../depends/packages/fontconfig.mk) | [link](https://www.freedesktop.org/wiki/Software/fontconfig/) | [2.12.6](https://github.com/bitcoin/bitcoin/pull/23495) | 2.6 | Yes |
-| [FreeType](../depends/packages/freetype.mk) | [link](https://freetype.org) | [2.11.0](https://github.com/bitcoin/bitcoin/commit/01544dd78ccc0b0474571da854e27adef97137fb) | 2.3.0 | Yes |
-| [qrencode](../depends/packages/qrencode.mk) | [link](https://fukuchi.org/works/qrencode/) | [4.1.1](https://github.com/bitcoin/bitcoin/pull/27312) | | No |
-| [Qt](../depends/packages/qt.mk) | [link](https://download.qt.io/official_releases/qt/) | [5.15.18](https://github.com/dashpay/dash/pull/6949) | [5.11.3](https://github.com/bitcoin/bitcoin/pull/24132) | No |
+| [Qt](../depends/packages/qt.mk) | `qt.mk` | 5.15.18 | cutting-edge | No |
+| [Fontconfig](../depends/packages/fontconfig.mk) | `fontconfig.mk` | 2.12.6 | stable | Yes |
+| [FreeType](../depends/packages/freetype.mk) | `freetype.mk` | 2.11.0 | stable | Yes |
+| [expat](../depends/packages/expat.mk) | `expat.mk` | 2.4.8 | stable | No |
+| [libxcb](../depends/packages/libxcb.mk) | `libxcb.mk` | 1.14 | stable | No |
+| [libxcb-util](../depends/packages/libxcb_util.mk) | `libxcb_util.mk` | (vendored set) | stable | No |
+| [libxkbcommon](../depends/packages/libxkbcommon.mk) | `libxkbcommon.mk` | 0.8.4 | stable | No |
+| [xcb-proto](../depends/packages/xcb_proto.mk) | `xcb_proto.mk` | 1.15.2 | stable | No |
+| [qrencode](../depends/packages/qrencode.mk) | `qrencode.mk` | 4.1.1 | stable | No |
+
+Qt 5.15 is LTS. A jump to Qt 6 will be a deliberate major-version change,
+not incremental.
 
 ### Networking
-| Dependency | Releases | Version used | Minimum required | Runtime |
+
+| Dependency | Package file | Version | Stability | Runtime |
 | --- | --- | --- | --- | --- |
-| [libnatpmp](../depends/packages/libnatpmp.mk) | [link](https://github.com/miniupnp/libnatpmp/) | commit [07004b9...](https://github.com/miniupnp/libnatpmp/tree/07004b97cf691774efebe70404cf22201e4d330d) | | No |
-| [MiniUPnPc](../depends/packages/miniupnpc.mk) | [link](https://miniupnp.tuxfamily.org/) | [2.2.2](https://github.com/bitcoin/bitcoin/pull/20421) | 2.1 | No |
+| [libnatpmp](../depends/packages/libnatpmp.mk) | `libnatpmp.mk` | commit `07004b9` | stable | No |
+| [MiniUPnPc](../depends/packages/miniupnpc.mk) | `miniupnpc.mk` | 2.2.2 | stable | No |
 
 ### Notifications
-| Dependency | Releases | Version used | Minimum required | Runtime |
+
+| Dependency | Package file | Version | Stability | Runtime |
 | --- | --- | --- | --- | --- |
-| [ZeroMQ](../depends/packages/zeromq.mk) | [link](https://github.com/zeromq/libzmq/releases) | 4.3.5 | 4.0.0 | No |
+| [ZeroMQ](../depends/packages/zeromq.mk) | `zeromq.mk` | 4.3.5 | stable | No |
 
 ### Wallet
-| Dependency | Releases | Version used | Minimum required | Runtime |
-| --- | --- | --- | --- | --- |
-| [Berkeley DB](../depends/packages/bdb.mk) (legacy wallet) | [link](https://www.oracle.com/technetwork/database/database-technologies/berkeleydb/downloads/index.html) | 4.8.30 | 4.8.x | No |
-| [SQLite](../depends/packages/sqlite.mk) | [link](https://sqlite.org) | 3.38.5 | [3.7.17](https://github.com/bitcoin/bitcoin/pull/19077) | No |
 
-<a name="note1">Note \*</a> : The minimum supported version on macOS is 6.3.0
+| Dependency | Package file | Version | Stability | Runtime |
+| --- | --- | --- | --- | --- |
+| [Berkeley DB](../depends/packages/bdb.mk) (legacy wallet) | `bdb.mk` | 4.8.30 | stable | No |
+| [SQLite](../depends/packages/sqlite.mk) | `sqlite.mk` | 3.38.5 | stable | No |
+
+Berkeley DB 4.8 is locked to 4.8.30 for on-disk wallet compatibility with
+historical Bitcoin/Dash releases. This pin will not change; see
+[build-unix.md](build-unix.md) Berkeley DB note.
+
+### Tracing (optional)
+
+| Dependency | Package file | Version | Stability | Runtime |
+| --- | --- | --- | --- | --- |
+| [systemtap](../depends/packages/systemtap.mk) | `systemtap.mk` | 4.8 | stable | No |
+
+### Multiprocess (optional, IPC between kerrigand subprocesses)
+
+| Dependency | Package file | Version | Stability | Runtime |
+| --- | --- | --- | --- | --- |
+| [libmultiprocess](../depends/packages/libmultiprocess.mk) | `libmultiprocess.mk` | commit `abe254b` | stable | No |
+| [Cap'n Proto](../depends/packages/capnp.mk) | `capnp.mk` | 1.3.0 | stable | No |
+
+## Version-Bump Cadence
+
+Cutting-edge packages (the ones most likely to need attention):
+
+- **Rust toolchain** (`native_rust.mk`, `native_cxxbridge.mk`, `rustcxx.mk`):
+  Rust releases every 6 weeks. cxxbridge follows cxx crate releases. Expect
+  to bump both once or twice per Kerrigan release.
+- **Vendored crates** (`vendored_crates.mk`): Every crate update forces a
+  rebuild of the vendored tarball via `./download-crates.sh`.
+- **Qt** (`qt.mk`): Qt 5.15 LTS receives patch releases. Bump on security
+  advisory or Qt 6 migration.
+- **Host compilers** (GCC, Clang): tracked by Bitcoin Core. Kerrigan
+  follows.
+
+Stable packages (Boost, libevent, libsodium, gmp, sqlite, zeromq,
+miniupnpc, libnatpmp, libbacktrace, Berkeley DB) are expected to hold for
+multiple Kerrigan releases without change. Bump only on CVE or platform
+compatibility break.
+
+## Change Procedure
+
+See [build-reproducibility.md](build-reproducibility.md) "How to Add a New
+Dependency" for the full process. One-line summary: pin exactly, regenerate
+the vendored crates tarball, verify offline build, commit everything
+together.

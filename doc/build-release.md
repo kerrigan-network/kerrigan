@@ -1,21 +1,38 @@
 RELEASE BUILD NOTES
 ====================
 
-How to build Kerrigan Core release binaries for Linux x86_64, Linux ARM64,
-Windows x64, and macOS ARM64. Qt GUI is included on every platform.
+How to build Kerrigan Core 1.1.1 release binaries for Linux x86_64, Linux
+ARM64, Windows x64, macOS x86_64, and macOS ARM64. Qt GUI is included on
+every platform.
 
-Qt 5.15.18 is pulled automatically by the depends system.
+Every runtime library (Boost, libevent, libsodium, gmp, sqlite, zmq,
+miniupnpc, libnatpmp, libbacktrace, Qt, Berkeley DB 4.8) and the Rust 1.81.0
+toolchain are built from pinned source via `depends/`. The host OS only needs
+build tools. See [build-reproducibility.md](build-reproducibility.md) for the
+reproducibility design.
+
+Target triples
+---------------
+
+```
+x86_64-pc-linux-gnu
+aarch64-linux-gnu
+x86_64-w64-mingw32
+x86_64-apple-darwin
+aarch64-apple-darwin
+```
 
 Output files
 ---------------
 
 ```
-kerrigan-1.0.4-x86_64-linux-gnu.tar.gz
-kerrigan-1.0.4-aarch64-linux-gnu.tar.gz
-kerrigan-1.0.4-win64.zip
-kerrigan-1.0.4-win64-setup.exe
-kerrigan-1.0.4-arm64-apple-darwin.tar.gz      (GitHub Actions)
-kerrigan-1.0.4-arm64-apple-darwin.dmg         (GitHub Actions)
+kerrigan-1.1.1-x86_64-linux-gnu.tar.gz
+kerrigan-1.1.1-aarch64-linux-gnu.tar.gz
+kerrigan-1.1.1-win64.zip
+kerrigan-1.1.1-win64-setup.exe
+kerrigan-1.1.1-x86_64-apple-darwin.tar.gz     (GitHub Actions)
+kerrigan-1.1.1-arm64-apple-darwin.tar.gz      (GitHub Actions)
+kerrigan-1.1.1-arm64-apple-darwin.dmg         (GitHub Actions)
 ```
 
 Host prerequisites (Ubuntu 22.04+)
@@ -32,29 +49,18 @@ apt install -y build-essential libtool autotools-dev automake pkg-config \
     nsis zip docker.io
 ```
 
-Rust toolchain (needed for Sapling zk-SNARK support):
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source ~/.cargo/env
-rustup target add x86_64-pc-windows-gnu aarch64-unknown-linux-gnu
-cargo install cxxbridge-cmd --version 1.0.186
-```
-
-Verify:
-
-```sh
-rustc --version       # >= 1.81
-cxxbridge --version   # 1.0.186
-```
+Rust 1.81.0 is installed by `depends/packages/native_rust.mk`. No manual
+`rustup` / `cargo install cxxbridge-cmd` step is required.
 
 Note: Ubuntu 22.04 ships mingw GCC 10, which does not support C++20. Windows
 builds must run inside a Docker Ubuntu 24.04 container (see Windows section).
+Linux and Qt builds run fine on the Ubuntu 22.04 host.
 
 Build depends
 -------------
 
-Each target takes roughly 45 minutes on 12 cores. Results are cached.
+Each target takes roughly 45 minutes on 12 cores cold, under 30 seconds when
+cached. Results are cached in `depends/built/`.
 
 ```sh
 git clone https://github.com/kerrigan-network/kerrigan.git
@@ -67,16 +73,22 @@ make HOST=x86_64-w64-mingw32 -j$(nproc)
 cd ..
 ```
 
-Verify each target has `config.site` and Qt:
+Verify each target has `config.site`, Qt, the Rust toolchain, and the
+vendored crates tarball:
 
 ```sh
-ls depends/x86_64-pc-linux-gnu/share/config.site
-ls depends/x86_64-pc-linux-gnu/lib/libQt5Core*
-ls depends/aarch64-linux-gnu/share/config.site
-ls depends/aarch64-linux-gnu/lib/libQt5Core*
-ls depends/x86_64-w64-mingw32/share/config.site
-ls depends/x86_64-w64-mingw32/lib/libQt5Core*
+for t in x86_64-pc-linux-gnu aarch64-linux-gnu x86_64-w64-mingw32; do
+    ls depends/$t/share/config.site
+    ls depends/$t/lib/libQt5Core*
+    ls depends/$t/native/bin/rustc
+    ls depends/$t/native/bin/cxxbridge
+    ls depends/$t/share/kerrigan-vendored-crates/vendor
+done
 ```
+
+If a Rust tarball download fails, verify the SHA256 pins in
+`depends/packages/native_rust.mk` with `contrib/devtools/update-rust-hashes.sh`
+(needs network). See [build-reproducibility.md](build-reproducibility.md).
 
 If the Qt download fails, drop the archives into `depends/sources/` manually:
 
@@ -93,14 +105,14 @@ Linux x86_64
 ------------
 
 ```sh
-VERSION="1.0.4"
+VERSION="1.1.1"
 RELEASE="$(pwd)/release"
 mkdir -p $RELEASE
 
-source ~/.cargo/env
 make clean 2>/dev/null || true
 ./autogen.sh
-./configure --prefix=$PWD/depends/x86_64-pc-linux-gnu \
+CONFIG_SITE=$PWD/depends/x86_64-pc-linux-gnu/share/config.site ./configure \
+    --prefix=/ \
     --disable-tests --disable-bench
 make -j$(nproc)
 
@@ -123,10 +135,10 @@ Linux ARM64 (cross-compile)
 ---------------------------
 
 ```sh
-source ~/.cargo/env
 make clean 2>/dev/null || true
 ./autogen.sh
-./configure --prefix=$PWD/depends/aarch64-linux-gnu \
+CONFIG_SITE=$PWD/depends/aarch64-linux-gnu/share/config.site ./configure \
+    --prefix=/ \
     --disable-tests --disable-bench \
     --host=aarch64-linux-gnu
 make -j$(nproc)
@@ -147,8 +159,9 @@ Windows x64 (Docker)
 --------------------
 
 Ubuntu 22.04 mingw is GCC 10 (no C++20). Use Docker Ubuntu 24.04 which ships
-GCC 13+. The depends must already be compiled on the host (see "Build
-depends"); Docker only compiles the project itself.
+GCC 13+. The `depends/` tree (including the Rust toolchain and vendored
+crates) must already be compiled on the host (see "Build depends"); Docker
+only compiles the project itself.
 
 The volume mount path inside the container must match the host path, because
 the depends system bakes absolute paths into its pkg-config `.pc` files.
@@ -169,11 +182,6 @@ apt-get update
 apt-get install -y build-essential libtool autotools-dev automake pkg-config \
     g++-mingw-w64-x86-64-posix nsis zip curl python3 bsdmainutils cmake
 
-curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source /root/.cargo/env
-rustup target add x86_64-pc-windows-gnu
-cargo install cxxbridge-cmd --version 1.0.186
-
 cd ${SRC}
 make clean 2>/dev/null || true
 ./autogen.sh
@@ -188,7 +196,7 @@ for bin in kerrigand.exe kerrigan-cli.exe kerrigan-tx.exe kerrigan-wallet.exe ke
 done
 test -f src/qt/kerrigan-qt.exe || { echo "ERROR: kerrigan-qt.exe missing"; exit 1; }
 
-VERSION="1.0.4"
+VERSION="1.1.1"
 RELEASE_DIR="kerrigan-${VERSION}-win64"
 rm -rf ${RELEASE}/${RELEASE_DIR}
 mkdir -p ${RELEASE}/${RELEASE_DIR}
@@ -264,11 +272,11 @@ ls -lh ${RELEASE}/${RELEASE_DIR}.zip ${RELEASE}/kerrigan-${VERSION}-win64-setup.
 '
 ```
 
-macOS ARM64 (GitHub Actions)
-----------------------------
+macOS x86_64 / ARM64 (GitHub Actions)
+-------------------------------------
 
-Workflow file: `.github/workflows/build.yml`. Produces a tar.gz (binaries) and
-a DMG (Qt app bundle).
+Workflow file: `.github/workflows/build.yml`. Produces a tar.gz (binaries)
+for each architecture and a DMG (Qt app bundle) for arm64.
 
 Configure flags used by the workflow:
 
@@ -284,13 +292,36 @@ Build flag:
 RANLIB="ranlib -no_warning_for_no_symbols"    # Xcode 16+ compatibility
 ```
 
+The Rust toolchain is staged by `depends/` (Apple Silicon and Intel
+rust-std hashes are pinned in `depends/packages/native_rust.mk`). No manual
+`rustup` install is required in the workflow.
+
 Triggers:
 
-- Push a tag matching `v*` (e.g. `git tag v1.0.4 && git push --tags`)
+- Push a tag matching `v*` (e.g. `git tag v1.1.1 && git push --tags`)
 - Or manually: Actions > "Build Kerrigan macOS" > Run workflow > main
 
 Artifacts appear in the run summary once the job finishes (roughly 20 minutes
 with warm caches). SHA256 checksums are printed in the build logs.
+
+Reproducibility
+---------------
+
+Two independent clean builds of tag `v1.1.1` on Ubuntu 22.04 x86_64 hosts
+produce release tarballs with identical SHA256 for the Linux x86_64, Linux
+aarch64, and Windows x86_64 targets. Reproducibility holds when:
+
+- the `depends/` tree is built from a clean state (`rm -rf depends/built
+  depends/work depends/<triple>`),
+- `SOURCE_DATE_EPOCH` is unset or identical between runs,
+- the host compiler versions match (same Ubuntu point release),
+- the vendored crates tarball hash in `depends/packages/vendored_crates.mk`
+  matches the one checked into `depends/sources/`.
+
+macOS reproducibility depends on Xcode point release and is only asserted
+across identical GitHub Actions runner images. See
+[build-reproducibility.md](build-reproducibility.md) for the verification
+procedure.
 
 Verify
 ------
@@ -300,9 +331,9 @@ cd release
 ls -lh *.tar.gz *.zip *.exe
 sha256sum *.tar.gz *.zip *.exe
 
-tar tzf kerrigan-1.0.4-x86_64-linux-gnu.tar.gz | grep qt
-tar tzf kerrigan-1.0.4-aarch64-linux-gnu.tar.gz | grep qt
-unzip -l kerrigan-1.0.4-win64.zip | grep qt
+tar tzf kerrigan-1.1.1-x86_64-linux-gnu.tar.gz | grep qt
+tar tzf kerrigan-1.1.1-aarch64-linux-gnu.tar.gz | grep qt
+unzip -l kerrigan-1.1.1-win64.zip | grep qt
 ```
 
 Smoke test
@@ -332,8 +363,13 @@ Gotchas
   drops connections.
 - Version lives in `configure.ac` (`CLIENT_VERSION_MAJOR/MINOR/BUILD`). After
   bumping it, re-run `./autogen.sh && ./configure`.
-- Rust + cxxbridge must be in PATH before `./configure`. Run
-  `source ~/.cargo/env` in every fresh shell.
+- No manual `source ~/.cargo/env`. The Rust toolchain is found via
+  `config.site` which prepends `depends/<triple>/native/bin` to `PATH`. If
+  you see "rustc: command not found", `config.site` was not sourced (the
+  `CONFIG_SITE=...` argument is missing from `./configure`).
+- The vendored crates tarball must exist at `depends/sources/vendored-crates-1.1.1.tar.gz`
+  before running `make -C depends`. It is checked into release source tags;
+  regenerate with `./download-crates.sh` if missing.
 - The Windows depends must be built on the host before launching Docker.
   Docker just compiles the project. Verify with
   `ls depends/x86_64-w64-mingw32/share/config.site`.
@@ -346,4 +382,5 @@ Gotchas
 Credits
 -------
 
-Release build pipeline contributed by biigbang0001.
+Release build pipeline contributed by biigbang0001. Reproducible Rust
+toolchain integration ported from Zcash `master`.
