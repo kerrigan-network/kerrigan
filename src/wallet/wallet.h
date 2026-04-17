@@ -402,6 +402,15 @@ private:
     SaplingKeyManager m_sapling_key_manager;
 
     /**
+     * Set at wallet load; cleared the first time MaybeAutoRebuildSaplingWitnesses()
+     * runs after IBD completes. A single shot per wallet session is sufficient;
+     * once verified, UpdateWitnesses keeps state consistent for subsequent blocks.
+     * Atomic so that the updatedBlockTip validation-interface path can read it
+     * without holding cs_wallet.
+     */
+    std::atomic<bool> m_sapling_witness_check_pending{true};
+
+    /**
      * Catch wallet up to current chain, scanning new blocks, updating the best
      * block locator and m_last_block_processed, and registering for
      * notifications about new blocks and transactions.
@@ -594,6 +603,34 @@ public:
 
     /** Scan a single block for incoming/spent Sapling shielded notes. */
     void ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /**
+     * Replay Sapling blocks from @p fromHeight (inclusive) through the wallet's
+     * currently-processed tip, reusing the same logic as ProcessSaplingBlock.
+     * Used by both z_rebuildsaplingwitnesses (RPC path) and
+     * MaybeAutoRebuildSaplingWitnesses (automatic post-IBD path).
+     *
+     * Caller must have already cleared witnessData for the notes being
+     * rebuilt (see SaplingKeyManager::ClearWitnessesForRebuild).
+     *
+     * @return number of blocks whose commitments were applied. Negative on
+     *         fatal error (missing block, reorg mid-replay, shutdown).
+     */
+    int RebuildSaplingWitnessesFromHeight(int fromHeight, WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /**
+     * One-shot stale-witness detector. Runs at most once per wallet session,
+     * the first time the chain reports it is no longer in IBD. If any unspent
+     * witnesses fail validation against the authoritative Sapling anchor, the
+     * wallet logs a clear warning and triggers RebuildSaplingWitnessesFromHeight
+     * starting at the minimum affected note height.
+     *
+     * No-op (and cheap) when all witnesses are healthy.
+     *
+     * Gated by the -autorebuildsaplingwitnesses startup arg (default true).
+     */
+    void MaybeAutoRebuildSaplingWitnesses();
+
     void updatedBlockTip() override;
     int64_t RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver, bool update);
 

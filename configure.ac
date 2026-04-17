@@ -11,7 +11,7 @@ AC_INIT([Kerrigan],m4_join([.], _CLIENT_VERSION_MAJOR, _CLIENT_VERSION_MINOR, _C
 AC_CONFIG_SRCDIR([src/validation.cpp])
 AC_CONFIG_HEADERS([src/config/bitcoin-config.h])
 AC_CONFIG_AUX_DIR([build-aux])
-AC_CONFIG_MACRO_DIR([build-aux/m4])
+AC_CONFIG_MACRO_DIRS([build-aux/m4])
 
 m4_ifndef([PKG_PROG_PKG_CONFIG], [m4_fatal([PKG_PROG_PKG_CONFIG macro not found. Please install pkg-config and re-run autogen.sh])])
 PKG_PROG_PKG_CONFIG
@@ -124,31 +124,76 @@ AC_PATH_TOOL([DSYMUTIL], [dsymutil])
 AC_PATH_PROG([DOXYGEN], [doxygen])
 AM_CONDITIONAL([HAVE_DOXYGEN], [test -n "$DOXYGEN"])
 
-dnl Rust toolchain checks (required for Sapling zk-SNARK support)
+dnl Rust toolchain checks (required for Sapling zk-SNARK support).
+dnl When building via depends/, RUSTC/CARGO/CXXBRIDGE are pre-set by
+dnl depends/config.site and AC_PATH_PROG honors the incoming values.
+dnl When building standalone, fall back to the operator's PATH.
 AC_PATH_PROG([RUSTC], [rustc])
 if test -z "$RUSTC"; then
-  AC_MSG_ERROR([rustc not found. Install Rust via https://rustup.rs/])
+  AC_MSG_ERROR([rustc not found. Use the depends/ build or install via https://rustup.rs/])
 fi
 AC_PATH_PROG([CARGO], [cargo])
 if test -z "$CARGO"; then
-  AC_MSG_ERROR([cargo not found. Install Rust via https://rustup.rs/])
+  AC_MSG_ERROR([cargo not found. Use the depends/ build or install via https://rustup.rs/])
 fi
 AC_PATH_PROG([CXXBRIDGE], [cxxbridge])
 if test -z "$CXXBRIDGE"; then
-  AC_MSG_ERROR([cxxbridge not found. Install via: cargo install cxxbridge-cmd --version 1.0.186])
+  AC_MSG_ERROR([cxxbridge not found. depends/ stages this automatically; otherwise run: cargo install cxxbridge-cmd --version 1.0.186])
 fi
 
-dnl Determine Rust target triple (cross-compile aware)
+dnl Enforce the pinned Rust version when possible. Reproducible builds require
+dnl the version shipped by depends/ (1.81.x). Standalone builds get a warning.
+_KRGN_RUSTC_VER=`$RUSTC --version 2>/dev/null | awk '{print $[]2}'`
+AC_MSG_CHECKING([Rust compiler version])
+AC_MSG_RESULT([$_KRGN_RUSTC_VER])
+AS_CASE([$_KRGN_RUSTC_VER],
+  [1.81.*], [],
+  [AC_MSG_WARN([Kerrigan is tested with Rust 1.81.x; got $_KRGN_RUSTC_VER. Reproducible builds require the pinned version.])])
+
+dnl Rust target triple. depends/config.site may supply RUST_TARGET already
+dnl (mapped from the GCC canonical HOST). Honor that first; otherwise map the
+dnl autoconf host triple ourselves, with a final fallback to `rustc -vV`.
 AC_MSG_CHECKING([Rust target])
-case $host in
-  x86_64*mingw*)       RUST_TARGET="x86_64-pc-windows-gnu" ;;
-  x86_64*darwin*)      RUST_TARGET="x86_64-apple-darwin" ;;
-  aarch64*darwin*)     RUST_TARGET="aarch64-apple-darwin" ;;
-  aarch64*linux*)      RUST_TARGET="aarch64-unknown-linux-gnu" ;;
-  *)                   RUST_TARGET=$($RUSTC -vV | sed -n 's/host: //p') ;;
-esac
+if test -z "$RUST_TARGET"; then
+  case $host in
+    x86_64*mingw*)       RUST_TARGET="x86_64-pc-windows-gnu" ;;
+    x86_64*darwin*)      RUST_TARGET="x86_64-apple-darwin" ;;
+    aarch64*darwin*)     RUST_TARGET="aarch64-apple-darwin" ;;
+    aarch64*linux*)      RUST_TARGET="aarch64-unknown-linux-gnu" ;;
+    x86_64*linux*)       RUST_TARGET="x86_64-unknown-linux-gnu" ;;
+    x86_64*freebsd*)     RUST_TARGET="x86_64-unknown-freebsd" ;;
+    *)                   RUST_TARGET=`$RUSTC -vV 2>/dev/null | sed -n 's/host: //p'` ;;
+  esac
+fi
 AC_MSG_RESULT([$RUST_TARGET])
-AC_SUBST(RUST_TARGET)
+AC_SUBST([RUST_TARGET])
+
+dnl --enable-online-rust / --disable-online-rust
+dnl Default: offline (use vendored crates staged by depends/).
+dnl If RUST_VENDORED_SOURCES is empty (standalone dev build where depends/
+dnl did not run), auto-fall-back to online mode so `cargo build` can fetch
+dnl from crates.io. Pass --disable-online-rust to force offline.
+AC_ARG_ENABLE([online-rust],
+  [AS_HELP_STRING([--enable-online-rust],
+    [allow cargo to fetch crates from the network at build time (default: offline when vendored sources are present, online otherwise)])],
+  [enable_online_rust=$enableval],
+  [enable_online_rust=auto])
+
+if test "x$enable_online_rust" = "xauto"; then
+  if test -z "$RUST_VENDORED_SOURCES"; then
+    enable_online_rust=yes
+  else
+    enable_online_rust=no
+  fi
+fi
+if test "x$enable_online_rust" = "xno" && test -z "$RUST_VENDORED_SOURCES"; then
+  AC_MSG_ERROR([--disable-online-rust was specified but vendored sources are not available. Run 'make -C depends' first, or pass --enable-online-rust to fetch from crates.io.])
+fi
+AM_CONDITIONAL([ENABLE_ONLINE_RUST], [test "x$enable_online_rust" != "xno"])
+AC_SUBST([RUST_VENDORED_SOURCES])
+
+AC_MSG_CHECKING([whether to fetch Rust crates online])
+AC_MSG_RESULT([$enable_online_rust])
 
 dnl Platform-specific Rust library dependencies
 RUST_LIBS=""

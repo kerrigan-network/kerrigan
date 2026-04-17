@@ -412,10 +412,21 @@ impl SaplingBuilder {
         let recipient =
             PaymentAddress::from_bytes(&recipient).ok_or("Invalid recipient address")?;
         let value = NoteValue::from_raw(value);
-        // NOTE: All notes use Rseed::BeforeZip212 because Canopy activation is
-        // disabled (height = -1 in MakeRustNetwork). If a Canopy-equivalent is
-        // ever activated, this must be updated to check the note version and use
-        // Rseed::AfterZip212 for post-activation notes. See #925.
+        // INVARIANT: All Kerrigan Sapling notes use Rseed::BeforeZip212.
+        //
+        // This is safe only while every Network variant in params.rs reports
+        // activation_height(NetworkUpgrade::Canopy) == None. The C++ callers
+        // (SaplingTransactionBuilder::MakeRustNetwork,
+        //  SaplingKeyManager::MakeNoteDecryptionNetwork) enforce this by
+        // passing canopy=-1 for main/test/regtest. With Canopy disabled,
+        // zcash_primitives::transaction::components::sapling::zip212_enforcement
+        // returns Zip212Enforcement::Off at every height, which matches what
+        // BeforeZip212 produces.
+        //
+        // If a future Kerrigan hard fork activates a Canopy-equivalent, both
+        // this rseed construction and MakeRustNetwork/MakeNoteDecryptionNetwork
+        // must be updated together to select AfterZip212 for post-activation
+        // notes. See #925.
         let rseed = de_ct(jubjub::Scalar::from_bytes(&rcm))
             .map(Rseed::BeforeZip212)
             .ok_or("Invalid rcm")?;

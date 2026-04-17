@@ -23,10 +23,12 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <psbt.h>
+#include <sapling/sapling_init.h>
 #include <script/descriptor.h>
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/signingprovider.h>
+#include <shutdown.h>
 #include <support/cleanse.h>
 #include <txmempool.h>
 #include <util/check.h>
@@ -1494,6 +1496,136 @@ void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& 
     }
 }
 
+int CWallet::RebuildSaplingWitnessesFromHeight(int fromHeight, WalletBatch& batch)
+{
+    AssertLockHeld(cs_wallet);
+
+    const int tipHeight = m_last_block_processed_height;
+    if (fromHeight < 0 || tipHeight < 0) return 0;
+    if (fromHeight > tipHeight) return 0;
+
+    WalletLogPrintf("Sapling witness rebuild: replaying blocks %d..%d\n",
+                    fromHeight, tipHeight);
+
+    int blocksProcessed = 0;
+    for (int h = fromHeight; h <= tipHeight; ++h) {
+        if (ShutdownRequested()) {
+            WalletLogPrintf("Sapling witness rebuild: shutdown requested at height %d\n", h);
+            return -1;
+        }
+
+        uint256 blockHash = chain().getBlockHash(h);
+        if (blockHash.IsNull()) {
+            WalletLogPrintf("Sapling witness rebuild: no block hash at height %d (reorg?); aborting\n", h);
+            return -1;
+        }
+
+        CBlock block;
+        if (!chain().findBlock(blockHash, FoundBlock().data(block)) || block.IsNull()) {
+            WalletLogPrintf("Sapling witness rebuild: cannot read block %d from disk (pruned?); aborting. "
+                            "Restart with -reindex or -reindex-chainstate to restore block data, "
+                            "or run z_rebuildsaplingwitnesses once blocks are available.\n", h);
+            return -1;
+        }
+
+        // Reuse the per-block Sapling processor. It pulls out commitments,
+        // calls UpdateWitnesses for owned notes, and also re-scans outputs
+        // and spends; on a replay the output/spend scans are idempotent
+        // because nullifiers and cmus are stable and the note records
+        // already exist.
+        ProcessSaplingBlock(block, h, batch);
+        ++blocksProcessed;
+
+        if ((h - fromHeight) % 1000 == 999) {
+            WalletLogPrintf("Sapling witness rebuild: progress height=%d (%d remaining)\n",
+                            h, tipHeight - h);
+        }
+    }
+
+    WalletLogPrintf("Sapling witness rebuild: complete, %d blocks replayed\n", blocksProcessed);
+    return blocksProcessed;
+}
+
+void CWallet::MaybeAutoRebuildSaplingWitnesses()
+{
+    // One-shot: the first thread to flip the flag does the work. Subsequent
+    // block tips short-circuit immediately with a single atomic load.
+    if (!m_sapling_witness_check_pending.load(std::memory_order_relaxed)) return;
+
+    // Operator opt-out. Default is on; paranoid operators can disable this
+    // and run z_rebuildsaplingwitnesses manually when needed.
+    if (!gArgs.GetBoolArg("-autorebuildsaplingwitnesses", true)) {
+        if (m_sapling_witness_check_pending.exchange(false, std::memory_order_relaxed)) {
+            WalletLogPrintf("Sapling witness auto-rebuild disabled by -noautorebuildsaplingwitnesses\n");
+        }
+        return;
+    }
+
+    // Defer until the node is out of IBD; the Sapling anchor DB is not
+    // authoritative mid-IBD and false positives would waste a rebuild.
+    if (chain().isInitialBlockDownload()) return;
+
+    // Claim the slot so concurrent updatedBlockTip callbacks don't double-run.
+    bool expected = true;
+    if (!m_sapling_witness_check_pending.compare_exchange_strong(
+            expected, false, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    LOCK(cs_wallet);
+
+    if (m_sapling_key_manager.IsEmpty()) return;
+
+    const int tipHeight = m_last_block_processed_height;
+    auto stale = m_sapling_key_manager.DetectStaleWitnesses(tipHeight);
+    if (stale.empty()) {
+        WalletLogPrintf("Sapling witness auto-check: all unspent witnesses valid at tip %d\n", tipHeight);
+        return;
+    }
+
+    int minStaleHeight = std::numeric_limits<int>::max();
+    for (const auto& r : stale) {
+        if (r.blockHeight >= 0 && r.blockHeight < minStaleHeight) {
+            minStaleHeight = r.blockHeight;
+        }
+    }
+    if (minStaleHeight == std::numeric_limits<int>::max()) {
+        // Only empty-witness notes with no recorded block height; nothing
+        // we can safely replay without a deeper rescan. Surface a warning.
+        WalletLogPrintf("WARNING: %u stale Sapling witnesses detected but no valid block height; "
+                        "run a full -rescan to recover\n", (unsigned)stale.size());
+        return;
+    }
+
+    WalletLogPrintf("WARNING: Stale Sapling witness detected for %u notes. "
+                    "Rebuilding from height %d to tip %d. This may take a minute.\n",
+                    (unsigned)stale.size(), minStaleHeight, tipHeight);
+    for (const auto& r : stale) {
+        WalletLogPrintf("  stale cmu=%s height=%d reason=%s\n",
+                        r.cmu.GetHex().substr(0, 16), r.blockHeight, r.reason);
+    }
+
+    WalletBatch batch(GetDatabase());
+
+    // Reuse the RPC's clear helper so the two code paths can't drift: it
+    // wipes witnessData + treePosition for every unspent confirmed note and
+    // returns the min height across them, which must be <= minStaleHeight.
+    auto clearStart = m_sapling_key_manager.ClearWitnessesForRebuild(&batch);
+    int replayStart = clearStart.value_or(minStaleHeight);
+    if (minStaleHeight < replayStart) replayStart = minStaleHeight;
+
+    int applied = RebuildSaplingWitnessesFromHeight(replayStart, batch);
+    if (applied < 0) {
+        WalletLogPrintf("ERROR: Sapling witness auto-rebuild aborted mid-replay; "
+                        "state will be re-validated on next startup. "
+                        "Run z_rebuildsaplingwitnesses manually to retry.\n");
+        // Re-arm the one-shot so a later restart (or the next IBD exit)
+        // gets another attempt. The cleared witness data remains cleared,
+        // so the rebuild will simply resume from replayStart next time.
+        m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+    }
+}
+
 void CWallet::blockConnected(const CBlock& block, int height)
 {
     const uint256& block_hash = block.GetHash();
@@ -1570,6 +1702,11 @@ void CWallet::blockDisconnected(const CBlock& block, int height)
 void CWallet::updatedBlockTip()
 {
     m_best_block_time = GetTime();
+
+    // Run once per wallet session, the first time we see a tip update while
+    // the chain reports it is no longer in IBD. The flag makes this cheap
+    // (single relaxed atomic load) on every subsequent invocation.
+    MaybeAutoRebuildSaplingWitnesses();
 }
 
 void CWallet::BlockUntilSyncedToCurrentChain() const {

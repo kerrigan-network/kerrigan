@@ -1,5 +1,14 @@
 packages:=gmp backtrace libsodium
 
+# Rust/Sapling toolchain packages (match Zcash layout).
+# vendored_crates is a regular (host) package because it stages the offline
+# crate registry into $(host_prefix)/vendored-sources, not into the native
+# toolchain prefix. rustcxx installs the cxx.h header into host_prefix too.
+# native_rust and native_cxxbridge are native packages (build-host tools).
+kerrigan_packages := rustcxx vendored_crates
+packages += $(kerrigan_packages)
+native_packages += native_rust native_cxxbridge
+
 boost_packages = boost
 
 libevent_packages = libevent

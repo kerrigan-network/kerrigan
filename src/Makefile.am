@@ -57,12 +57,27 @@ LIBBITCOINQT=qt/libbitcoinqt.a
 LIBDASHBLS=dashbls/libdashbls.la
 LIBSECP256K1=secp256k1/libsecp256k1.la
 
-# Rust static library for Sapling zk-SNARK support
-# cargo --target puts output in target/<triple>/release/
+# Rust static library for Sapling zk-SNARK support.
+# cargo --target places output in target/<triple>/release/.
 LIBKERRIGAN_SAPLING=$(top_builddir)/target/$(RUST_TARGET)/release/libkerrigan_sapling.a
-# CXX-generated bridge source (built by cxxbridge from bridge.rs)
-LIBCXXBRIDGE_H=$(top_builddir)/target/cxxbridge/rust/bridge.h
-LIBCXXBRIDGE_CC=$(top_builddir)/target/cxxbridge/rust/bridge.cc
+
+# CXX-bridge generated glue.
+# The committed artefacts under $(srcdir)/rust/gen are what libbitcoin_common
+# actually compiles (see libbitcoin_common_a_SOURCES below). The regeneration
+# rules at the bottom of the Rust block let developers rebuild them from the
+# corresponding .rs inputs via `make cxxbridge-regen`.
+CXXBRIDGE_RS = \
+  $(srcdir)/rust/src/bridge.rs \
+  $(srcdir)/rust/src/sapling/spec.rs \
+  $(srcdir)/rust/src/streams.rs
+CXXBRIDGE_H = \
+  $(srcdir)/rust/gen/rust/bridge.h \
+  $(srcdir)/rust/gen/rust/spec.h
+CXXBRIDGE_CC = \
+  $(srcdir)/rust/gen/rust/bridge.cc \
+  $(srcdir)/rust/gen/spec.cc \
+  $(srcdir)/rust/gen/streams.cc \
+  $(srcdir)/rust/gen/cxx.cc
 
 if ENABLE_ZMQ
 LIBBITCOIN_ZMQ=libbitcoin_zmq.a
@@ -120,26 +135,106 @@ $(LIBDASHBLS):
 $(LIBSECP256K1): $(wildcard secp256k1/src/*.h) $(wildcard secp256k1/src/*.c) $(wildcard secp256k1/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
 
-# Rust Sapling library (built via cargo)
+# Rust Sapling library (built via cargo).
+# All .rs files under src/rust/src are dependencies of the static lib.
 RUST_SRCS = $(wildcard $(top_srcdir)/src/rust/src/*.rs) $(wildcard $(top_srcdir)/src/rust/src/**/*.rs)
-RUST_ENV_VARS = RUSTC="$(RUSTC)" CC="$(CC)" CXX="$(CXX)" TERM=dumb RUSTFLAGS="-C relocation-model=pic -C overflow-checks=on"
-RUST_BUILD_OPTS = --release --locked --manifest-path $(top_srcdir)/Cargo.toml --target $(RUST_TARGET)
+# CARGO_HOME is pointed at a per-build directory so cargo's runtime config
+# (.cargo/config.toml and its credentials) lives in the build tree, not the
+# source tree. This prevents parallel / cross-target builds from racing on
+# one shared $(top_srcdir)/.cargo/config.toml, and keeps the source tree
+# clean. See build-reproducibility.md for rationale.
+CARGO_HOME_DIR = $(abs_top_builddir)/cargo-home
 
-$(LIBKERRIGAN_SAPLING): $(RUST_SRCS) $(top_srcdir)/Cargo.toml
-	$(AM_V_GEN)$(RUST_ENV_VARS) $(CARGO) build $(RUST_BUILD_OPTS)
+RUST_ENV_VARS = \
+  CARGO_HOME="$(CARGO_HOME_DIR)" \
+  RUSTC="$(RUSTC)" \
+  CC="$(CC)" \
+  CFLAGS="$(CFLAGS)" \
+  CXX="$(CXX)" \
+  CXXFLAGS="$(CXXFLAGS)" \
+  TERM=dumb \
+  RUSTFLAGS="-C relocation-model=pic -C overflow-checks=on"
+RUST_BUILD_OPTS = --release --manifest-path $(top_srcdir)/Cargo.toml --target $(RUST_TARGET)
 
-# CXX bridge header/source generation
-$(LIBCXXBRIDGE_H) $(LIBCXXBRIDGE_CC): $(top_srcdir)/src/rust/src/bridge.rs
-	$(AM_V_GEN)mkdir -p $(top_builddir)/target/cxxbridge/rust && \
-	$(CXXBRIDGE) $(top_srcdir)/src/rust/src/bridge.rs \
-		--header > $(LIBCXXBRIDGE_H) && \
-	$(CXXBRIDGE) $(top_srcdir)/src/rust/src/bridge.rs \
-		> $(LIBCXXBRIDGE_CC)
+rust_verbose = $(rust_verbose_@AM_V@)
+rust_verbose_ = $(rust_verbose_@AM_DEFAULT_V@)
+rust_verbose_0 = @echo "  RUST     $@";
+
+cargo_verbose = $(cargo_verbose_@AM_V@)
+cargo_verbose_ = $(cargo_verbose_@AM_DEFAULT_V@)
+cargo_verbose_1 = --verbose
+
+# Offline vs online cargo mode. Driven by --enable-online-rust in configure.ac.
+# Both branches write a stamp file into $(CARGO_HOME_DIR) so the sapling
+# static library retargets when the user flips --enable-online-rust.
+#
+# Offline (default when depends/ supplies vendored sources):
+#   - cargo reads crates from $(RUST_VENDORED_SOURCES) via the generated
+#     $(CARGO_HOME_DIR)/config.toml
+#   - --frozen --offline forbid any network fetch and require Cargo.lock to
+#     match Cargo.toml exactly (stronger than --locked)
+# Online (standalone dev, no depends/):
+#   - no config.toml is written; cargo falls back to crates.io
+if ENABLE_ONLINE_RUST
+CARGO_CONFIGURED = $(CARGO_HOME_DIR)/.configured-for-online
+$(CARGO_CONFIGURED):
+	$(AM_V_at)$(MKDIR_P) $(CARGO_HOME_DIR)
+	$(AM_V_at)rm -f $(CARGO_HOME_DIR)/.configured-for-offline $(CARGO_HOME_DIR)/config.toml
+	$(AM_V_at)touch $@
+else
+RUST_BUILD_OPTS += --frozen --offline
+CARGO_CONFIGURED = $(CARGO_HOME_DIR)/.configured-for-offline
+$(CARGO_CONFIGURED): $(top_srcdir)/.cargo/config.toml.offline
+	$(AM_V_at)$(MKDIR_P) $(CARGO_HOME_DIR)
+	$(AM_V_at)rm -f $(CARGO_HOME_DIR)/.configured-for-online
+	$(AM_V_at)cp $< $(CARGO_HOME_DIR)/config.toml
+	$(AM_V_at)echo "directory = \"$(RUST_VENDORED_SOURCES)\"" >>$(CARGO_HOME_DIR)/config.toml
+	$(AM_V_at)touch $@
+endif
+
+$(LIBKERRIGAN_SAPLING): $(CARGO_CONFIGURED) $(RUST_SRCS) $(top_srcdir)/Cargo.toml $(top_srcdir)/Cargo.lock
+	$(rust_verbose)$(RUST_ENV_VARS) $(CARGO) build $(RUST_BUILD_OPTS) $(cargo_verbose)
 
 cargo-build: $(LIBKERRIGAN_SAPLING)
 
 cargo-clean:
 	$(AM_V_at)$(RUST_ENV_VARS) $(CARGO) clean --manifest-path $(top_srcdir)/Cargo.toml
+
+# cxxbridge regeneration. The .cc/.h files under $(srcdir)/rust/gen are
+# committed so a vanilla build does not require cxxbridge to run. Developers
+# touching any .rs file under rust/src/ should run `make cxxbridge-regen`
+# (or `make cxxbridge-regen-check` in CI) to refresh them. The explicit rules
+# below preserve Kerrigan's idiosyncratic layout (bridge in rust/gen/rust/,
+# spec header in rust/gen/rust/ but its .cc at rust/gen/, streams headerless).
+CXXBRIDGE_OPTS = -i rust/cxx.h
+
+$(srcdir)/rust/gen/rust/bridge.h $(srcdir)/rust/gen/rust/bridge.cc: $(srcdir)/rust/src/bridge.rs
+	@$(MKDIR_P) $(srcdir)/rust/gen/rust
+	$(AM_V_GEN)$(CXXBRIDGE) $(CXXBRIDGE_OPTS) $(srcdir)/rust/src/bridge.rs --header -o $(srcdir)/rust/gen/rust/bridge.h
+	$(AM_V_at)$(CXXBRIDGE) $(CXXBRIDGE_OPTS) $(srcdir)/rust/src/bridge.rs -o $(srcdir)/rust/gen/rust/bridge.cc
+
+$(srcdir)/rust/gen/rust/spec.h $(srcdir)/rust/gen/spec.cc: $(srcdir)/rust/src/sapling/spec.rs
+	@$(MKDIR_P) $(srcdir)/rust/gen/rust
+	$(AM_V_GEN)$(CXXBRIDGE) $(CXXBRIDGE_OPTS) $(srcdir)/rust/src/sapling/spec.rs --header -o $(srcdir)/rust/gen/rust/spec.h
+	$(AM_V_at)$(CXXBRIDGE) $(CXXBRIDGE_OPTS) $(srcdir)/rust/src/sapling/spec.rs -o $(srcdir)/rust/gen/spec.cc
+
+$(srcdir)/rust/gen/streams.cc: $(srcdir)/rust/src/streams.rs
+	@$(MKDIR_P) $(srcdir)/rust/gen
+	$(AM_V_GEN)$(CXXBRIDGE) $(CXXBRIDGE_OPTS) $(srcdir)/rust/src/streams.rs -o $@
+
+$(srcdir)/rust/gen/cxx.cc:
+	@$(MKDIR_P) $(srcdir)/rust/gen
+	$(AM_V_GEN)$(CXXBRIDGE) --output $@
+
+.PHONY: cxxbridge-regen cxxbridge-regen-check
+cxxbridge-regen: $(CXXBRIDGE_H) $(CXXBRIDGE_CC)
+
+cxxbridge-regen-check: cxxbridge-regen
+	@if ! git -C $(top_srcdir) diff --quiet -- src/rust/gen src/rust/include/rust; then \
+	  echo "cxxbridge output is out of date; commit the refreshed files under src/rust/gen."; \
+	  git -C $(top_srcdir) diff --stat -- src/rust/gen src/rust/include/rust; \
+	  exit 1; \
+	fi
 
 # Make is not made aware of per-object dependencies to avoid limiting building parallelization
 # But to build the less dependent modules first, we manually select their order here:
@@ -1318,6 +1413,7 @@ clean-local:
 	-rm -f config.h
 	-rm -rf test/__pycache__
 	-rm -rf *.dSYM test/*.dSYM bench/*.dSYM qt/*.dSYM qt/test/*.dSYM
+	-rm -rf $(abs_top_builddir)/target $(CARGO_HOME_DIR)
 
 .rc.o:
 	@command -v $(WINDRES) || (echo "windres $(WINDRES) not found, but is required to compile windows resource files"; exit 1)

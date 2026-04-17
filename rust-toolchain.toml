@@ -1,0 +1,14 @@
+# Pins the Rust toolchain used for standalone development builds
+# (e.g. `cargo check`, `cargo clippy`, `cargo fmt`, editor rust-analyzer).
+#
+# The depends/-staged toolchain is pinned separately in
+# depends/packages/native_rust.mk and overrides this file via PATH when a
+# build runs through depends/. This file exists so a developer running
+# `cargo check` at the repo root without invoking depends/ still gets the
+# exact compiler version that reproducible builds use.
+#
+# Keep this version in lockstep with depends/packages/native_rust.mk.
+
+[toolchain]
+channel = "1.81.0"
+components = ["clippy", "rustfmt"]

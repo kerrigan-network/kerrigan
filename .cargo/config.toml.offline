@@ -1,0 +1,25 @@
+# Offline cargo configuration used by `make cargo-build` when the tree was
+# configured with --disable-online-rust (the default for depends/ builds).
+#
+# src/Makefile.am copies this file to .cargo/config.toml and appends a
+# `directory = "<RUST_VENDORED_SOURCES>"` line pointing at the vendored-sources
+# directory staged by depends/. With this in place, `cargo build --locked
+# --offline` resolves every crate from the vendored tree and refuses network
+# access. Tampering with a vendored crate fails the build because cargo also
+# verifies per-crate checksums recorded in .cargo-checksum.json and Cargo.lock.
+#
+# Do not hand-edit .cargo/config.toml; edit this file instead and rerun make.
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+# The `directory` key is appended at build time by src/Makefile.am, taking its
+# value from the RUST_VENDORED_SOURCES autoconf substitution (set by
+# depends/config.site.in).

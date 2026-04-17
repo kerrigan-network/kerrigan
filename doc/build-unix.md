@@ -1,22 +1,34 @@
 UNIX BUILD NOTES
 ====================
-Some notes on how to build Kerrigan Core in Unix.
+Some notes on how to build Kerrigan Core on Unix.
 
 (For BSD specific instructions, see `build-*bsd.md` in this directory.)
+
+Kerrigan 1.1.1 uses the `depends/` system to build every runtime library from
+pinned source. The host OS only needs build tools; no Boost, libsodium, gmp,
+sqlite, zmq, miniupnpc, natpmp, libevent, Qt, or Berkeley DB -dev packages are
+required. Rust 1.81.0 is staged by `depends/` automatically.
 
 To Build
 ---------------------
 
 ```sh
+make -C depends -j$(nproc)
 ./autogen.sh
-./configure
+CONFIG_SITE=$PWD/depends/x86_64-pc-linux-gnu/share/config.site \
+    ./configure --prefix=$PWD/depends/x86_64-pc-linux-gnu
 make # use "-j N" for N parallel jobs
-make install # optional
 ```
 
-See below for instructions on how to [install the dependencies on popular Linux
-distributions](#linux-distribution-specific-instructions), or the
-[dependencies](#dependencies) section for a complete overview.
+The `depends/` build takes roughly 45 minutes on 12 cores for a cold build.
+Subsequent builds are cached in `depends/built/`.
+
+Binaries live under `src/` after `make` completes. The `--prefix` above
+points at the per-triple depends/ directory so `pkg-config` / `config.site`
+stay self-consistent; `make install` is **not** intended for a system
+install from this prefix. To install into a system location, re-configure
+with a real prefix (e.g. `--prefix=/usr/local`) and then `sudo make install`.
+Never pass `--prefix=/` -- it would place binaries into `/bin`, `/etc`, `/share`.
 
 ## Memory Requirements
 
@@ -24,280 +36,196 @@ C++ compilers are memory-hungry. It is recommended to have at least 1.5 GB of
 memory available when compiling Kerrigan Core. On systems with less, gcc can be
 tuned to conserve memory with additional CXXFLAGS:
 
-
 ```sh
 ./configure CXXFLAGS="--param ggc-min-expand=1 --param ggc-min-heapsize=32768"
 ```
-
 
 ## Linux Distribution Specific Instructions
 
 ### Ubuntu & Debian
 
-#### Dependency Build Instructions
-
-Build requirements:
-
-```sh
-sudo apt-get install build-essential libtool autotools-dev automake pkg-config bsdmainutils bison python3
-```
-
-Rust toolchain (required for Sapling zk-SNARK cryptography):
+Kerrigan 1.1.1 has no runtime library `-dev` requirements. Only build tools
+are needed:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-cargo install cxxbridge-cmd --version 1.0.186
+sudo apt-get install build-essential git cmake curl pkg-config \
+    autoconf automake libtool libtool-bin bsdmainutils python3
 ```
 
-**Note**: GCC 11+ or Clang 16+ is required (C++20). Ubuntu 20.04 ships GCC 9 -- use `ppa:ubuntu-toolchain-r/test` for GCC 12. Debian 11 ships GCC 10 -- use backports for GCC 12. See [build-pool-operator.md](build-pool-operator.md) for per-distro instructions.
+GCC 11+ or Clang 16+ is required (C++20). Ubuntu 22.04 ships GCC 11, which is
+sufficient. Ubuntu 20.04 ships GCC 9 -- add `ppa:ubuntu-toolchain-r/test` and
+install `g++-12`. Debian 11 ships GCC 10 -- use backports for GCC 12. See
+[build-pool-operator.md](build-pool-operator.md) for per-distro instructions.
 
-Now, you can either build from self-compiled [depends](#dependencies) or install the required dependencies:
+Cross-compilation adds:
 
 ```sh
-sudo apt-get install libbacktrace-dev libevent-dev libboost-dev
+# Linux aarch64
+sudo apt-get install g++-aarch64-linux-gnu binutils-aarch64-linux-gnu
+# Windows x86_64
+sudo apt-get install g++-mingw-w64-x86-64-posix mingw-w64-x86-64-dev nsis zip
 ```
-
-Note: libbacktrace-dev is available in Debian 13 (Trixie) and Ubuntu 25.04+.
-For older releases, use the /depends/README.md which includes all required libraries.
-
-SQLite is required for the descriptor wallet:
-
-```sh
-sudo apt-get install libsqlite3-dev
-```
-
-Berkeley DB is only required for the legacy wallet. Ubuntu and Debian have their own `libdb-dev` and `libdb++-dev` packages,
-but these will install Berkeley DB 5.1 or later. This will break binary wallet compatibility with the distributed
-executables, which are based on BerkeleyDB 4.8. If you do not care about wallet compatibility, pass
-`--with-incompatible-bdb` to configure. Otherwise, you can build Berkeley DB [yourself](#berkeley-db).
-
-To build Kerrigan Core without wallet, see [*Disable-wallet mode*](#disable-wallet-mode)
-
-Optional port mapping libraries (see: `--with-miniupnpc` and `--with-natpmp`):
-
-```sh
-sudo apt-get install libminiupnpc-dev libnatpmp-dev
-```
-
-ZMQ dependencies (provides ZMQ API):
-
-```sh
-sudo apt-get install libzmq3-dev
-```
-
-GMP dependencies (provides platform-optimized routines):
-
-```sh
-sudo apt-get install libgmp-dev
-```
-
-Sodium dependencies (required for BLS signatures):
-
-```sh
-sudo apt-get install libsodium-dev
-```
-
-User-Space, Statically Defined Tracing (USDT) dependencies:
-
-```sh
-sudo apt install systemtap-sdt-dev
-```
-
-GUI dependencies:
-
-If you want to build kerrigan-qt, make sure that the required packages for Qt development
-are installed. Qt 5 is necessary to build the GUI.
-To build without GUI pass `--without-gui`.
-
-To build with Qt 5 you need the following:
-
-```sh
-sudo apt-get install qtbase5-dev qttools5-dev qttools5-dev-tools
-```
-
-Additionally, to support Wayland protocol for modern desktop environments:
-
-```sh
-sudo apt-get install qtwayland5
-```
-
-libqrencode (optional) can be installed with:
-
-```sh
-sudo apt-get install libqrencode-dev
-```
-
-Once these are installed, they will be found by configure and a kerrigan-qt executable will be
-built by default.
-
 
 ### Fedora
 
-#### Dependency Build Instructions
+```sh
+sudo dnf install gcc-c++ libtool make autoconf automake cmake curl git \
+    pkgconf python3
+```
 
-Build requirements:
+Fedora 40+ ships GCC 14, which is sufficient.
+
+### Arch Linux
 
 ```sh
-sudo dnf install gcc-c++ libtool make autoconf automake python3
+sudo pacman --sync --needed base-devel git cmake curl pkgconf autoconf \
+    automake libtool python
 ```
 
-Rust toolchain (required):
+## The `depends/` Flow
+
+`depends/` builds every C/C++ library, the Rust toolchain, and the vendored
+crate tarball into a per-triple prefix at `depends/<triple>/`. The main
+Kerrigan build reads that prefix via `config.site`.
+
+Supported host triples:
+
+```
+x86_64-pc-linux-gnu
+aarch64-linux-gnu
+x86_64-w64-mingw32
+x86_64-apple-darwin
+aarch64-apple-darwin
+```
+
+Build `depends/` for the target you want, then point `./configure` at the
+resulting `config.site`:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-cargo install cxxbridge-cmd --version 1.0.186
+# Native Linux x86_64
+make -C depends -j$(nproc)
+./autogen.sh
+CONFIG_SITE=$PWD/depends/x86_64-pc-linux-gnu/share/config.site \
+    ./configure --prefix=$PWD/depends/x86_64-pc-linux-gnu
+make -j$(nproc)
+
+# Cross-compile to aarch64
+make -C depends HOST=aarch64-linux-gnu -j$(nproc)
+./autogen.sh
+CONFIG_SITE=$PWD/depends/aarch64-linux-gnu/share/config.site \
+    ./configure --prefix=$PWD/depends/aarch64-linux-gnu
+make -j$(nproc)
 ```
 
-Now, you can either build from self-compiled [depends](#dependencies) or install the required dependencies:
+`config.site` sets `RUSTC`, `CARGO`, `CXXBRIDGE`, `RUST_TARGET`, and
+`RUST_VENDORED_SOURCES` so the Kerrigan build uses the staged toolchain, not
+whatever happens to be on `PATH`.
+
+See [build-reproducibility.md](build-reproducibility.md) for the design.
+
+## Rust Toolchain
+
+Rust 1.81.0 is pinned in `depends/packages/native_rust.mk` and staged into
+`depends/<triple>/native/bin/` during `make -C depends`. The main build
+prepends that directory to `PATH` via `config.site`.
+
+Manual `rustup` install is no longer required for release builds. A
+`rust-toolchain.toml` in the repo root pins 1.81.0 for standalone `cargo`
+invocations (editor rust-analyzer, ad-hoc `cargo check`).
+
+cxxbridge 1.0.186 is staged by `depends/packages/native_cxxbridge.mk` at the
+same time and needs no manual `cargo install` step.
+
+## Online vs Offline Rust Builds
+
+`configure` accepts `--enable-online-rust` / `--disable-online-rust` with an
+`auto` default.
+
+- `auto` (default): if `RUST_VENDORED_SOURCES` is set by `config.site` (the
+  `depends/` path), build offline. Otherwise (standalone dev tree without
+  `depends/`), build online and pull crates from crates.io.
+- `--enable-online-rust`: force online. `cargo build` contacts crates.io. Used
+  when iterating on `Cargo.toml` without needing a reproducible build.
+- `--disable-online-rust`: force offline. Requires `depends/` to have staged
+  the vendored-crates tarball. Production reproducible path.
+
+Offline mode stamps `.cargo/config.toml` with:
+
+```
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "<staged vendor/>"
+```
+
+and runs `cargo build --locked --offline`. Zero network calls after
+`depends/` completes.
+
+## Rebuilding the Vendored Crates Tarball
+
+The vendored crates tarball (`depends/sources/vendored-crates-1.1.1.tar.gz`)
+is produced from `Cargo.toml` + `Cargo.lock` and checked into the release
+sources. Rebuilding requires a network-enabled host with `cargo 1.81.0`:
 
 ```sh
-sudo dnf install libevent-devel boost-devel
+./download-crates.sh           # writes depends/sources/vendored-crates-1.1.1.tar.gz
+./vendor-hash.sh               # prints SHA256 for depends/packages/vendored_crates.mk
 ```
 
-Note: Fedora repositories do not include libbacktrace. To build Kerrigan Core without stack trace support, configure with `--disable-stacktraces`.
+`download-crates.sh` runs `cargo vendor --locked --versioned-dirs` and packs
+the result with fixed uid/gid, fixed mtime (`SOURCE_DATE_EPOCH=0`), sorted
+file list, and `gzip -n`. Two back-to-back runs on the same host produce
+byte-identical tarballs. Paste the `vendor-hash.sh` output into
+`depends/packages/vendored_crates.mk` at `$(package)_sha256_hash=`.
 
-SQLite is required for the descriptor wallet:
+After regenerating, commit `Cargo.lock`, `depends/sources/vendored-crates-1.1.1.tar.gz`,
+and the hash bump to `vendored_crates.mk` in a single change so the build
+stays self-consistent.
+
+## GUI
+
+The Qt 5.15.18 stack is built by `depends/` on all platforms. No distro Qt
+packages are consulted. `./configure` picks up `kerrigan-qt` automatically.
+
+To build headless:
 
 ```sh
-sudo dnf install sqlite-devel
+./configure --without-gui
 ```
 
-Berkeley DB is required for the legacy wallet:
+## Disable-wallet Mode
+
+When running a P2P node only:
 
 ```sh
-sudo dnf install libdb4-devel libdb4-cxx-devel
+./configure --disable-wallet
 ```
 
-Berkeley DB is only required for the legacy wallet. Newer Fedora releases have only `libdb-devel` and `libdb-cxx-devel` packages, but these will install
-Berkeley DB 5.3 or later. This will break binary wallet compatibility with the distributed executables, which
-are based on Berkeley DB 4.8. If you do not care about wallet compatibility,
-pass `--with-incompatible-bdb` to configure. Otherwise, you can build Berkeley DB [yourself](#berkeley-db).
+Mining with `getblocktemplate` still works in this mode.
 
-To build Kerrigan Core without wallet, see [*Disable-wallet mode*](#disable-wallet-mode)
-
-Optional port mapping libraries (see: `--with-miniupnpc` and `--with-natpmp`):
-
-```sh
-sudo dnf install miniupnpc-devel libnatpmp-devel
-```
-
-ZMQ dependencies (provides ZMQ API):
-
-```sh
-sudo dnf install zeromq-devel
-```
-
-GMP dependencies (provides platform-optimized routines):
-
-```sh
-sudo dnf install gmp-devel
-```
-
-Sodium dependencies (required for BLS signatures):
-
-```sh
-sudo dnf install libsodium-devel
-```
-
-User-Space, Statically Defined Tracing (USDT) dependencies:
-
-```sh
-sudo dnf install systemtap-sdt-devel
-```
-
-GUI dependencies:
-
-If you want to build kerrigan-qt, make sure that the required packages for Qt development
-are installed. Qt 5 is necessary to build the GUI.
-To build without GUI pass `--without-gui`.
-
-To build with Qt 5 you need the following:
-
-```sh
-sudo dnf install qt5-qttools-devel qt5-qtbase-devel
-```
-
-Additionally, to support Wayland protocol for modern desktop environments:
-
-```sh
-sudo dnf install qt5-qtwayland
-```
-
-libqrencode (optional) can be installed with:
-
-```sh
-sudo dnf install qrencode-devel
-```
-
-Once these are installed, they will be found by configure and a kerrigan-qt executable will be
-built by default.
-
-## Dependencies
-
-See [dependencies.md](dependencies.md) for a complete overview, and
-[depends](/depends/README.md) on how to compile them yourself, if you wish to
-not use the packages of your Linux distribution.
-
-### Berkeley DB
-
-The legacy wallet uses Berkeley DB. To ensure backwards compatibility it is
-recommended to use Berkeley DB 4.8. If you have to build it yourself, and don't
-want to use any other libraries built in depends, you can do:
-```bash
-make -C depends NO_BOOST=1 NO_LIBEVENT=1 NO_QT=1 NO_SQLITE=1 NO_NATPMP=1 NO_UPNP=1 NO_ZMQ=1 NO_USDT=1
-...
-to: /path/to/kerrigan/depends/x86_64-pc-linux-gnu
-```
-and configure using the following:
-```bash
-export BDB_PREFIX="/path/to/kerrigan/depends/x86_64-pc-linux-gnu"
-
-./configure \
-    BDB_LIBS="-L${BDB_PREFIX}/lib -ldb_cxx-4.8" \
-    BDB_CFLAGS="-I${BDB_PREFIX}/include"
-```
-
-**Note**: Make sure that `BDB_PREFIX` is an absolute path.
-
-**Note**: You only need Berkeley DB if the legacy wallet is enabled (see [*Disable-wallet mode*](#disable-wallet-mode)).
-
-Disable-wallet mode
---------------------
-When the intention is to only run a P2P node, without a wallet, Kerrigan Core can
-be compiled in disable-wallet mode with:
-
-    ./configure --disable-wallet
-
-In this case there is no dependency on SQLite or Berkeley DB.
-
-Mining is also possible in disable-wallet mode using the `getblocktemplate` RPC call.
-
-Additional Configure Flags
---------------------------
-A list of additional configure flags can be displayed with:
+## Additional Configure Flags
 
 ```sh
 ./configure --help
 ```
 
-
-Setup and Build Example: Arch Linux
------------------------------------
-This example lists the steps necessary to setup and build a command line only distribution of the latest changes on Arch Linux:
+## Arch Linux Command-Line Build
 
 ```sh
-pacman --sync --needed autoconf automake boost gcc git libbacktrace libevent libtool make pkgconf python sqlite libsodium gmp
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-cargo install cxxbridge-cmd --version 1.0.186
+sudo pacman --sync --needed base-devel git cmake curl pkgconf autoconf \
+    automake libtool python
 git clone https://github.com/kerrigan-network/kerrigan.git
-cd kerrigan/
+cd kerrigan
+make -C depends -j$(nproc)
 ./autogen.sh
-./configure
-make check
-./src/kerrigand
+CONFIG_SITE=$PWD/depends/x86_64-pc-linux-gnu/share/config.site \
+    ./configure --prefix=$PWD/depends/x86_64-pc-linux-gnu --without-gui
+make -j$(nproc)
+./src/kerrigand --version
 ```
 
-If you intend to work with legacy Berkeley DB wallets, see [Berkeley DB](#berkeley-db) section.
+If you need legacy Berkeley DB wallet compatibility (BDB 4.8), build it
+through `depends/`. The legacy wallet is enabled by default; pass
+`--without-bdb` to skip it. See [build-pool-operator.md](build-pool-operator.md)
+for a manual BDB 4.8 build recipe that bypasses depends.

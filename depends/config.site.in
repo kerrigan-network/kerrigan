@@ -82,6 +82,31 @@ if test -z "$enable_hardening" && test -n "@no_harden@"; then
   enable_hardening=no
 fi
 
+# Rust toolchain (Sapling zk-SNARK build). RUST_TARGET is substituted from the
+# top-level depends/Makefile using the rust_target macro in native_rust.mk,
+# mapping the GCC canonical host to the matching Rust triple. RUST_VENDORED_SOURCES
+# points at the extracted crate vendor tree under the depends prefix, so that
+# cargo can be invoked with --offline against a deterministic source set.
+RUST_TARGET="@rust_target@"
+RUST_VENDORED_SOURCES="${depends_prefix}/vendored-sources"
+
+# Put the staged native toolchain first on PATH so the pinned rustc/cargo/
+# cxxbridge win over anything the operator happens to have in $PATH.
+PATH="${depends_prefix}/native/bin:$PATH"
+export PATH
+
+# Explicit pinning so configure AC_PATH_PROG finds the depends-built tools
+# even if ./configure is invoked without sourcing this file first.
+if test -x "${depends_prefix}/native/bin/rustc"; then
+  RUSTC="${depends_prefix}/native/bin/rustc"
+fi
+if test -x "${depends_prefix}/native/bin/cargo"; then
+  CARGO="${depends_prefix}/native/bin/cargo"
+fi
+if test -x "${depends_prefix}/native/bin/cxxbridge"; then
+  CXXBRIDGE="${depends_prefix}/native/bin/cxxbridge"
+fi
+
 PKG_CONFIG="$(which pkg-config) --static"
 
 PKG_CONFIG_PATH="${depends_prefix}/share/pkgconfig:${depends_prefix}/lib/pkgconfig"

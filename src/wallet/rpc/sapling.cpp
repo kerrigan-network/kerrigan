@@ -10,12 +10,15 @@
 #include <consensus/validation.h>
 #include <evo/specialtx.h>
 #include <core_io.h>
+#include <interfaces/chain.h>
 #include <key_io.h>
 #include <policy/policy.h>
+#include <primitives/block.h>
 #include <logging.h>
 #include <random.h>
 #include <rpc/server.h>
 #include <rpc/util.h>
+#include <shutdown.h>
 #include <rust/bridge.h>
 #include <sapling/sapling_address.h>
 #include <sapling/sapling_init.h>
@@ -307,6 +310,17 @@ RPCHelpMan z_sendmany()
         {
             std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
             if (!pwallet) return UniValue::VNULL;
+
+            // Reject shielded sends while the node is still catching up. The
+            // wallet has not yet observed every block that may contain notes
+            // spent by `fromaddress`, and broadcasting a Sapling transaction
+            // exposes its nullifiers to peers. Waiting for IBD to finish is
+            // the only way to avoid publishing a nullifier set that we may
+            // not yet fully own.
+            if (pwallet->chain().isInitialBlockDownload()) {
+                throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+                    "Cannot send while in initial block download. Wait for sync to complete.");
+            }
 
             // Make sure the results are valid at least up to the most recent block
             // the user could have gotten from another RPC command prior to now
@@ -1215,6 +1229,140 @@ RPCHelpMan z_importviewingkey()
 
             LogPrintf("z_importviewingkey: rescan complete\n");
             return UniValue::VNULL;
+        },
+    };
+}
+
+RPCHelpMan z_rebuildsaplingwitnesses()
+{
+    return RPCHelpMan{"z_rebuildsaplingwitnesses",
+        "\nRebuild per-note Sapling incremental witnesses by replaying the block range\n"
+        "covered by the wallet's unspent notes.\n"
+        "Use when z_sendmany fails with anchor mismatch or corrupted-witness errors\n"
+        "after a daemon stall, Sapling DB rebuild, or IBD re-catchup. Spent notes are\n"
+        "not touched.\n",
+        {
+            {"from_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED,
+             "Block height to start replay from. Defaults to the minimum blockHeight "
+             "across all unspent notes."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "from_height", "Replay start height"},
+                {RPCResult::Type::NUM, "to_height", "Chain tip height used for replay"},
+                {RPCResult::Type::NUM, "blocks_processed", "Blocks replayed across the [from_height, to_height] range"},
+                {RPCResult::Type::NUM, "notes_rebuilt", "Unspent notes whose witness was cleared and rebuilt"},
+                {RPCResult::Type::ARR, "note_heights", "Per-note final state after replay",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR_HEX, "cmu", "Note commitment"},
+                                {RPCResult::Type::NUM, "block_height", "Confirmed block height"},
+                                {RPCResult::Type::NUM, "tree_position", "Merkle tree position (-1 if still missing)"},
+                                {RPCResult::Type::BOOL, "has_witness", "Whether witness data was populated"},
+                            }
+                        },
+                    }
+                },
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("z_rebuildsaplingwitnesses", "")
+            + HelpExampleCli("z_rebuildsaplingwitnesses", "23795")
+            + HelpExampleRpc("z_rebuildsaplingwitnesses", "")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        {
+            std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
+            if (!pwallet) return UniValue::VNULL;
+
+            // Nullifier derivation during witness rebuild requires the FVK,
+            // which on encrypted wallets is fine when locked, but we also may
+            // need to write note records; unlocked is the safe default.
+            LOCK(pwallet->cs_wallet);
+            EnsureWalletIsUnlocked(*pwallet);
+
+            auto& km = pwallet->GetSaplingKeyManager();
+            if (km.IsEmpty()) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "No Sapling keys loaded");
+            }
+
+            int tipHeight = pwallet->GetLastBlockHeight();
+            if (tipHeight < 0) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Wallet has no tip height; finish sync first");
+            }
+
+            WalletBatch batch(pwallet->GetDatabase());
+
+            // Count unspent notes before clearing so we can report notes_rebuilt.
+            size_t notesRebuilt = 0;
+            for (const auto& [cmu, nd] : km.GetAllNotes()) {
+                if (!nd.isSpent && nd.blockHeight >= 0) notesRebuilt++;
+            }
+            if (notesRebuilt == 0) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "No unspent confirmed Sapling notes to rebuild");
+            }
+
+            // Clear witness data for all unspent notes in-place; the returned
+            // minimum height is where the replay must start unless the caller
+            // supplied an explicit from_height.
+            auto autoStart = km.ClearWitnessesForRebuild(&batch);
+
+            int fromHeight;
+            if (!request.params[0].isNull()) {
+                fromHeight = request.params[0].getInt<int>();
+                if (fromHeight < 0) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "from_height must be non-negative");
+                }
+            } else if (autoStart) {
+                fromHeight = *autoStart;
+            } else {
+                // Defensive: notesRebuilt > 0 so autoStart should be set.
+                throw JSONRPCError(RPC_WALLET_ERROR, "Could not determine replay start height");
+            }
+
+            if (fromHeight > tipHeight) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                    strprintf("from_height %d exceeds chain tip %d", fromHeight, tipHeight));
+            }
+
+            LogPrintf("z_rebuildsaplingwitnesses: replaying blocks %d..%d for %u notes\n",
+                      fromHeight, tipHeight, (unsigned)notesRebuilt);
+
+            // Shared replay loop: identical to the code path used by the
+            // post-IBD auto-detect in CWallet::MaybeAutoRebuildSaplingWitnesses,
+            // so behaviour cannot drift between the two entry points. Returns
+            // the number of blocks replayed, or -1 on shutdown / missing block.
+            int blocksProcessed = pwallet->RebuildSaplingWitnessesFromHeight(fromHeight, batch);
+            if (blocksProcessed < 0) {
+                throw JSONRPCError(RPC_MISC_ERROR,
+                    "Witness rebuild aborted: shutdown requested, chain reorged, or block data "
+                    "unavailable (pruned node?). See log for the specific failing height. "
+                    "Restart kerrigand with -reindex or -reindex-chainstate to restore block data "
+                    "and retry z_rebuildsaplingwitnesses.");
+            }
+
+            UniValue result(UniValue::VOBJ);
+            result.pushKV("from_height", fromHeight);
+            result.pushKV("to_height", tipHeight);
+            result.pushKV("blocks_processed", blocksProcessed);
+            result.pushKV("notes_rebuilt", (int)notesRebuilt);
+
+            UniValue heights(UniValue::VARR);
+            for (const auto& [cmu, nd] : km.GetAllNotes()) {
+                if (nd.isSpent || nd.blockHeight < 0) continue;
+                UniValue entry(UniValue::VOBJ);
+                entry.pushKV("cmu", cmu.GetHex());
+                entry.pushKV("block_height", nd.blockHeight);
+                entry.pushKV("tree_position", nd.treePosition);
+                entry.pushKV("has_witness", !nd.witnessData.empty());
+                heights.push_back(entry);
+            }
+            result.pushKV("note_heights", heights);
+
+            LogPrintf("z_rebuildsaplingwitnesses: complete, %d blocks replayed\n", blocksProcessed);
+            return result;
         },
     };
 }
