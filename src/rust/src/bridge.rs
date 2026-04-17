@@ -360,12 +360,16 @@ fn zip32_find_address(
         .unwrap_or_else(|e| Err(panic_to_string(e)))
 }
 
-fn diversifier_index(dk: [u8; 32], d: [u8; 11]) -> [u8; 11] {
+// Returns `Err` on panic so the C++ caller cannot mistake a silently-zeroed
+// index for a valid diversifier index 0 (which would cause address collision).
+// See issue #1135.
+fn diversifier_index(dk: [u8; 32], d: [u8; 11]) -> Result<[u8; 11], String> {
     match catch_unwind(AssertUnwindSafe(|| diversifier_index_impl(dk, d))) {
-        Ok(v) => v,
+        Ok(v) => Ok(v),
         Err(e) => {
-            eprintln!("ERROR: {} -- returning zeroed index", panic_to_string(e));
-            [0u8; 11]
+            let msg = panic_to_string(e);
+            eprintln!("ERROR: diversifier_index FFI panic: {}", msg);
+            Err(format!("diversifier_index panic: {}", msg))
         }
     }
 }
@@ -875,7 +879,10 @@ pub(crate) mod ffi {
         fn zip32_find_address(fvk: &[u8; 96], dk: [u8; 32], j: [u8; 11]) -> Result<Zip32Address>;
 
         /// Get the diversifier index for a given diversifier.
-        fn diversifier_index(dk: [u8; 32], d: [u8; 11]) -> [u8; 11];
+        /// Returns `Err` if the underlying derivation panics (issue #1135);
+        /// a silent zero is not a valid substitute because 0 is itself a
+        /// legal diversifier index and would cause address collision.
+        fn diversifier_index(dk: [u8; 32], d: [u8; 11]) -> Result<[u8; 11]>;
 
         /// Derive IVK from a 96-byte FVK.
         fn fvk_to_ivk(fvk: &[u8; 96]) -> Result<[u8; 32]>;
