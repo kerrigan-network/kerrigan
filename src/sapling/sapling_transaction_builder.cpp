@@ -42,22 +42,21 @@ struct SaplingTransactionBuilder::Impl {
 /**
  * Build a Rust consensus::Network object from a chainparams network ID string.
  *
- * Mainnet and testnet use the Zcash standard crypto parameters (the Sapling
- * circuits are identical).  Regtest and devnet use LocalNetwork with the
- * Kerrigan SaplingHeight so the builder accepts our custom activation height.
+ * All networks use LocalNetwork-backed activation heights on the Rust side:
+ * Sapling is pinned to the Kerrigan chainparams value, every upgrade beyond
+ * Sapling is passed as -1 (None). This keeps Canopy disabled forever on the
+ * Rust side, which is required because the Sapling FFI unconditionally
+ * constructs Rseed::BeforeZip212 notes. If a Canopy-equivalent is ever
+ * activated on Kerrigan, this function and the rseed handling in
+ * src/rust/src/sapling.rs must be updated together.
  */
 static rust::Box<::consensus::Network>
 MakeRustNetwork(const std::string& networkIDStr, int saplingHeight)
 {
     // Pass -1 for unused heights (Rust converts negative to None).
-    if (networkIDStr == "main") {
-        return ::consensus::network("main", -1,-1,-1,-1,-1,-1,-1,-1);
-    }
-    if (networkIDStr == "test") {
-        return ::consensus::network("test", -1,-1,-1,-1,-1,-1,-1,-1);
-    }
-    // Regtest / devnet: supply our Sapling activation height.
-    return ::consensus::network("regtest",
+    // Canopy and later upgrades stay disabled on Rust side until a future
+    // Kerrigan hard fork explicitly activates them.
+    return ::consensus::network(networkIDStr.c_str(),
                                 /*overwinter=*/-1,
                                 /*sapling=*/saplingHeight,
                                 /*blossom=*/-1,

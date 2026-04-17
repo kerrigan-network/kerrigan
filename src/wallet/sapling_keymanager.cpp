@@ -685,16 +685,19 @@ bool SaplingKeyManager::WriteDiversifierIndexToDB(WalletBatch& batch)
 
 /**
  * Build a consensus::Network Rust object for note decryption FFI calls.
- * Uses the same convention as SaplingTransactionBuilder::MakeRustNetwork.
+ *
+ * All networks pass the Kerrigan SaplingHeight explicitly, and leave every
+ * upgrade beyond Sapling disabled (None). This is required because the
+ * Sapling FFI (src/rust/src/sapling.rs) unconditionally wraps rcm in
+ * Rseed::BeforeZip212; keeping Canopy disabled on the Rust side forces
+ * zip212_enforcement() to return Zip212Enforcement::Off at every height,
+ * which matches what the FFI produces. Kept in sync with
+ * SaplingTransactionBuilder::MakeRustNetwork.
  */
 static rust::Box<::consensus::Network> MakeNoteDecryptionNetwork(
     const std::string& networkIDStr, int saplingHeight)
 {
-    if (networkIDStr == "main")
-        return ::consensus::network("main", -1, -1, -1, -1, -1, -1, -1, -1);
-    if (networkIDStr == "test")
-        return ::consensus::network("test", -1, -1, -1, -1, -1, -1, -1, -1);
-    return ::consensus::network("regtest",
+    return ::consensus::network(networkIDStr.c_str(),
         /*overwinter=*/-1, /*sapling=*/saplingHeight,
         /*blossom=*/-1, /*heartwood=*/-1, /*canopy=*/-1,
         /*nu5=*/-1, /*nu6=*/-1, /*nu6_1=*/-1);
