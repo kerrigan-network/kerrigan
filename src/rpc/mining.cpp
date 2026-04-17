@@ -683,23 +683,31 @@ static RPCHelpMan getmininginfo()
     // "networkhashps_per_algo". On algo-specific RPC ports, the scalars
     // report that algo's values; otherwise they report the chain tip.
     auto algoPortIt = g_rpc_algo_ports.find(request.localPort);
+    int algoSelected = -1;
     if (algoPortIt != g_rpc_algo_ports.end()) {
-        int algo = algoPortIt->second;
-        const CBlockIndex* pindexAlgo = GetLastBlockIndexForAlgo(active_chain.Tip(), chainman.GetConsensus(), algo);
+        algoSelected = algoPortIt->second;
+    } else {
+        std::string powalgo = gArgs.GetArg("-powalgo", "");
+        if (!powalgo.empty()) {
+            int a = GetAlgoByName(powalgo, -1);
+            if (a >= 0 && a < NUM_ALGOS) algoSelected = a;
+        }
+    }
+    if (algoSelected >= 0) {
+        const CBlockIndex* pindexAlgo = GetLastBlockIndexForAlgo(active_chain.Tip(), chainman.GetConsensus(), algoSelected);
         if (pindexAlgo) {
             obj.pushKV("difficulty", (double)GetDifficulty(pindexAlgo));
         } else {
             obj.pushKV("difficulty", (double)GetDifficulty(active_chain.Tip()));
         }
-        obj.pushKV("algo", GetAlgoName(algo));
+        obj.pushKV("algo", GetAlgoName(algoSelected));
     } else {
         obj.pushKV("difficulty", (double)GetDifficulty(active_chain.Tip()));
     }
 
-    // On algo-specific RPC ports, return algo-specific networkhashps
-    if (algoPortIt != g_rpc_algo_ports.end()) {
-        int algo = algoPortIt->second;
-        obj.pushKV("networkhashps", GetNetworkHashPSForAlgo(120, -1, active_chain, algo));
+    // On algo-specific RPC ports or with -powalgo set, return algo-specific networkhashps
+    if (algoSelected >= 0) {
+        obj.pushKV("networkhashps", GetNetworkHashPSForAlgo(120, -1, active_chain, algoSelected));
     } else {
         obj.pushKV("networkhashps", getnetworkhashps().HandleRequest(request));
     }
@@ -978,8 +986,11 @@ static RPCHelpMan getblocktemplate()
     if (strMode != "template")
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid mode");
 
-    // Parse algo: per-algo RPC port takes priority, then template_request param
-    int algo = ALGO_X11;
+    // Parse algo: per-algo RPC port takes priority, then template_request param,
+    // then -powalgo config fallback. Lets operators run one daemon per algo
+    // without per-call algo dispatch by setting -powalgo in kerrigan.conf.
+    int algo = GetAlgoByName(gArgs.GetArg("-powalgo", "x11"), ALGO_X11);
+    if (algo < 0 || algo >= NUM_ALGOS) algo = ALGO_X11;
     auto algoPortIt = g_rpc_algo_ports.find(request.localPort);
     if (algoPortIt != g_rpc_algo_ports.end()) {
         algo = algoPortIt->second;
