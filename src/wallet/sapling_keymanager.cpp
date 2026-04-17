@@ -302,6 +302,41 @@ bool SaplingKeyManager::CanSpend(const sapling::SaplingPaymentAddress& addr) con
     return setSpendableIvks.count(it->second) > 0;
 }
 
+bool SaplingKeyManager::RegisterDiversifiedAddress(const sapling::SaplingPaymentAddress& addr,
+                                                   const sapling::SaplingIncomingViewingKey& ivk,
+                                                   WalletBatch* batch)
+{
+    LOCK(cs);
+    // The IVK must already be known to the wallet (registered at key-add or
+    // wallet-load time). Without it we have no way to decrypt notes sent to
+    // addr, so refuse to insert the mapping.
+    if (mapIvkToFvk.find(ivk) == mapIvkToFvk.end()) {
+        LogPrintf("SaplingKeyManager::RegisterDiversifiedAddress: unknown IVK, refusing to register\n");
+        return false;
+    }
+
+    auto existing = mapAddressToIvk.find(addr);
+    if (existing != mapAddressToIvk.end()) {
+        // Idempotent: already registered. Sanity-check that the IVK matches
+        // (a mismatch would indicate wallet corruption or key collision).
+        if (!(existing->second == ivk)) {
+            LogPrintf("SaplingKeyManager::RegisterDiversifiedAddress: address already bound to a different IVK, not overwriting\n");
+            return false;
+        }
+    } else {
+        mapAddressToIvk[addr] = ivk;
+        mapIvkToAddresses[ivk].insert(addr);
+    }
+
+    if (batch) {
+        if (!batch->WriteSaplingPaymentAddress(addr, ivk)) {
+            LogPrintf("SaplingKeyManager::RegisterDiversifiedAddress: failed to persist address mapping\n");
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<sapling::SaplingIncomingViewingKey> SaplingKeyManager::GetIvk(const sapling::SaplingPaymentAddress& addr) const
 {
     LOCK(cs);
@@ -599,6 +634,20 @@ void SaplingKeyManager::LoadNote(const uint256& cmu, const SaplingNoteData& nd)
     }
     LOCK(cs);
     mapSaplingNotes[cmu] = nd;
+
+    // Self-heal wallets whose diversified change addresses were never
+    // registered in mapAddressToIvk (historical z_sendmany builds before
+    // RegisterDiversifiedAddress existed). If we know the IVK but not the
+    // recipient address, insert the mapping so CanSpend() and
+    // GetUnspentNotes(addr) recognise the note as spendable.
+    if (mapIvkToFvk.find(nd.ivk) != mapIvkToFvk.end()
+            && mapAddressToIvk.find(nd.recipient) == mapAddressToIvk.end()) {
+        mapAddressToIvk[nd.recipient] = nd.ivk;
+        mapIvkToAddresses[nd.ivk].insert(nd.recipient);
+        LogPrint(BCLog::SAPLING,
+                 "SaplingKeyManager::LoadNote: repaired orphaned diversified address mapping at note %s\n",
+                 cmu.ToString());
+    }
 }
 
 // DB persistence hooks

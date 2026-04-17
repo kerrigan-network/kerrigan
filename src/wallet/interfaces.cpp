@@ -810,6 +810,29 @@ public:
                     if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
                     throw std::runtime_error("Failed to add shielded change output");
                 }
+
+                // Register the change address so future CanSpend() /
+                // GetUnspentNotes(addr) lookups treat this change note as
+                // spendable. Mirrors the RPC z_sendmany path; on any failure
+                // LoadNote's self-heal rebuilds the mapping on next start.
+                sapling::SaplingPaymentAddress changeAddr;
+                std::copy(internalAddr.addr.begin(), internalAddr.addr.begin() + 11, changeAddr.d.begin());
+                std::copy(internalAddr.addr.begin() + 11, internalAddr.addr.end(),   changeAddr.pk_d.begin());
+
+                sapling::SaplingIncomingViewingKey internalIvk;
+                try {
+                    internalIvk.key = sapling::zip32::fvk_to_ivk(internalFvk.fvk);
+                } catch (...) {
+                    if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
+                    throw;
+                }
+
+                {
+                    WalletBatch batch(m_wallet->GetDatabase());
+                    if (!km.RegisterDiversifiedAddress(changeAddr, internalIvk, &batch)) {
+                        LogPrintf("sendShielded: failed to register internal change address (funds still spendable after next restart via LoadNote self-heal)\n");
+                    }
+                }
             }
         } else {
             // Transparent source

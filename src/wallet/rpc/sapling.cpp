@@ -594,6 +594,31 @@ RPCHelpMan z_sendmany()
                         throw JSONRPCError(RPC_WALLET_ERROR, "Failed to add shielded change output");
                     }
                     nShieldedOutputs++;
+
+                    // Register the change address so the next CanSpend() /
+                    // GetUnspentNotes(addr) lookup recognises it. Without
+                    // this, the change note is decrypted and stored but the
+                    // recipient (random-j internal diversified address) is
+                    // missing from mapAddressToIvk and the wallet reports
+                    // it as unspendable.
+                    sapling::SaplingPaymentAddress changeAddr;
+                    std::copy(internalAddr.addr.begin(), internalAddr.addr.begin() + 11, changeAddr.d.begin());
+                    std::copy(internalAddr.addr.begin() + 11, internalAddr.addr.end(),   changeAddr.pk_d.begin());
+
+                    sapling::SaplingIncomingViewingKey internalIvk;
+                    try {
+                        internalIvk.key = sapling::zip32::fvk_to_ivk(internalFvk.fvk);
+                    } catch (const std::exception& e) {
+                        throw JSONRPCError(RPC_WALLET_ERROR,
+                            strprintf("Failed to derive internal IVK for change address: %s", e.what()));
+                    }
+
+                    {
+                        WalletBatch batch(pwallet->GetDatabase());
+                        if (!km.RegisterDiversifiedAddress(changeAddr, internalIvk, &batch)) {
+                            LogPrintf("z_sendmany: failed to register internal change address (funds still spendable after next restart via LoadNote self-heal)\n");
+                        }
+                    }
                 }
 
                 // sk cleansed by sk_guard destructor

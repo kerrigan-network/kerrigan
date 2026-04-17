@@ -127,6 +127,32 @@ public:
     bool CanSpend(const sapling::SaplingPaymentAddress& addr) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
+     * Register a diversified payment address discovered while building a
+     * spend (typically an internal ZIP 316 change address whose diversifier
+     * is chosen at tx-build time and is not derivable from persisted state).
+     *
+     * Inserts the address into mapAddressToIvk / mapIvkToAddresses so
+     * CanSpend() and GetUnspentNotes(addr) recognise it, and optionally
+     * persists the mapping through @p batch so it survives a restart.
+     *
+     * Requires @p ivk to already be known to the wallet (i.e. in
+     * mapIvkToFvk). If the IVK is unknown, the call is a no-op and returns
+     * false. Idempotent: safe to call repeatedly for the same (addr, ivk).
+     *
+     * @param addr   Payment address to register.
+     * @param ivk    Incoming viewing key that decrypts notes sent to @p addr.
+     * @param batch  If non-null, persist the address->ivk mapping via the
+     *               caller's WalletBatch. If null, registration is
+     *               in-memory only (the load path re-derives it).
+     * @return true if the mapping was inserted (or already present),
+     *         false if @p ivk is not tracked by this wallet or the
+     *         DB write failed.
+     */
+    bool RegisterDiversifiedAddress(const sapling::SaplingPaymentAddress& addr,
+                                    const sapling::SaplingIncomingViewingKey& ivk,
+                                    WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
      * Get the incoming viewing key for a payment address.
      */
     std::optional<sapling::SaplingIncomingViewingKey> GetIvk(const sapling::SaplingPaymentAddress& addr) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
