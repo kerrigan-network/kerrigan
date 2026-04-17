@@ -1509,7 +1509,7 @@ int CWallet::RebuildSaplingWitnessesFromHeight(int fromHeight, WalletBatch& batc
 
     int blocksProcessed = 0;
     for (int h = fromHeight; h <= tipHeight; ++h) {
-        if (ShutdownRequested()) {
+        if (chain().shutdownRequested()) {
             WalletLogPrintf("Sapling witness rebuild: shutdown requested at height %d\n", h);
             return -1;
         }
