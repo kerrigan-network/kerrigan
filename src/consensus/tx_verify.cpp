@@ -17,6 +17,28 @@
 #include <util/check.h>
 #include <util/moneystr.h>
 
+#include <limits>
+
+/**
+ * Activation height for issue #1143 consensus fix: enforce nLockTime on
+ * Sapling transactions whose vin is empty (pure shielded-to-shielded).
+ *
+ * The legacy IsFinalTx() walks tx.vin to check SEQUENCE_FINAL; an empty vin
+ * vacuously returns "final" and nLockTime is never enforced. This is a
+ * consensus-visible behaviour. The corrected evaluation is gated behind
+ * a future hard-fork height.
+ *
+ * Default: std::numeric_limits<int>::max() -- the fix is compiled in but
+ * never activates. A future release will wire this to a chainparams field
+ * (e.g. consensus.nSaplingLocktimeEnforceHeight) once an activation height
+ * is scheduled. Until then, current behaviour is preserved bit-for-bit.
+ *
+ * Retroactive safety: Kerrigan Sapling transactions in live blocks use
+ * nLockTime == 0 (z_sendmany does not set a lock time), so no live tx is
+ * affected by flipping this from the default.
+ */
+static constexpr int SAPLING_EMPTY_VIN_LOCKTIME_ENFORCE_HEIGHT =
+    std::numeric_limits<int>::max();
 
 bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
 {
@@ -24,6 +46,19 @@ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
         return true;
     if ((int64_t)tx.nLockTime < ((int64_t)tx.nLockTime < LOCKTIME_THRESHOLD ? (int64_t)nBlockHeight : nBlockTime))
         return true;
+
+    // Issue #1143: a Sapling tx with empty vin (pure shielded-to-shielded)
+    // would otherwise fall through the empty for-loop below and return true,
+    // silently ignoring nLockTime. When active, treat the tx-level
+    // nLockTime as the authoritative signal -- we already know here that
+    // nLockTime has not yet been reached, so the tx is not final.
+    //
+    // Gated behind a future activation height; default = INT_MAX (no-op).
+    if (nBlockHeight >= SAPLING_EMPTY_VIN_LOCKTIME_ENFORCE_HEIGHT
+            && tx.nType == TRANSACTION_SAPLING
+            && tx.vin.empty()) {
+        return false;
+    }
 
     // Even if tx.nLockTime isn't satisfied by nBlockHeight/nBlockTime, a
     // transaction is still considered final if all inputs' nSequence ==
