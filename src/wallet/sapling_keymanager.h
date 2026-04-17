@@ -192,6 +192,39 @@ public:
     bool HaveIvk(const sapling::SaplingIncomingViewingKey& ivk) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
+     * Check whether an IVK corresponds to an external (user-facing) spending key
+     * rather than an internal ZIP 316 change key.
+     *
+     * An IVK is classified as internal if the ExtSK stored for it is the
+     * xsk_derive_internal() output of some other ExtSK also tracked by this
+     * manager. Such IVKs must not be exported via dumpwallet: on re-import,
+     * AddSpendingKey() re-derives the internal ExtSK from the external one
+     * automatically. Treating an internal ExtSK as external on import would
+     * corrupt defaultIvk and restart external-address diversifier derivation
+     * from j=0, breaking round-trip of dumpwallet->importwallet.
+     *
+     * Returns:
+     *   - true  if @p ivk has a spending key and that key is NOT an internal
+     *           derivation of any other tracked ExtSK (i.e. it is external).
+     *   - false if @p ivk is internal, watch-only, or unknown.
+     */
+    bool IsExternalIvk(const sapling::SaplingIncomingViewingKey& ivk) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * Return the ZIP 32 default (j=0) external payment address for @p ivk.
+     *
+     * Re-derives the default address via fvk_default_address() rather than
+     * picking one of the diversified addresses already stored under this IVK
+     * (the stored set is ordered by address bytes, not diversifier index).
+     *
+     * Used by dumpwallet to emit a stable, human-recognisable address for
+     * each exported spending key.
+     *
+     * Returns nullopt if @p ivk is unknown or FFI derivation fails.
+     */
+    std::optional<sapling::SaplingPaymentAddress> GetDefaultExternalAddress(const sapling::SaplingIncomingViewingKey& ivk) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
      * Returns true if any Sapling keys are loaded.
      */
     bool IsEmpty() const EXCLUSIVE_LOCKS_REQUIRED(!cs);

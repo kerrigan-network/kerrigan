@@ -403,6 +403,65 @@ bool SaplingKeyManager::HaveIvk(const sapling::SaplingIncomingViewingKey& ivk) c
     return mapIvkToFvk.count(ivk) > 0;
 }
 
+bool SaplingKeyManager::IsExternalIvk(const sapling::SaplingIncomingViewingKey& ivk) const
+{
+    LOCK(cs);
+
+    // Must have a plaintext spending key to classify. When the wallet is
+    // encrypted and locked, mapIvkToExtSk is empty and we cannot decide:
+    // return false to be conservative (skip in dump rather than leak).
+    auto skIt = mapIvkToExtSk.find(ivk);
+    if (skIt == mapIvkToExtSk.end()) return false;
+    const auto& ext_sk_bytes = skIt->second.key;
+
+    // A key is internal iff some OTHER tracked ExtSK derives to it via
+    // xsk_derive_internal(). Scan siblings and check.
+    for (const auto& [other_ivk, other_sk] : mapIvkToExtSk) {
+        if (other_ivk == ivk) continue;
+        try {
+            auto internalBytes = sapling::zip32::xsk_derive_internal(other_sk.key);
+            if (internalBytes == ext_sk_bytes) {
+                // This IVK is the internal derivation of other_ivk's ExtSK.
+                return false;
+            }
+        } catch (const std::exception&) {
+            // Non-fatal: continue scanning other candidates.
+            continue;
+        }
+    }
+    return true;
+}
+
+std::optional<sapling::SaplingPaymentAddress> SaplingKeyManager::GetDefaultExternalAddress(
+    const sapling::SaplingIncomingViewingKey& ivk) const
+{
+    LOCK(cs);
+
+    auto fvkIt = mapIvkToFvk.find(ivk);
+    auto dkIt  = mapIvkToDk.find(ivk);
+    if (fvkIt == mapIvkToFvk.end() || dkIt == mapIvkToDk.end()) {
+        return std::nullopt;
+    }
+
+    std::array<uint8_t, 96> fvk_bytes;
+    std::copy(fvkIt->second.ak.begin(),  fvkIt->second.ak.end(),  fvk_bytes.begin());
+    std::copy(fvkIt->second.nk.begin(),  fvkIt->second.nk.end(),  fvk_bytes.begin() + 32);
+    std::copy(fvkIt->second.ovk.begin(), fvkIt->second.ovk.end(), fvk_bytes.begin() + 64);
+
+    std::array<uint8_t, 43> addr_bytes;
+    try {
+        addr_bytes = sapling::zip32::fvk_default_address(fvk_bytes, dkIt->second);
+    } catch (const std::exception& e) {
+        LogPrintf("SaplingKeyManager::GetDefaultExternalAddress: fvk_default_address failed: %s\n", e.what());
+        return std::nullopt;
+    }
+
+    sapling::SaplingPaymentAddress addr;
+    std::copy(addr_bytes.begin(),      addr_bytes.begin() + 11, addr.d.begin());
+    std::copy(addr_bytes.begin() + 11, addr_bytes.end(),        addr.pk_d.begin());
+    return addr;
+}
+
 bool SaplingKeyManager::IsEmpty() const
 {
     LOCK(cs);

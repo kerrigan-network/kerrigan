@@ -541,6 +541,23 @@ RPCHelpMan importwallet()
         }
         CHECK_NONFATAL(pwallet->chain().findBlock(pwallet->GetLastBlockHash(), FoundBlock().time(nTimeBegin)));
 
+        // Precompute the Sapling activation block time. Sapling spending keys
+        // carry no on-chain creation timestamp, so any imported Sapling key
+        // must force the rescan window back to the Sapling activation height;
+        // otherwise importwallet silently scans only the tip and misses every
+        // shielded note. See GitHub issue #1173 for the original report of
+        // importwallet skipping Sapling rescans.
+        const int sapling_height = Params().GetConsensus().SaplingHeight;
+        int64_t sapling_activation_time = 0;
+        bool have_sapling_activation_time =
+            pwallet->chain().findFirstBlockWithTimeAndHeight(0, sapling_height, FoundBlock().time(sapling_activation_time));
+        // If activation height is not yet reached on this node (e.g. pre-activation
+        // testnet), fall back to 1 (wallet birthday = "beginning of time") so the
+        // rescan still traverses all available blocks rather than only the tip.
+        if (!have_sapling_activation_time) {
+            sapling_activation_time = 1;
+        }
+
         int64_t nFilesize = std::max((int64_t)1, (int64_t)file.tellg());
         file.seekg(0, file.beg);
 
@@ -598,6 +615,21 @@ RPCHelpMan importwallet()
                 if (!km.AddSpendingKeyWithDB(batch, sk, pMasterKey)) {
                     LogPrintf("importwallet: failed to import sapling key on line %d\n", nLine);
                     fGood = false;
+                } else {
+                    // Force the rescan window back to (at least) Sapling activation.
+                    // nTimeBegin tracks the earliest key-creation time across all
+                    // imported keys; keep the minimum so a single dump with mixed
+                    // transparent + Sapling keys is rescanned from the oldest key.
+                    nTimeBegin = std::min(nTimeBegin, sapling_activation_time);
+                    // UpdateTimeFirstKey writes to wallet metadata so subsequent
+                    // partial rescans and wallet restarts respect this timestamp.
+                    if (LegacyScriptPubKeyMan* spk_man_t = pwallet->GetLegacyScriptPubKeyMan()) {
+                        LOCK(spk_man_t->cs_KeyStore);
+                        spk_man_t->UpdateTimeFirstKey(sapling_activation_time);
+                    }
+                    pwallet->WalletLogPrintf(
+                        "importwallet: Sapling key imported on line %d, rescan will run from Sapling activation height %d\n",
+                        nLine, sapling_height);
                 }
                 memory_cleanse(sk.key.data(), sk.key.size());
                 memory_cleanse(masterKey.data(), masterKey.size() * sizeof(CKeyingMaterial::value_type));
@@ -1153,17 +1185,39 @@ RPCHelpMan dumpwallet()
         }
     }
     // Sapling shielded keys: export as parseable sapling_extsk= lines.
+    //
+    // Dump UNIQUE external ExtSKs only. Two invariants matter here:
+    //
+    //   1. A single external ExtSK can cover N diversified addresses
+    //      (j=0, j=1, ... via ZIP 32 find_address). Dumping once per
+    //      address would emit the same 169-byte key N times, bloat the
+    //      backup file, and invoke AddSpendingKey() N times on import,
+    //      each of which resets defaultIvk on the first call and is a
+    //      no-op on the rest.
+    //
+    //   2. The manager also tracks internal ZIP 316 change-key ExtSKs
+    //      alongside externals. Emitting them as sapling_extsk= would
+    //      cause importwallet to treat them as external keys: AddSpendingKey
+    //      would re-derive a fresh internal from the internal (meaningless),
+    //      restart external diversifier counting from j=0, and corrupt
+    //      defaultIvk. Skip them; importwallet re-derives the correct
+    //      internal from the external ExtSK automatically.
     {
         const auto& km = wallet.GetSaplingKeyManager();
-        auto addrs = km.GetAllAddresses();
-        if (!addrs.empty()) {
-            file << "# Sapling shielded spending keys\n";
-        }
-        for (const auto& addr : addrs) {
-            auto sk = km.GetSpendingKey(addr);
-            if (!sk) continue; // watch-only, skip
+        auto ivks = km.GetAllIvks();
+        bool header_written = false;
+        for (const auto& ivk : ivks) {
+            if (!km.IsExternalIvk(ivk)) continue; // skip internal + watch-only + unknown
+            auto def_addr = km.GetDefaultExternalAddress(ivk);
+            if (!def_addr) continue;
+            auto sk = km.GetSpendingKey(*def_addr);
+            if (!sk) continue; // watch-only or missing spending key
+            if (!header_written) {
+                file << "# Sapling shielded spending keys\n";
+                header_written = true;
+            }
             std::string hexKey = HexStr(sk->key);
-            std::string addrStr = EncodeSaplingAddress(addr);
+            std::string addrStr = EncodeSaplingAddress(*def_addr);
             file << strprintf("sapling_extsk=%s addr=%s\n", hexKey, addrStr);
             memory_cleanse(hexKey.data(), hexKey.size());
             memory_cleanse(sk->key.data(), sk->key.size());
