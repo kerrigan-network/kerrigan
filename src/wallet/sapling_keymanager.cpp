@@ -20,10 +20,38 @@
 #include <uint256.h>
 #include <util/strencodings.h>
 
+#include <support/cleanse.h>
+
 #include <cstring>
 #include <string>
 
 namespace wallet {
+
+namespace {
+/**
+ * RAII guard that zeroes a byte buffer on destruction. Used to ensure ZIP-32
+ * intermediate spending / viewing key material (FVK, DK, IVK, internal ExtSK)
+ * is cleansed on every exit path from AddSpendingKey(), including exceptions
+ * thrown by the Rust FFI between derivation steps. See issue #1123.
+ *
+ * Non-owning: the guard references an externally-owned std::array. Lifetime
+ * of the guard must not exceed the lifetime of the buffer it protects.
+ */
+template <std::size_t N>
+class ByteArrayCleanser {
+public:
+    explicit ByteArrayCleanser(std::array<uint8_t, N>& buf) noexcept : buf_(buf) {}
+    ~ByteArrayCleanser() { memory_cleanse(buf_.data(), buf_.size()); }
+
+    ByteArrayCleanser(const ByteArrayCleanser&) = delete;
+    ByteArrayCleanser& operator=(const ByteArrayCleanser&) = delete;
+    ByteArrayCleanser(ByteArrayCleanser&&) = delete;
+    ByteArrayCleanser& operator=(ByteArrayCleanser&&) = delete;
+
+private:
+    std::array<uint8_t, N>& buf_;
+};
+} // namespace
 
 bool SaplingKeyManager::AddFvkInternal(const sapling::SaplingFullViewingKey& fvk,
                                        const std::array<uint8_t, 32>& dk,
@@ -63,9 +91,23 @@ bool SaplingKeyManager::AddSpendingKey(const sapling::SaplingExtendedSpendingKey
 {
     LOCK(cs);
 
+    // Issue #1123: every ZIP-32 intermediate byte buffer below holds
+    // spending-key-adjacent material (FVK/DK/IVK, and the internal ExtSK
+    // which is itself spending-key material). Guard each with a
+    // ByteArrayCleanser so an exception from any FFI call zeroes the
+    // buffers before the stack unwinds.
+    //
+    // Note: the cleansers are declared up front so they destruct in
+    // reverse-declaration order on every exit path (return, throw).
+
     // Extract FVK (96 bytes), DK (32 bytes), IVK (32 bytes) from the ExtSK via Rust FFI
-    std::array<uint8_t, 96> fvk_bytes;
-    std::array<uint8_t, 32> ivk_bytes;
+    std::array<uint8_t, 96> fvk_bytes{};
+    std::array<uint8_t, 32> ivk_bytes{};
+    std::array<uint8_t, 32> dk_bytes{};
+    ByteArrayCleanser<96> fvk_guard(fvk_bytes);
+    ByteArrayCleanser<32> ivk_guard(ivk_bytes);
+    ByteArrayCleanser<32> dk_guard(dk_bytes);
+
     try {
         fvk_bytes = sapling::zip32::xsk_to_fvk(sk.key);
         ivk_bytes = sapling::zip32::xsk_to_ivk(sk.key);
@@ -73,7 +115,6 @@ bool SaplingKeyManager::AddSpendingKey(const sapling::SaplingExtendedSpendingKey
         LogPrintf("SaplingKeyManager::AddSpendingKey: invalid ExtSK: %s\n", e.what());
         return false;
     }
-    std::array<uint8_t, 32> dk_bytes;
     try {
         dk_bytes = sapling::zip32::xsk_to_dk(sk.key);
     } catch (const std::exception& e) {
@@ -101,32 +142,45 @@ bool SaplingKeyManager::AddSpendingKey(const sapling::SaplingExtendedSpendingKey
 
     // Also register the internal FVK so the wallet can detect change notes
     // sent to internal addresses (ZIP 316 unlinkable change).
-    try {
-        auto internalResult = sapling::zip32::derive_internal_fvk(fvk_bytes, dk_bytes);
-        auto internal_ivk_bytes = sapling::zip32::fvk_to_ivk(internalResult.fvk);
+    {
+        // Declare intermediate buffers + guards before any FFI call that
+        // populates them, so every early-return / throw path cleanses.
+        std::array<uint8_t, 32> internal_ivk_bytes{};
+        std::array<uint8_t, 169> internal_xsk_bytes{};
+        ByteArrayCleanser<32> internal_ivk_guard(internal_ivk_bytes);
+        ByteArrayCleanser<169> internal_xsk_guard(internal_xsk_bytes);
 
-        sapling::SaplingFullViewingKey internalFvk;
-        std::copy(internalResult.fvk.begin(), internalResult.fvk.begin() + 32, internalFvk.ak.begin());
-        std::copy(internalResult.fvk.begin() + 32, internalResult.fvk.begin() + 64, internalFvk.nk.begin());
-        std::copy(internalResult.fvk.begin() + 64, internalResult.fvk.end(), internalFvk.ovk.begin());
+        try {
+            auto internalResult = sapling::zip32::derive_internal_fvk(fvk_bytes, dk_bytes);
+            ByteArrayCleanser<96> internal_fvk_guard(internalResult.fvk);
+            ByteArrayCleanser<32> internal_dk_guard(internalResult.dk);
 
-        sapling::SaplingIncomingViewingKey internalIvk;
-        internalIvk.key = internal_ivk_bytes;
+            internal_ivk_bytes = sapling::zip32::fvk_to_ivk(internalResult.fvk);
 
-        // Register the internal FVK so ScanSaplingOutputs can detect change
-        AddFvkInternal(internalFvk, internalResult.dk, internalIvk);
+            sapling::SaplingFullViewingKey internalFvk;
+            std::copy(internalResult.fvk.begin(), internalResult.fvk.begin() + 32, internalFvk.ak.begin());
+            std::copy(internalResult.fvk.begin() + 32, internalResult.fvk.begin() + 64, internalFvk.nk.begin());
+            std::copy(internalResult.fvk.begin() + 64, internalResult.fvk.end(), internalFvk.ovk.begin());
 
-        // Derive the internal ExtSK so the wallet can spend internal notes.
-        // The builder's add_spend() derives the FVK from the ExtSK, so we
-        // need the internal ExtSK (not the external one) for internal notes.
-        auto internalXskBytes = sapling::zip32::xsk_derive_internal(sk.key);
-        sapling::SaplingExtendedSpendingKey internalSk;
-        internalSk.key = internalXskBytes;
+            sapling::SaplingIncomingViewingKey internalIvk;
+            internalIvk.key = internal_ivk_bytes;
 
-        mapIvkToExtSk[internalIvk] = internalSk;
-        setSpendableIvks.insert(internalIvk);
-    } catch (const std::exception& e) {
-        LogPrintf("SaplingKeyManager: failed to derive internal FVK: %s (non-fatal)\n", e.what());
+            // Register the internal FVK so ScanSaplingOutputs can detect change
+            AddFvkInternal(internalFvk, internalResult.dk, internalIvk);
+
+            // Derive the internal ExtSK so the wallet can spend internal notes.
+            // The builder's add_spend() derives the FVK from the ExtSK, so we
+            // need the internal ExtSK (not the external one) for internal notes.
+            internal_xsk_bytes = sapling::zip32::xsk_derive_internal(sk.key);
+            sapling::SaplingExtendedSpendingKey internalSk;
+            internalSk.key = internal_xsk_bytes;
+
+            mapIvkToExtSk[internalIvk] = internalSk;
+            setSpendableIvks.insert(internalIvk);
+        } catch (const std::exception& e) {
+            LogPrintf("SaplingKeyManager: failed to derive internal FVK: %s (non-fatal)\n", e.what());
+            // internal_* cleansers above will zero on scope exit.
+        }
     }
 
     // First spending key becomes the default for GenerateNewAddress
