@@ -4,6 +4,8 @@
 #include <wallet/rpc/sapling.h>
 
 #include <algorithm>
+#include <atomic>
+#include <limits>
 #include <chainparams.h>
 #include <consensus/consensus.h>
 #include <consensus/tx_check.h>
@@ -1302,72 +1304,104 @@ RPCHelpMan z_rebuildsaplingwitnesses()
             std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
             if (!pwallet) return UniValue::VNULL;
 
-            // Nullifier derivation during witness rebuild requires the FVK,
-            // which on encrypted wallets is fine when locked, but we also may
-            // need to write note records; unlocked is the safe default.
-            LOCK(pwallet->cs_wallet);
-            EnsureWalletIsUnlocked(*pwallet);
-
-            auto& km = pwallet->GetSaplingKeyManager();
-            if (km.IsEmpty()) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "No Sapling keys loaded");
+            // F5: concurrency guard. Reject if an auto-rebuild or another
+            // RPC call is already in flight. Claim the slot atomically; a
+            // scope guard releases it on every exit path.
+            bool expected_active = false;
+            if (!pwallet->m_sapling_rebuild_active.compare_exchange_strong(
+                    expected_active, true, std::memory_order_acq_rel)) {
+                throw JSONRPCError(RPC_IN_WARMUP,
+                    "Sapling witness rebuild already in progress; wait for it to finish "
+                    "(watch the debug log, or check getwalletinfo.sapling_rebuild_in_progress).");
             }
+            struct ActiveGuard {
+                std::atomic<bool>* flag;
+                ~ActiveGuard() { if (flag) flag->store(false, std::memory_order_release); }
+            } guard{&pwallet->m_sapling_rebuild_active};
 
-            int tipHeight = pwallet->GetLastBlockHeight();
-            if (tipHeight < 0) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Wallet has no tip height; finish sync first");
-            }
-
-            WalletBatch batch(pwallet->GetDatabase());
-
-            // Count unspent notes before clearing so we can report notes_rebuilt.
+            int tipHeight = -1;
             size_t notesRebuilt = 0;
-            for (const auto& [cmu, nd] : km.GetAllNotes()) {
-                if (!nd.isSpent && nd.blockHeight >= 0) notesRebuilt++;
-            }
-            if (notesRebuilt == 0) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "No unspent confirmed Sapling notes to rebuild");
-            }
+            int noteMinHeight = std::numeric_limits<int>::max();
+            int fromHeight = 0;
 
-            // Clear witness data for all unspent notes in-place; the returned
-            // minimum height is where the replay must start unless the caller
-            // supplied an explicit from_height.
-            auto autoStart = km.ClearWitnessesForRebuild(&batch);
+            // Phase A: preflight under cs_wallet. Nullifier derivation needs
+            // the wallet unlocked; we also compute min(note.blockHeight) now,
+            // before any state mutation, so the F1 invariant check is honest.
+            {
+                LOCK(pwallet->cs_wallet);
+                EnsureWalletIsUnlocked(*pwallet);
 
-            int fromHeight;
-            if (!request.params[0].isNull()) {
-                fromHeight = request.params[0].getInt<int>();
-                if (fromHeight < 0) {
-                    throw JSONRPCError(RPC_INVALID_PARAMETER, "from_height must be non-negative");
+                auto& km = pwallet->GetSaplingKeyManager();
+                if (km.IsEmpty()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "No Sapling keys loaded");
                 }
-            } else if (autoStart) {
-                fromHeight = *autoStart;
-            } else {
-                // Defensive: notesRebuilt > 0 so autoStart should be set.
-                throw JSONRPCError(RPC_WALLET_ERROR, "Could not determine replay start height");
-            }
 
-            if (fromHeight > tipHeight) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER,
-                    strprintf("from_height %d exceeds chain tip %d", fromHeight, tipHeight));
-            }
+                tipHeight = pwallet->GetLastBlockHeight();
+                if (tipHeight < 0) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet has no tip height; finish sync first");
+                }
 
-            LogPrintf("z_rebuildsaplingwitnesses: replaying blocks %d..%d for %u notes\n",
-                      fromHeight, tipHeight, (unsigned)notesRebuilt);
+                for (const auto& [cmu, nd] : km.GetAllNotes()) {
+                    if (nd.isSpent || nd.blockHeight < 0) continue;
+                    ++notesRebuilt;
+                    if (nd.blockHeight < noteMinHeight) noteMinHeight = nd.blockHeight;
+                }
+                if (notesRebuilt == 0) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "No unspent confirmed Sapling notes to rebuild");
+                }
+                if (noteMinHeight == std::numeric_limits<int>::max()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Could not determine minimum note height");
+                }
 
-            // Shared replay loop: identical to the code path used by the
-            // post-IBD auto-detect in CWallet::MaybeAutoRebuildSaplingWitnesses,
-            // so behaviour cannot drift between the two entry points. Returns
-            // the number of blocks replayed, or -1 on shutdown / missing block.
-            int blocksProcessed = pwallet->RebuildSaplingWitnessesFromHeight(fromHeight, batch);
+                // F1: enforce the from_height invariant. Prior behaviour
+                // cleared witnesses for all unspent notes unconditionally,
+                // then replayed from from_height. Any note with
+                // blockHeight < from_height was cleared on disk but never
+                // rebuilt, silently leaving it permanently unspendable.
+                // Refuse the call so the operator can re-invoke with a safe
+                // start height.
+                if (!request.params[0].isNull()) {
+                    fromHeight = request.params[0].getInt<int>();
+                    if (fromHeight < 0) {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER, "from_height must be non-negative");
+                    }
+                    if (fromHeight > noteMinHeight) {
+                        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                            strprintf("from_height %d is greater than the minimum unspent-note "
+                                      "height %d. Rebuilding from a later height would clear "
+                                      "witnesses for earlier notes without replaying their "
+                                      "commitments, silently leaving them unspendable. Either "
+                                      "omit from_height (defaults to %d) or pass a value <= %d.",
+                                      fromHeight, noteMinHeight, noteMinHeight, noteMinHeight));
+                    }
+                } else {
+                    fromHeight = noteMinHeight;
+                }
+                if (fromHeight > tipHeight) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER,
+                        strprintf("from_height %d exceeds chain tip %d", fromHeight, tipHeight));
+                }
+            } // release cs_wallet before the chunked replay
+
+            LogPrintf("z_rebuildsaplingwitnesses: replaying blocks %d..%d for %u notes "
+                      "(min note height=%d)\n",
+                      fromHeight, tipHeight, (unsigned)notesRebuilt, noteMinHeight);
+
+            // Phase B: delegate to CWallet. The synchronous helper persists
+            // the crash-safety marker, clears witness data, captures a chain
+            // snapshot, runs the chunked replay (re-acquiring cs_wallet per
+            // chunk), and clears the marker on success.
+            int blocksProcessed = pwallet->RebuildSaplingWitnessesSynchronous(fromHeight);
             if (blocksProcessed < 0) {
                 throw JSONRPCError(RPC_MISC_ERROR,
-                    "Witness rebuild aborted: shutdown requested, chain reorged, or block data "
-                    "unavailable (pruned node?). See log for the specific failing height. "
-                    "Restart kerrigand with -reindex or -reindex-chainstate to restore block data "
-                    "and retry z_rebuildsaplingwitnesses.");
+                    "Witness rebuild aborted: shutdown requested, chain reorged during replay, "
+                    "or block data unavailable (pruned node?). See log for the specific failing "
+                    "height. The persistent in-progress marker has been retained; the next "
+                    "wallet load (or the next block tip) will retry automatically. Restart "
+                    "kerrigand with -reindex or -reindex-chainstate if block data was pruned.");
             }
 
+            // Phase C: build response under cs_wallet.
             UniValue result(UniValue::VOBJ);
             result.pushKV("from_height", fromHeight);
             result.pushKV("to_height", tipHeight);
@@ -1375,14 +1409,18 @@ RPCHelpMan z_rebuildsaplingwitnesses()
             result.pushKV("notes_rebuilt", (int)notesRebuilt);
 
             UniValue heights(UniValue::VARR);
-            for (const auto& [cmu, nd] : km.GetAllNotes()) {
-                if (nd.isSpent || nd.blockHeight < 0) continue;
-                UniValue entry(UniValue::VOBJ);
-                entry.pushKV("cmu", cmu.GetHex());
-                entry.pushKV("block_height", nd.blockHeight);
-                entry.pushKV("tree_position", nd.treePosition);
-                entry.pushKV("has_witness", !nd.witnessData.empty());
-                heights.push_back(entry);
+            {
+                LOCK(pwallet->cs_wallet);
+                auto& km = pwallet->GetSaplingKeyManager();
+                for (const auto& [cmu, nd] : km.GetAllNotes()) {
+                    if (nd.isSpent || nd.blockHeight < 0) continue;
+                    UniValue entry(UniValue::VOBJ);
+                    entry.pushKV("cmu", cmu.GetHex());
+                    entry.pushKV("block_height", nd.blockHeight);
+                    entry.pushKV("tree_position", nd.treePosition);
+                    entry.pushKV("has_witness", !nd.witnessData.empty());
+                    heights.push_back(entry);
+                }
             }
             result.pushKV("note_heights", heights);
 

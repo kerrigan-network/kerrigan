@@ -103,6 +103,7 @@ extern const std::string SAPLING_ADDR;
 extern const std::string SAPLING_WITNESS;
 extern const std::string SAPLING_NOTE;
 extern const std::string SAPLING_DIVERSIFIER_INDEX;
+extern const std::string SAPLING_REBUILD_FLAG;
 } // namespace DBKeys
 
 class CKeyMetadata
@@ -234,6 +235,19 @@ public:
     // Sapling note persistence (keyed by cmu)
     bool WriteSaplingNote(const uint256& cmu, const SaplingNoteData& noteData);
     bool EraseSaplingNote(const uint256& cmu);
+
+    /**
+     * Persist "Sapling witness rebuild in progress" marker.
+     *
+     * Written to disk BEFORE ClearWitnessesForRebuild wipes any witnesses.
+     * Cleared only after a successful replay. If the daemon crashes between
+     * clear and replay, the marker survives and the next wallet load will
+     * automatically re-arm the rebuild rather than leaving notes unspendable
+     * with no recovery marker.
+     */
+    bool WriteSaplingRebuildFlag(bool in_progress);
+    bool ReadSaplingRebuildFlag(bool& in_progress);
+    bool EraseSaplingRebuildFlag();
 
     bool WriteDescriptorKey(const uint256& desc_id, const CPubKey& pubkey, const CPrivKey& privkey, const SecureString& mnemonic, const SecureString& mnemonic_passphrase);
     bool WriteCryptedDescriptorKey(const uint256& desc_id, const CPubKey& pubkey, const std::vector<unsigned char>& secret, const std::vector<unsigned char>& crypted_mnemonic, const std::vector<unsigned char>& crypted_mnemonic_passphrase);

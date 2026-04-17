@@ -35,6 +35,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
+#include <thread>
 #include <map>
 #include <memory>
 #include <optional>
@@ -402,20 +404,56 @@ private:
     SaplingKeyManager m_sapling_key_manager;
 
     /**
-     * Set at wallet load; cleared the first time MaybeAutoRebuildSaplingWitnesses()
-     * runs after IBD completes. A single shot per wallet session is sufficient;
-     * once verified, UpdateWitnesses keeps state consistent for subsequent blocks.
-     * Atomic so that the updatedBlockTip validation-interface path can read it
-     * without holding cs_wallet.
-     */
-    std::atomic<bool> m_sapling_witness_check_pending{true};
-
-    /**
      * Catch wallet up to current chain, scanning new blocks, updating the best
      * block locator and m_last_block_processed, and registering for
      * notifications about new blocks and transactions.
      */
     static bool AttachChain(const std::shared_ptr<CWallet>& wallet, interfaces::Chain& chain, bilingual_str& error, std::vector<bilingual_str>& warnings);
+
+public:
+    /**
+     * Set at wallet load; cleared the first time MaybeAutoRebuildSaplingWitnesses()
+     * dispatches a rebuild (or confirms no rebuild is needed). A single shot
+     * per wallet session is sufficient once the background rebuilder has run
+     * or decided there is nothing to do. Atomic so that the updatedBlockTip
+     * validation-interface path and the z_rebuildsaplingwitnesses RPC can
+     * read/flip it without holding cs_wallet.
+     */
+    std::atomic<bool> m_sapling_witness_check_pending{true};
+
+    /**
+     * Single cross-path guard for the witness-rebuild pipeline.
+     *
+     * Set true by whichever entry point wins the compare_exchange
+     * (MaybeAutoRebuildSaplingWitnesses or the z_rebuildsaplingwitnesses
+     * RPC). While true, every other entry point short-circuits: the RPC
+     * throws "rebuild already in progress", the auto path returns silently.
+     *
+     * Lives here (not in SaplingKeyManager) because the background thread
+     * that performs the replay owns CWallet-scoped resources (chain(),
+     * WalletBatch, shutdown checks) and needs one authoritative "am I
+     * running?" bit visible from every thread without cs_wallet.
+     *
+     * Public so the RPC handler can perform its own compare_exchange
+     * without a member-function wrapper; treat as an implementation
+     * detail and prefer IsSaplingRebuildActive() for read-only access.
+     */
+    std::atomic<bool> m_sapling_rebuild_active{false};
+
+private:
+    /**
+     * Background thread driving the auto-rebuild replay. Owned by CWallet
+     * so it can be joined in the destructor — this guarantees the thread
+     * exits before the wallet is destroyed, preventing use-after-free when
+     * a wallet is explicitly unloaded mid-rebuild.
+     *
+     * Only accessed from updatedBlockTip (to start) and ~CWallet (to join);
+     * the thread itself writes no state visible from these methods.
+     */
+    std::thread m_sapling_rebuild_thread;
+    std::mutex m_sapling_rebuild_thread_mutex;
+
+public:
 
 public:
     /**
@@ -452,6 +490,17 @@ public:
 
     ~CWallet()
     {
+        // Join the Sapling rebuild background thread BEFORE asserting.
+        // The thread may still be running if the wallet was unloaded
+        // mid-replay; it polls chain().shutdownRequested() every chunk
+        // and will exit at the next boundary. We must wait here so the
+        // detached worker doesn't touch CWallet members after free.
+        {
+            std::lock_guard<std::mutex> lock(m_sapling_rebuild_thread_mutex);
+            if (m_sapling_rebuild_thread.joinable()) {
+                m_sapling_rebuild_thread.join();
+            }
+        }
         // Should not have slots connected at this point.
         assert(NotifyUnload.empty());
     }
@@ -605,31 +654,96 @@ public:
     void ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /**
-     * Replay Sapling blocks from @p fromHeight (inclusive) through the wallet's
-     * currently-processed tip, reusing the same logic as ProcessSaplingBlock.
-     * Used by both z_rebuildsaplingwitnesses (RPC path) and
-     * MaybeAutoRebuildSaplingWitnesses (automatic post-IBD path).
+     * Replay Sapling blocks using a pre-captured block-hash snapshot.
+     *
+     * The snapshot's element i corresponds to height (fromHeight + i), taken
+     * from the active chain under cs_wallet before this function is called.
+     * Replay uses ONLY the snapshot: if a snapshot hash is no longer in the
+     * active chain mid-replay (reorg), the call aborts cleanly and the
+     * outer driver re-arms. This prevents mixed-chain commitments and the
+     * double-append corruption described in the auto-rebuild audit (F3).
+     *
+     * Acquires cs_wallet per chunk (kRebuildChunkBlocks blocks) so RPCs and
+     * the scheduler thread can make progress between chunks. The WalletBatch
+     * is constructed per chunk by the caller-supplied factory so each chunk
+     * flushes independently; a crash mid-replay loses at most one chunk of
+     * witness progress (F4 additionally persists the in-progress marker so
+     * the next load retries).
      *
      * Caller must have already cleared witnessData for the notes being
-     * rebuilt (see SaplingKeyManager::ClearWitnessesForRebuild).
+     * rebuilt (see SaplingKeyManager::ClearWitnessesForRebuild) and, for
+     * crash-safety, must have persisted the rebuild-in-progress flag before
+     * clearing.
      *
      * @return number of blocks whose commitments were applied. Negative on
-     *         fatal error (missing block, reorg mid-replay, shutdown).
+     *         fatal error (snapshot stale, missing block, shutdown).
      */
-    int RebuildSaplingWitnessesFromHeight(int fromHeight, WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    int RebuildSaplingWitnessesFromSnapshot(int fromHeight,
+                                            const std::vector<uint256>& blockHashes);
+
+    /**
+     * Number of blocks to replay per cs_wallet chunk during the background
+     * rebuild. Tuned for ~1s p95 cs_wallet hold per chunk on a warm laptop.
+     */
+    static constexpr int kRebuildChunkBlocks = 1000;
 
     /**
      * One-shot stale-witness detector. Runs at most once per wallet session,
      * the first time the chain reports it is no longer in IBD. If any unspent
      * witnesses fail validation against the authoritative Sapling anchor, the
-     * wallet logs a clear warning and triggers RebuildSaplingWitnessesFromHeight
-     * starting at the minimum affected note height.
+     * wallet logs a clear warning and dispatches a background rebuild.
+     *
+     * Detection is O(N) under cs_wallet; the replay runs off the scheduler
+     * thread on a detached std::thread that re-acquires cs_wallet per chunk.
+     * This avoids pinning the scheduler for the full replay (audit F2).
      *
      * No-op (and cheap) when all witnesses are healthy.
      *
      * Gated by the -autorebuildsaplingwitnesses startup arg (default true).
      */
     void MaybeAutoRebuildSaplingWitnesses();
+
+    /**
+     * Body of the detached background rebuilder.
+     *
+     * Holds a shared_ptr to the wallet so the thread can outlive the caller;
+     * the thread dies naturally when the wallet shuts down (each chunk
+     * checks chain().shutdownRequested()).
+     *
+     * @param staleCount  number of stale witnesses detected at dispatch time
+     *                    (for logging only)
+     * @param minStaleHeight minimum blockHeight across stale notes
+     * @param tipHeight   wallet tip at dispatch time
+     */
+    static void RunSaplingWitnessRebuildBackground(std::shared_ptr<CWallet> pwallet,
+                                                   size_t staleCount,
+                                                   int minStaleHeight,
+                                                   int tipHeight);
+
+    /**
+     * True while a Sapling witness rebuild is in flight (either RPC or auto).
+     * Cheap, lock-free; safe to call from any thread. Used by
+     * z_rebuildsaplingwitnesses to reject double-start and by getwalletinfo
+     * to surface progress to operators.
+     */
+    bool IsSaplingRebuildActive() const { return m_sapling_rebuild_active.load(std::memory_order_acquire); }
+
+    /**
+     * Synchronous witness rebuild used by z_rebuildsaplingwitnesses.
+     *
+     * Acquires cs_wallet internally per phase (snapshot capture, chunked
+     * replay, finalisation). Caller must NOT hold cs_wallet and must have
+     * already claimed m_sapling_rebuild_active (the cross-path guard);
+     * this helper does not re-check the guard.
+     *
+     * Persists the in-progress marker, clears witnesses, captures a
+     * block-hash snapshot, runs replay in chunks (releasing cs_wallet
+     * between chunks), and clears the marker on success.
+     *
+     * @return number of blocks replayed, or -1 on shutdown / snapshot stale
+     *         / missing block.
+     */
+    int RebuildSaplingWitnessesSynchronous(int fromHeight) EXCLUSIVE_LOCKS_REQUIRED(!cs_wallet);
 
     void updatedBlockTip() override;
     int64_t RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver, bool update);

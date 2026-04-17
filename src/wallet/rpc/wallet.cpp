@@ -126,6 +126,7 @@ static RPCHelpMan getwalletinfo()
                         }},
                         {RPCResult::Type::BOOL, "descriptors", "whether this wallet uses descriptors for scriptPubKey management"},
                         {RPCResult::Type::BOOL, "external_signer", "whether this wallet is configured to use an external signer such as a hardware wallet"},
+                        {RPCResult::Type::BOOL, "sapling_rebuild_in_progress", "true if a Sapling witness rebuild is currently running in the background (auto or via z_rebuildsaplingwitnesses); shielded spends may be temporarily unavailable until it finishes"},
                         RESULT_LAST_PROCESSED_BLOCK,
                     },
                 },
@@ -204,6 +205,7 @@ static RPCHelpMan getwalletinfo()
     }
     obj.pushKV("descriptors", pwallet->IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS));
     obj.pushKV("external_signer", pwallet->IsWalletFlagSet(WALLET_FLAG_EXTERNAL_SIGNER));
+    obj.pushKV("sapling_rebuild_in_progress", pwallet->IsSaplingRebuildActive());
 
     AppendLastProcessedBlock(obj, *pwallet);
     return obj;

@@ -76,6 +76,7 @@ const std::string SAPLING_ADDR{"sapaddr"};
 const std::string SAPLING_WITNESS{"sapwit"};
 const std::string SAPLING_NOTE{"sapnote"};
 const std::string SAPLING_DIVERSIFIER_INDEX{"sapdivix"};
+const std::string SAPLING_REBUILD_FLAG{"sapwitrebuild"};
 } // namespace DBKeys
 
 //
@@ -312,6 +313,29 @@ bool WalletBatch::WriteSaplingNote(const uint256& cmu, const SaplingNoteData& no
 bool WalletBatch::EraseSaplingNote(const uint256& cmu)
 {
     return EraseIC(std::make_pair(DBKeys::SAPLING_NOTE, cmu));
+}
+
+bool WalletBatch::WriteSaplingRebuildFlag(bool in_progress)
+{
+    // Serialise as uint8_t so the record is compact and stable across builds.
+    const uint8_t raw = in_progress ? 1u : 0u;
+    return WriteIC(DBKeys::SAPLING_REBUILD_FLAG, raw);
+}
+
+bool WalletBatch::ReadSaplingRebuildFlag(bool& in_progress)
+{
+    uint8_t raw{0};
+    if (!m_batch->Read(DBKeys::SAPLING_REBUILD_FLAG, raw)) {
+        in_progress = false;
+        return false;
+    }
+    in_progress = (raw != 0);
+    return true;
+}
+
+bool WalletBatch::EraseSaplingRebuildFlag()
+{
+    return EraseIC(DBKeys::SAPLING_REBUILD_FLAG);
 }
 
 bool WalletBatch::WriteDescriptorKey(const uint256& desc_id, const CPubKey& pubkey, const CPrivKey& privkey, const SecureString& mnemonic, const SecureString& mnemonic_passphrase)
@@ -930,6 +954,10 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             SaplingNoteData nd;
             ssValue >> nd;
             pwallet->GetSaplingKeyManager().LoadNote(cmu, nd);
+        } else if (strType == DBKeys::SAPLING_REBUILD_FLAG) {
+            // Persistent "witness rebuild in progress" marker. Loaded below
+            // in LoadWallet() via a direct WalletBatch::ReadSaplingRebuildFlag
+            // call so the scan itself does not need access to CWallet state.
         } else if (strType != DBKeys::BESTBLOCK && strType != DBKeys::BESTBLOCK_NOMERKLE &&
                    strType != DBKeys::MINVERSION && strType != DBKeys::ACENTRY &&
                    strType != DBKeys::VERSION && strType != DBKeys::SETTINGS &&
