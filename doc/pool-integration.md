@@ -322,14 +322,16 @@ following details are mandatory. Getting any of them wrong orphans every block.
 
 GBT returns a `masternode` array with **4 entries** (not 1 like stock Dash):
 
-| Index | Recipient | Typical share |
-|-------|-----------|---------------|
-| 0 | Growth escrow (consensus-locked P2SH) | 40% |
+| Index | Recipient | Share |
+|-------|-----------|-------|
+| 0 | Growth escrow (consensus-locked P2SH, or OP_RETURN burn after sunset) | 40% |
 | 1 | Masternode payment | 20% |
-| 2 | Dev fund | 5% |
+| 2 | Dev fund | 15% |
 | 3 | Founders fund | 5% |
 
-The miner receives the remainder (typically 30%). Use `coinbasevalue_miner`
+The miner receives the remaining 20% (or 40% if no masternodes are registered,
+since the MN share stays with the miner when the masternode list is empty).
+Use `coinbasevalue_miner`
 for the miner output amount, NOT `coinbasevalue` (which is the full block
 reward including all 4 mandatory outputs).
 
