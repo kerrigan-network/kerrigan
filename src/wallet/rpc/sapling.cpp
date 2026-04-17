@@ -311,6 +311,17 @@ RPCHelpMan z_sendmany()
             std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
             if (!pwallet) return UniValue::VNULL;
 
+            // Reject shielded sends while the node is still catching up. The
+            // wallet has not yet observed every block that may contain notes
+            // spent by `fromaddress`, and broadcasting a Sapling transaction
+            // exposes its nullifiers to peers. Waiting for IBD to finish is
+            // the only way to avoid publishing a nullifier set that we may
+            // not yet fully own.
+            if (pwallet->chain().isInitialBlockDownload()) {
+                throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+                    "Cannot send while in initial block download. Wait for sync to complete.");
+            }
+
             // Make sure the results are valid at least up to the most recent block
             // the user could have gotten from another RPC command prior to now
             pwallet->BlockUntilSyncedToCurrentChain();
