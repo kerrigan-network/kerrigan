@@ -1116,6 +1116,7 @@ RPCHelpMan z_exportkey();
 RPCHelpMan z_importkey();
 RPCHelpMan z_exportviewingkey();
 RPCHelpMan z_importviewingkey();
+RPCHelpMan z_rebuildsaplingwitnesses();
 
 Span<const CRPCCommand> GetWalletRPCCommands()
 {
@@ -1200,6 +1201,7 @@ Span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &z_importkey},
         {"wallet", &z_exportviewingkey},
         {"wallet", &z_importviewingkey},
+        {"wallet", &z_rebuildsaplingwitnesses},
     };
     return commands;
 }

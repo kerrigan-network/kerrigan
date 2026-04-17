@@ -382,6 +382,17 @@ public:
     bool WriteDiversifierIndexToDB(WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
+     * Clear witness data for all unspent confirmed notes, and return the minimum
+     * block height of any such note (or std::nullopt if no unspent notes exist).
+     *
+     * Used by z_rebuildsaplingwitnesses to force a full witness replay when the
+     * wallet's per-note witness state has become stale relative to the authoritative
+     * Sapling frontier (e.g. after a daemon stall, LevelDB rebuild, or IBD re-catchup).
+     * Spent notes are left untouched; their witnesses are no longer needed.
+     */
+    std::optional<int> ClearWitnessesForRebuild(WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
      * Rewind Sapling state for a disconnected block.
      *
      * Undoes spends (clears isSpent/spendingTxid), reverts outputs confirmed

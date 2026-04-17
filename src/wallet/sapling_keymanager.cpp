@@ -1102,6 +1102,23 @@ void SaplingKeyManager::ZapNotesByTxid(const std::set<uint256>& txids, WalletBat
     }
 }
 
+std::optional<int> SaplingKeyManager::ClearWitnessesForRebuild(WalletBatch* batch)
+{
+    LOCK(cs);
+    std::optional<int> minHeight;
+    for (auto& [key, nd] : mapSaplingNotes) {
+        if (nd.isSpent || nd.blockHeight < 0) continue;
+        if (!minHeight || nd.blockHeight < *minHeight) minHeight = nd.blockHeight;
+        // Wipe witness + position; nullifier is preserved since it is only a
+        // function of (fvk.nk, recipient, value, rseed, position) and position
+        // will be reassigned when UpdateWitnesses hits this cmu again.
+        nd.witnessData.clear();
+        nd.treePosition = -1;
+        if (batch) batch->WriteSaplingNote(key, nd);
+    }
+    return minHeight;
+}
+
 void SaplingKeyManager::RewindBlock(int height, const CBlock& block, WalletBatch* batch)
 {
     LOCK(cs);

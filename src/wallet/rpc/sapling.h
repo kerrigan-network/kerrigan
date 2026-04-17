@@ -17,6 +17,7 @@ RPCHelpMan z_exportkey();
 RPCHelpMan z_importkey();
 RPCHelpMan z_exportviewingkey();
 RPCHelpMan z_importviewingkey();
+RPCHelpMan z_rebuildsaplingwitnesses();
 
 } // namespace wallet
 
