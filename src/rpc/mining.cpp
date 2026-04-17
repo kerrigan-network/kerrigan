@@ -899,6 +899,7 @@ static RPCHelpMan getblocktemplate()
                             }},
                     }},
                 {RPCResult::Type::BOOL, "masternode_payments_started", "true, if masternode payments started"},
+                {RPCResult::Type::BOOL, "masternode_payments_enforced", "true, masternode payments are consensus-enforced (always true in Kerrigan; retained for pool software wire-format compatibility)"},
                 {RPCResult::Type::STR_HEX, "coinbase_payload", "coinbase transaction payload data encoded in hexadecimal"},
                 {RPCResult::Type::STR, "blockhash_algorithm", "algorithm used for block identity hashes (always x11)"},
                 {RPCResult::Type::STR_HEX, "template_hash", "X11 identity hash of this block template"},
@@ -1013,6 +1014,22 @@ static RPCHelpMan getblocktemplate()
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid pooladdress");
             }
             poolScript = GetScriptForDestination(poolDest);
+            hasPoolAddress = true;
+        }
+    }
+
+    // Fallback to -mineraddress config if no GBT param was provided. Matches
+    // the ZEC-clone convention; lets pools avoid keypool exhaustion without
+    // passing pooladdress on every GBT call.
+    if (!hasPoolAddress) {
+        const std::string minerAddr = gArgs.GetArg("-mineraddress", "");
+        if (!minerAddr.empty()) {
+            CTxDestination minerDest = DecodeDestination(minerAddr);
+            if (!IsValidDestination(minerDest)) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                    strprintf("Invalid -mineraddress: %s", minerAddr));
+            }
+            poolScript = GetScriptForDestination(minerDest);
             hasPoolAddress = true;
         }
     }
@@ -1327,8 +1344,9 @@ static RPCHelpMan getblocktemplate()
 
     result.pushKV("masternode", masternodeObj);
     result.pushKV("masternode_payments_started", pindexPrev->nHeight + 1 > consensusParams.nMasternodePaymentsStartBlock);
-    // Removed in v1.1: masternode_payments_enforced (always true),
-    // superblock/superblocks_started/superblocks_enabled (nSuperblockStartBlock=2100000000).
+    // Always true in Kerrigan (not spork-gated). Kept for pool software
+    // that checks this flag before enforcing masternode outputs.
+    result.pushKV("masternode_payments_enforced", true);
 
     result.pushKV("coinbase_payload", HexStr(pblock->vtx[0]->vExtraPayload));
 

@@ -961,6 +961,7 @@ void SetupServerArgs(ArgsManager& argsman)
         "Mnemonic port convention: x11:1100 kawpow:5700 equihash200:2009 equihash192:1927. "
         "Example: -rpcalgoport=equihash192:1927 -rpcalgoport=equihash200:2009 -rpcalgoport=kawpow:5700 -rpcalgoport=x11:1100", ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::RPC);
     argsman.AddArg("-powalgo=<algo>", "Default mining algorithm for RPC calls that do not specify one and are not received on a -rpcalgoport listener. Valid values: x11, kawpow, equihash200, equihash192. Default: x11.", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
+    argsman.AddArg("-mineraddress=<addr>", "If set, getblocktemplate uses this address for the coinbase miner payout when no pooladdress GBT parameter is provided. Avoids wallet keypool exhaustion for pool software that calls GBT continuously. Address must be a valid transparent Kerrigan address.", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-hashrateavgblocks=<n>", "Number of per-algo blocks to average for network hashrate estimates in "
         "getmininginfo and getnetworkhashps. Higher values reduce variance, lower values respond faster. "
         "(default: 23, ~3 hours per algo on a 4-algo chain with 120s target)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
