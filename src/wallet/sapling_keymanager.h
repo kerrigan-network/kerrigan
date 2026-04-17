@@ -393,6 +393,47 @@ public:
     std::optional<int> ClearWitnessesForRebuild(WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
+     * Inspection result for a single note during stale-witness detection.
+     */
+    struct StaleWitnessReport {
+        uint256 cmu;               //!< Note commitment (map key).
+        int blockHeight{-1};       //!< Height at which the note was confirmed.
+        std::string reason;        //!< Human-readable reason the witness is stale.
+    };
+
+    /**
+     * Scan every unspent confirmed note and identify those whose serialized
+     * witness is unusable.
+     *
+     * Witnesses are maintained in lockstep: every time UpdateWitnesses()
+     * processes a block, all live witnesses get the same new leaves appended,
+     * so their Merkle root must equal the consensus Sapling anchor at the
+     * wallet's current tip height. If any unspent witness's root disagrees,
+     * its state drifted (typically because a frontier-deserialize failure
+     * made UpdateWitnesses bail out on some prior block) and it must be
+     * rebuilt.
+     *
+     * A witness is flagged as stale if:
+     *   - witnessData is empty for a confirmed, unspent note; or
+     *   - witness_deserialize() or witness_root() throws; or
+     *   - witness_root() does not match the Sapling anchor at @p walletTipHeight.
+     *
+     * Read-only: does not mutate note state. The caller (auto-rebuild or
+     * diagnostic tooling) decides what to do with the report.
+     *
+     * Complexity: O(N) in wallet notes; two Rust FFI calls and one SaplingDB
+     * read per note. Intended to run once at wallet startup / IBD completion,
+     * not on every block.
+     *
+     * @param walletTipHeight  Height of the last block the wallet processed
+     *                         (i.e. m_last_block_processed_height). A value
+     *                         < 0 suppresses the anchor check and only
+     *                         reports deserialize failures or empty witnesses.
+     * @return one StaleWitnessReport per note flagged as stale.
+     */
+    std::vector<StaleWitnessReport> DetectStaleWitnesses(int walletTipHeight) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
      * Rewind Sapling state for a disconnected block.
      *
      * Undoes spends (clears isSpent/spendingTxid), reverts outputs confirmed

@@ -1119,6 +1119,69 @@ std::optional<int> SaplingKeyManager::ClearWitnessesForRebuild(WalletBatch* batc
     return minHeight;
 }
 
+std::vector<SaplingKeyManager::StaleWitnessReport>
+SaplingKeyManager::DetectStaleWitnesses(int walletTipHeight) const
+{
+    LOCK(cs);
+    std::vector<StaleWitnessReport> stale;
+    if (mapSaplingNotes.empty()) return stale;
+
+    // Resolve the expected witness root once. Every unspent witness is
+    // appended in lockstep with the wallet's block processing, so all
+    // currently-healthy witnesses should yield this same root.
+    std::optional<uint256> expectedTipRoot;
+    if (walletTipHeight >= 0) {
+        uint256 anchor;
+        if (sapling::GetBestAnchor(walletTipHeight, anchor)) {
+            expectedTipRoot = anchor;
+        }
+        // If the anchor isn't available (SaplingDB not yet caught up for
+        // that height), we silently skip the root comparison and only
+        // report deserialize failures. The caller is expected to retry
+        // once the node is fully synced.
+    }
+
+    for (const auto& [key, nd] : mapSaplingNotes) {
+        // Skip notes that are spent or still unconfirmed; we only validate
+        // the witnesses we would actually use to spend.
+        if (nd.isSpent || nd.blockHeight < 0) continue;
+
+        // A confirmed unspent note with no witness is by definition stale;
+        // the rebuild path will repopulate it when replaying blocks.
+        if (nd.witnessData.empty()) {
+            stale.push_back({key, nd.blockHeight, "empty witness data"});
+            continue;
+        }
+
+        // Deserialize the witness and recompute its Merkle root. If either
+        // step throws, the on-disk bytes are unusable and the witness must
+        // be rebuilt from scratch.
+        uint256 witnessRoot;
+        try {
+            rust::Slice<const uint8_t> slice(nd.witnessData.data(), nd.witnessData.size());
+            auto witness = sapling::tree::witness_deserialize(slice);
+            auto rootArr = sapling::tree::witness_root(*witness);
+            std::memcpy(witnessRoot.begin(), rootArr.data(), 32);
+        } catch (const std::exception& e) {
+            stale.push_back({key, nd.blockHeight,
+                strprintf("witness_deserialize/root threw: %s", e.what())});
+            continue;
+        }
+
+        if (!expectedTipRoot) continue;  // no reference to compare against
+
+        if (witnessRoot != *expectedTipRoot) {
+            stale.push_back({key, nd.blockHeight,
+                strprintf("root mismatch at tip %d: witness=%s db=%s",
+                          walletTipHeight,
+                          witnessRoot.GetHex().substr(0, 16),
+                          expectedTipRoot->GetHex().substr(0, 16))});
+        }
+    }
+
+    return stale;
+}
+
 void SaplingKeyManager::RewindBlock(int height, const CBlock& block, WalletBatch* batch)
 {
     LOCK(cs);

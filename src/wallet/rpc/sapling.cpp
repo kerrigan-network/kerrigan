@@ -1240,7 +1240,7 @@ RPCHelpMan z_rebuildsaplingwitnesses()
             {
                 {RPCResult::Type::NUM, "from_height", "Replay start height"},
                 {RPCResult::Type::NUM, "to_height", "Chain tip height used for replay"},
-                {RPCResult::Type::NUM, "blocks_processed", "Blocks replayed (skipped empty blocks excluded)"},
+                {RPCResult::Type::NUM, "blocks_processed", "Blocks replayed across the [from_height, to_height] range"},
                 {RPCResult::Type::NUM, "notes_rebuilt", "Unspent notes whose witness was cleared and rebuilt"},
                 {RPCResult::Type::ARR, "note_heights", "Per-note final state after replay",
                     {
@@ -1319,49 +1319,17 @@ RPCHelpMan z_rebuildsaplingwitnesses()
             LogPrintf("z_rebuildsaplingwitnesses: replaying blocks %d..%d for %u notes\n",
                       fromHeight, tipHeight, (unsigned)notesRebuilt);
 
-            int blocksProcessed = 0;
-            for (int h = fromHeight; h <= tipHeight; ++h) {
-                if (ShutdownRequested()) {
-                    throw JSONRPCError(RPC_MISC_ERROR, "Shutdown requested, witness rebuild aborted");
-                }
-
-                uint256 blockHash = pwallet->chain().getBlockHash(h);
-                if (blockHash.IsNull()) {
-                    throw JSONRPCError(RPC_MISC_ERROR,
-                        strprintf("No block hash at height %d; chain reorged during rebuild", h));
-                }
-
-                CBlock block;
-                if (!pwallet->chain().findBlock(blockHash, interfaces::FoundBlock().data(block)) || block.IsNull()) {
-                    throw JSONRPCError(RPC_MISC_ERROR,
-                        strprintf("Could not read block %d from disk (pruned node?). "
-                                  "Restart kerrigand with -reindex or -reindex-chainstate to restore block data.",
-                                  h));
-                }
-
-                std::vector<uint256> blockCmus;
-                for (const CTransactionRef& ptx : block.vtx) {
-                    if (ptx->nType != TRANSACTION_SAPLING) continue;
-                    auto payload = GetTxPayload<SaplingTxPayload>(*ptx, /*assert_type=*/false);
-                    if (!payload) continue;
-                    for (const auto& od : payload->vOutputDescriptions) {
-                        uint256 cmu;
-                        std::memcpy(cmu.begin(), od.cmu.data(), 32);
-                        blockCmus.push_back(cmu);
-                    }
-                }
-
-                if (!blockCmus.empty()) {
-                    km.UpdateWitnesses(h, blockCmus, &batch);
-                    blocksProcessed++;
-                }
-
-                // Progress log every 1000 blocks so operators can tell the
-                // replay is alive on multi-thousand-block ranges.
-                if ((h - fromHeight) % 1000 == 999) {
-                    LogPrintf("z_rebuildsaplingwitnesses: progress height=%d (%d remaining)\n",
-                              h, tipHeight - h);
-                }
+            // Shared replay loop: identical to the code path used by the
+            // post-IBD auto-detect in CWallet::MaybeAutoRebuildSaplingWitnesses,
+            // so behaviour cannot drift between the two entry points. Returns
+            // the number of blocks replayed, or -1 on shutdown / missing block.
+            int blocksProcessed = pwallet->RebuildSaplingWitnessesFromHeight(fromHeight, batch);
+            if (blocksProcessed < 0) {
+                throw JSONRPCError(RPC_MISC_ERROR,
+                    "Witness rebuild aborted: shutdown requested, chain reorged, or block data "
+                    "unavailable (pruned node?). See log for the specific failing height. "
+                    "Restart kerrigand with -reindex or -reindex-chainstate to restore block data "
+                    "and retry z_rebuildsaplingwitnesses.");
             }
 
             UniValue result(UniValue::VOBJ);
