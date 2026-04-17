@@ -1254,12 +1254,11 @@ static RPCHelpMan getblocktemplate()
     result.pushKV("target", hashTarget.GetHex());
     result.pushKV("mintime", (int64_t)pindexPrev->GetMedianTimePast()+1);
     result.pushKV("mutable", aMutable);
-    if (isEquihash) {
-        // Equihash: 256-bit nonce
-        result.pushKV("noncerange", std::string(64, '0') + std::string(64, 'f'));
-    } else {
-        result.pushKV("noncerange", "00000000ffffffff");
-    }
+    // BIP 22 noncerange is the valid range for nHeader.nNonce during GBT.
+    // Standard is 16 hex chars (uint64) regardless of algo, matching zcashd
+    // and Zero. Equihash miners use the full 256-bit nonce on the wire, but
+    // GBT advertises the 32-bit header nonce range.
+    result.pushKV("noncerange", "00000000ffffffff");
     result.pushKV("sigoplimit", (int64_t)MaxBlockSigOps(fDIP0001Active_context));
     result.pushKV("sizelimit", (int64_t)MaxBlockSize(fDIP0001Active_context));
     result.pushKV("curtime", pblock->GetBlockTime());
