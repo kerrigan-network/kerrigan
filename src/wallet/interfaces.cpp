@@ -685,6 +685,15 @@ public:
         std::set<uint256> selectedNullifiers; // Track selected notes for reservation
         std::vector<COutPoint> lockedCoins; // Track locked UTXOs for cleanup
 
+        // Deferred registration of the internal diversified change address.
+        // Populated when a change output is added to the builder; the actual
+        // RegisterDiversifiedAddress call runs only after CommitTransaction
+        // succeeds, so aborted sends leave no orphan mapping in the wallet
+        // DB. A crash in the narrow commit-to-register window is still
+        // recovered by LoadNote self-heal on next wallet load.
+        std::optional<sapling::SaplingPaymentAddress> pendingChangeAddr;
+        std::optional<sapling::SaplingIncomingViewingKey> pendingChangeIvk;
+
         if (fromIsShielded) {
             if (!km.CanSpend(fromSapling)) {
                 throw std::runtime_error("Don't have spending key for source address");
@@ -811,10 +820,11 @@ public:
                     throw std::runtime_error("Failed to add shielded change output");
                 }
 
-                // Register the change address so future CanSpend() /
-                // GetUnspentNotes(addr) lookups treat this change note as
-                // spendable. Mirrors the RPC z_sendmany path; on any failure
-                // LoadNote's self-heal rebuilds the mapping on next start.
+                // Stash the change address + internal IVK. The mapping is
+                // persisted via RegisterDiversifiedAddress only AFTER
+                // CommitTransaction succeeds (mirrors the RPC z_sendmany
+                // path); LoadNote's self-heal rebuilds anything lost in
+                // the commit-vs-register race on next wallet load.
                 sapling::SaplingPaymentAddress changeAddr;
                 std::copy(internalAddr.addr.begin(), internalAddr.addr.begin() + 11, changeAddr.d.begin());
                 std::copy(internalAddr.addr.begin() + 11, internalAddr.addr.end(),   changeAddr.pk_d.begin());
@@ -827,12 +837,8 @@ public:
                     throw;
                 }
 
-                {
-                    WalletBatch batch(m_wallet->GetDatabase());
-                    if (!km.RegisterDiversifiedAddress(changeAddr, internalIvk, &batch)) {
-                        LogPrintf("sendShielded: failed to register internal change address (funds still spendable after next restart via LoadNote self-heal)\n");
-                    }
-                }
+                pendingChangeAddr = changeAddr;
+                pendingChangeIvk = internalIvk;
             }
         } else {
             // Transparent source
@@ -983,6 +989,18 @@ public:
             for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
             throw;
         }
+
+        // Register the internal diversified change address now that the tx
+        // is committed. A failure here leaves the mapping recoverable via
+        // LoadNote self-heal on next wallet load; it is deliberately
+        // non-fatal because the funds are safely spendable either way.
+        if (pendingChangeAddr && pendingChangeIvk) {
+            WalletBatch batch(m_wallet->GetDatabase());
+            if (!km.RegisterDiversifiedAddress(*pendingChangeAddr, *pendingChangeIvk, &batch)) {
+                LogPrintf("sendShielded: failed to register internal change address (funds still spendable after next restart via LoadNote self-heal)\n");
+            }
+        }
+
         if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
         for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
         return tx->GetHash().GetHex();

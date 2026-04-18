@@ -460,6 +460,15 @@ RPCHelpMan z_sendmany()
             // completion or error, same as the note reservation pattern.
             std::vector<COutPoint> lockedCoins;
 
+            // Deferred registration of the internal diversified change address.
+            // Populated when a change output is added to the builder; the actual
+            // RegisterDiversifiedAddress call runs only after CommitTransaction
+            // succeeds, so failed/aborted sends leave no orphan mapping in the
+            // wallet DB (Patch E LoadNote self-heal still covers a crash in the
+            // narrow commit-to-register window).
+            std::optional<sapling::SaplingPaymentAddress> pendingChangeAddr;
+            std::optional<sapling::SaplingIncomingViewingKey> pendingChangeIvk;
+
             if (fromIsShielded) {
                 if (!km.CanSpend(fromSapling)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "Don't have spending key for source address");
@@ -597,12 +606,12 @@ RPCHelpMan z_sendmany()
                     }
                     nShieldedOutputs++;
 
-                    // Register the change address so the next CanSpend() /
-                    // GetUnspentNotes(addr) lookup recognises it. Without
-                    // this, the change note is decrypted and stored but the
-                    // recipient (random-j internal diversified address) is
-                    // missing from mapAddressToIvk and the wallet reports
-                    // it as unspendable.
+                    // Stash the change address + internal IVK. The mapping is
+                    // persisted via RegisterDiversifiedAddress only AFTER
+                    // CommitTransaction succeeds, so a send that fails to
+                    // build, sign, or broadcast leaves nothing in the wallet
+                    // DB. Recovery of the narrow commit-vs-register window
+                    // is handled by LoadNote self-heal on next wallet load.
                     sapling::SaplingPaymentAddress changeAddr;
                     std::copy(internalAddr.addr.begin(), internalAddr.addr.begin() + 11, changeAddr.d.begin());
                     std::copy(internalAddr.addr.begin() + 11, internalAddr.addr.end(),   changeAddr.pk_d.begin());
@@ -615,12 +624,8 @@ RPCHelpMan z_sendmany()
                             strprintf("Failed to derive internal IVK for change address: %s", e.what()));
                     }
 
-                    {
-                        WalletBatch batch(pwallet->GetDatabase());
-                        if (!km.RegisterDiversifiedAddress(changeAddr, internalIvk, &batch)) {
-                            LogPrintf("z_sendmany: failed to register internal change address (funds still spendable after next restart via LoadNote self-heal)\n");
-                        }
-                    }
+                    pendingChangeAddr = changeAddr;
+                    pendingChangeIvk = internalIvk;
                 }
 
                 // sk cleansed by sk_guard destructor
@@ -836,6 +841,17 @@ RPCHelpMan z_sendmany()
                 if (payload) {
                     WalletBatch batch(pwallet->GetDatabase());
                     km.ScanSaplingSpends(*tx, *payload, &batch);
+                }
+            }
+
+            // Register the internal diversified change address now that the tx
+            // is committed. A failure here leaves the mapping recoverable via
+            // LoadNote self-heal on next wallet load; it is deliberately
+            // non-fatal because the funds are safely spendable either way.
+            if (pendingChangeAddr && pendingChangeIvk) {
+                WalletBatch batch(pwallet->GetDatabase());
+                if (!km.RegisterDiversifiedAddress(*pendingChangeAddr, *pendingChangeIvk, &batch)) {
+                    LogPrintf("z_sendmany: failed to register internal change address (funds still spendable after next restart via LoadNote self-heal)\n");
                 }
             }
 
