@@ -1683,8 +1683,10 @@ void CWallet::RunSaplingWitnessRebuildBackground(std::shared_ptr<CWallet> pwalle
 
     const int applied = pwallet->RebuildSaplingWitnessesFromSnapshot(replayStart, snapshot);
 
-    // Re-acquire cs_wallet briefly to finalise: check whether tip moved
-    // during replay, clear the persistent marker on success, or re-arm.
+    // Re-acquire cs_wallet to finalise. The lock is held CONTINUOUSLY across
+    // the tail-drain below and through the EraseSaplingRebuildFlag write so
+    // no blockConnected slips in between "witnesses consistent with tip" and
+    // "flag cleared on disk". See tail-drain rationale below.
     LOCK(pwallet->cs_wallet);
     WalletBatch batch(pwallet->GetDatabase());
 
@@ -1695,20 +1697,72 @@ void CWallet::RunSaplingWitnessRebuildBackground(std::shared_ptr<CWallet> pwalle
         return;
     }
 
-    // If the tip advanced during replay, the snapshot is stale w.r.t. the
-    // new tip: commitments exist in blocks we did not process. Re-arm so
-    // the next tip triggers a fresh pass (which will be cheap if only a
-    // handful of blocks are actually new).
-    const int currentTip = pwallet->m_last_block_processed_height;
-    if (currentTip != snapshotTipHeight ||
-        pwallet->chain().getBlockHash(snapshotTipHeight) != snapshotTipHash) {
+    // Reorg-at-snapshot-tip: if the block at snapshotTipHeight is no longer
+    // the one we replayed, commitments we already committed to disk are now
+    // wrong. A tail drain cannot repair already-committed bad state; re-arm
+    // so the next detection pass triggers a full fresh rebuild. The chunk
+    // loop aborts on in-active-chain failures, so this path is only reached
+    // when snapshotTipHeight itself was reorged AFTER we replayed it.
+    if (pwallet->chain().getBlockHash(snapshotTipHeight) != snapshotTipHash) {
         pwallet->WalletLogPrintf(
-            "Sapling witness rebuild: tip moved during replay (was %d hash=%s, now %d); "
-            "re-arming for a follow-up pass\n",
-            snapshotTipHeight, snapshotTipHash.GetHex().substr(0, 16), currentTip);
+            "Sapling witness rebuild: snapshot tip hash diverged (height %d was %s); "
+            "re-arming for a fresh pass\n",
+            snapshotTipHeight, snapshotTipHash.GetHex().substr(0, 16));
         pwallet->m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
-        // Do NOT clear the persistent flag yet — a second pass is expected.
         return;
+    }
+
+    // Tail drain (S-VAL-001 / V3-RED fix):
+    //
+    // The chunked replay released cs_wallet between chunks (kRebuildChunkBlocks
+    // at a time) so wallet RPCs and the scheduler stayed responsive. During
+    // those gaps, blockConnected can have landed new blocks at
+    // snapshotTipHeight+1..currentTip and called ProcessSaplingBlock →
+    // UpdateWitnesses on partial witness state: notes with witnesses already
+    // reconstructed by an earlier chunk received the new cmus, but notes
+    // whose witnesses were reconstructed in a LATER chunk missed them. Those
+    // later-reconstructed witnesses only cover the snapshot range and will
+    // be permanently desynced: anchor mismatch → DetectStaleWitnesses fires
+    // again → another rebuild → another tip movement → rebuild loop.
+    //
+    // Break the loop by draining [snapshotTipHeight+1 .. currentTip] under
+    // the continuously-held cs_wallet before clearing the persistent flag.
+    // The tail is bounded by the replay duration (minutes of chain blocks),
+    // so the additional blocking hold is bounded; blockConnected cannot
+    // append to the tail while we hold cs_wallet.
+    //
+    // m_last_block_processed_height is the authoritative tip reference here:
+    // it is GUARDED_BY(cs_wallet) and is advanced by blockConnected under
+    // the same lock, so its value is stable for the duration of this block.
+    const int currentTip = pwallet->m_last_block_processed_height;
+    if (currentTip > snapshotTipHeight) {
+        pwallet->WalletLogPrintf(
+            "Sapling witness rebuild: draining tail %d..%d under held lock\n",
+            snapshotTipHeight + 1, currentTip);
+        for (int h = snapshotTipHeight + 1; h <= currentTip; ++h) {
+            uint256 hh = pwallet->chain().getBlockHash(h);
+            if (hh.IsNull()) {
+                pwallet->WalletLogPrintf(
+                    "ERROR: Sapling witness rebuild: null block hash at tail height %d; "
+                    "re-arming for next tip\n", h);
+                pwallet->m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+                return;
+            }
+            CBlock block;
+            bool found = pwallet->chain().findBlock(hh, FoundBlock().data(block));
+            if (!found || block.IsNull()) {
+                pwallet->WalletLogPrintf(
+                    "ERROR: Sapling witness rebuild: cannot read tail block %d (hash=%s); "
+                    "re-arming for next tip\n",
+                    h, hh.GetHex().substr(0, 16));
+                pwallet->m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+                return;
+            }
+            pwallet->ProcessSaplingBlock(block, h, batch);
+        }
+        pwallet->WalletLogPrintf(
+            "Sapling witness rebuild: tail drained, %d blocks applied under held lock\n",
+            currentTip - snapshotTipHeight);
     }
 
     batch.EraseSaplingRebuildFlag();
@@ -1756,7 +1810,11 @@ int CWallet::RebuildSaplingWitnessesSynchronous(int fromHeight)
     // Phase 2: chunked replay, cs_wallet re-acquired per chunk.
     const int applied = RebuildSaplingWitnessesFromSnapshot(replayStart, snapshot);
 
-    // Phase 3: finalise under cs_wallet.
+    // Phase 3: finalise under cs_wallet. The lock is held CONTINUOUSLY
+    // across the tail drain and through EraseSaplingRebuildFlag so no
+    // blockConnected lands between "witnesses consistent with tip" and
+    // "flag cleared on disk" (S-VAL-001 fix; see RunSaplingWitnessRebuildBackground
+    // for full rationale).
     LOCK(cs_wallet);
     WalletBatch batch(GetDatabase());
     if (applied < 0) {
@@ -1764,15 +1822,45 @@ int CWallet::RebuildSaplingWitnessesSynchronous(int fromHeight)
         return applied;
     }
 
-    // If tip moved during replay, re-arm and keep the marker so a follow-up
-    // pass runs without operator intervention.
-    const int currentTip = m_last_block_processed_height;
-    if (currentTip != snapshotTipHeight ||
-        chain().getBlockHash(snapshotTipHeight) != snapshotTipHash) {
-        WalletLogPrintf("Sapling witness rebuild: tip moved during replay (was %d, now %d); "
-                        "re-arming follow-up pass\n", snapshotTipHeight, currentTip);
+    // Reorg-at-snapshot-tip: already-committed witnesses for snapshotTipHeight
+    // are wrong if that block was replaced; a tail drain cannot repair it.
+    // Re-arm so the next detection pass triggers a full fresh rebuild.
+    if (chain().getBlockHash(snapshotTipHeight) != snapshotTipHash) {
+        WalletLogPrintf("Sapling witness rebuild: snapshot tip hash diverged at height %d; "
+                        "re-arming follow-up pass\n", snapshotTipHeight);
         m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
         return applied;
+    }
+
+    // Drain tail [snapshotTipHeight+1 .. currentTip] under the held lock to
+    // absorb any blocks that landed during the chunked replay. Without this,
+    // blockConnected's between-chunk UpdateWitnesses calls desync later-
+    // reconstructed witnesses, re-firing DetectStaleWitnesses in a loop.
+    const int currentTip = m_last_block_processed_height;
+    if (currentTip > snapshotTipHeight) {
+        WalletLogPrintf("Sapling witness rebuild: draining tail %d..%d under held lock\n",
+                        snapshotTipHeight + 1, currentTip);
+        for (int h = snapshotTipHeight + 1; h <= currentTip; ++h) {
+            uint256 hh = chain().getBlockHash(h);
+            if (hh.IsNull()) {
+                WalletLogPrintf("ERROR: Sapling witness rebuild: null block hash at tail height %d; "
+                                "re-arming for next tip\n", h);
+                m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+                return applied;
+            }
+            CBlock block;
+            bool found = chain().findBlock(hh, FoundBlock().data(block));
+            if (!found || block.IsNull()) {
+                WalletLogPrintf("ERROR: Sapling witness rebuild: cannot read tail block %d (hash=%s); "
+                                "re-arming for next tip\n",
+                                h, hh.GetHex().substr(0, 16));
+                m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+                return applied;
+            }
+            ProcessSaplingBlock(block, h, batch);
+        }
+        WalletLogPrintf("Sapling witness rebuild: tail drained, %d blocks applied under held lock\n",
+                        currentTip - snapshotTipHeight);
     }
 
     batch.EraseSaplingRebuildFlag();
