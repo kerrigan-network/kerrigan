@@ -414,14 +414,24 @@ bool SaplingKeyManager::IsExternalIvk(const sapling::SaplingIncomingViewingKey& 
     if (skIt == mapIvkToExtSk.end()) return false;
     const auto& ext_sk_bytes = skIt->second.key;
 
+    // S-VAL-002: xsk_derive_internal() returns 169 bytes of spending-key-
+    // derived material. Hold it in a named buffer guarded by ByteArrayCleanser
+    // so the secret is zeroed on every exit path (early return, exception,
+    // normal return). Declaring the buffer + guard once outside the loop
+    // lets each iteration overwrite it in place (still secret material) and
+    // still guarantees a single final cleanse when the function returns.
+    std::array<uint8_t, 169> internalBytes{};
+    ByteArrayCleanser<169> internalBytes_guard(internalBytes);
+
     // A key is internal iff some OTHER tracked ExtSK derives to it via
     // xsk_derive_internal(). Scan siblings and check.
     for (const auto& [other_ivk, other_sk] : mapIvkToExtSk) {
         if (other_ivk == ivk) continue;
         try {
-            auto internalBytes = sapling::zip32::xsk_derive_internal(other_sk.key);
+            internalBytes = sapling::zip32::xsk_derive_internal(other_sk.key);
             if (internalBytes == ext_sk_bytes) {
                 // This IVK is the internal derivation of other_ivk's ExtSK.
+                // internalBytes_guard cleanses on return.
                 return false;
             }
         } catch (const std::exception&) {
