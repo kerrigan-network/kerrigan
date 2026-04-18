@@ -86,7 +86,15 @@ RPCHelpMan z_getnewaddress()
 
                 // Derive Sapling spending key via ZIP 32: m_Sapling / 32' / coin_type' / 0'
                 rust::Slice<const uint8_t> seed_slice(seed.data(), seed.size());
-                std::array<uint8_t, 169> xsk_bytes;
+                std::array<uint8_t, 169> xsk_bytes{};
+                // RAII guard: cleanse xsk_bytes on every exit path, including an
+                // exception thrown between intermediate FFI derivations. Without
+                // this, a throw from xsk_derive after a successful xsk_master
+                // would leave the master spending key material on the stack
+                // uncleansed. Same pattern as the ZIP-32 derivation guards
+                // introduced in commit b20703f (closes #1123).
+                auto xsk_guard = std::unique_ptr<void, std::function<void(void*)>>(
+                    (void*)1, [&](void*) { memory_cleanse(xsk_bytes.data(), xsk_bytes.size()); });
                 try {
                     xsk_bytes = ::sapling::zip32::xsk_master(seed_slice);
                     xsk_bytes = ::sapling::zip32::xsk_derive(xsk_bytes, 32 | 0x80000000);
@@ -98,7 +106,7 @@ RPCHelpMan z_getnewaddress()
 
                 sapling::SaplingExtendedSpendingKey sk;
                 sk.key = xsk_bytes;
-                memory_cleanse(xsk_bytes.data(), xsk_bytes.size());
+                // xsk_bytes cleansed on scope exit via xsk_guard.
 
                 // Capture master key for encrypted wallets
                 CKeyingMaterial masterKey;
