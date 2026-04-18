@@ -1876,25 +1876,62 @@ void CWallet::MaybeAutoRebuildSaplingWitnesses()
         if (m_sapling_rebuild_thread.joinable()) {
             m_sapling_rebuild_thread.join();
         }
-        m_sapling_rebuild_thread = std::thread([self, stale, minH, tip]() {
-            try {
-                // Non-owning shared_ptr; lifetime is enforced by the join
-                // in ~CWallet(). The shared_ptr shape is required by the
-                // RunSaplingWitnessRebuildBackground signature (keeps the
-                // helper usable from other call sites that do hold a
-                // real shared_ptr).
-                std::shared_ptr<CWallet> nonOwning(self, [](CWallet*) {});
-                RunSaplingWitnessRebuildBackground(nonOwning, stale, minH, tip);
-            } catch (const std::exception& e) {
-                self->WalletLogPrintf("ERROR: Sapling witness rebuild thread threw: %s\n", e.what());
-                self->m_sapling_rebuild_active.store(false, std::memory_order_release);
-                self->m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
-            } catch (...) {
-                self->WalletLogPrintf("ERROR: Sapling witness rebuild thread threw unknown exception\n");
-                self->m_sapling_rebuild_active.store(false, std::memory_order_release);
-                self->m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
-            }
-        });
+        // std::thread's constructor may throw std::system_error (e.g. EAGAIN
+        // when pthread_create exhausts resource limits) or std::bad_alloc.
+        // If the spawn fails AFTER we have already claimed the cross-path
+        // guard m_sapling_rebuild_active, the atomic is stuck true forever:
+        // the lambda never runs so the inner catch cannot clear it, and
+        // both MaybeAutoRebuildSaplingWitnesses and the z_rebuildsaplingwitnesses
+        // RPC would deadlock on the guard for the lifetime of the wallet.
+        // Catch here, release the cross-path guard, re-arm detection, and
+        // swallow the exception: updatedBlockTip() runs on the validation
+        // scheduler thread and must not propagate. The next block tip will
+        // retry; if the failure is persistent (ulimit, OOM) the operator
+        // will see the repeated log line and can intervene.
+        try {
+            m_sapling_rebuild_thread = std::thread([self, stale, minH, tip]() {
+                try {
+                    // Non-owning shared_ptr; lifetime is enforced by the join
+                    // in ~CWallet(). The shared_ptr shape is required by the
+                    // RunSaplingWitnessRebuildBackground signature (keeps the
+                    // helper usable from other call sites that do hold a
+                    // real shared_ptr).
+                    std::shared_ptr<CWallet> nonOwning(self, [](CWallet*) {});
+                    RunSaplingWitnessRebuildBackground(nonOwning, stale, minH, tip);
+                } catch (const std::exception& e) {
+                    self->WalletLogPrintf("ERROR: Sapling witness rebuild thread threw: %s\n", e.what());
+                    self->m_sapling_rebuild_active.store(false, std::memory_order_release);
+                    self->m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+                } catch (...) {
+                    self->WalletLogPrintf("ERROR: Sapling witness rebuild thread threw unknown exception\n");
+                    self->m_sapling_rebuild_active.store(false, std::memory_order_release);
+                    self->m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+                }
+            });
+        } catch (const std::exception& e) {
+            WalletLogPrintf("ERROR: Sapling witness rebuild: failed to spawn background thread: %s; "
+                            "re-arming for next block tip\n", e.what());
+            // Release the cross-path guard claimed at line above (CAS to
+            // true succeeded before the spawn). Use CAS for consistency
+            // with the rest of the auto-rebuild path; it must succeed here
+            // because we are the thread that claimed it and nothing else
+            // has touched it yet.
+            bool expected_active = true;
+            m_sapling_rebuild_active.compare_exchange_strong(
+                expected_active, false,
+                std::memory_order_acq_rel, std::memory_order_relaxed);
+            m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+            // Do NOT rethrow: caller is updatedBlockTip() on the validation
+            // scheduler thread. Silent recovery is the contract.
+        } catch (...) {
+            WalletLogPrintf("ERROR: Sapling witness rebuild: failed to spawn background thread "
+                            "(unknown exception); re-arming for next block tip\n");
+            bool expected_active = true;
+            m_sapling_rebuild_active.compare_exchange_strong(
+                expected_active, false,
+                std::memory_order_acq_rel, std::memory_order_relaxed);
+            m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+        }
     }
 }
 
