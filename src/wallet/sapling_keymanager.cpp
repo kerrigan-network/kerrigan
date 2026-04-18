@@ -699,13 +699,41 @@ void SaplingKeyManager::LoadNote(const uint256& cmu, const SaplingNoteData& nd)
     // RegisterDiversifiedAddress existed). If we know the IVK but not the
     // recipient address, insert the mapping so CanSpend() and
     // GetUnspentNotes(addr) recognise the note as spendable.
+    //
+    // Security (S-VAL-004): wallet.dat sits on disk and is reachable by
+    // anyone with filesystem access. Before trusting (nd.ivk, nd.recipient)
+    // and inserting it into the address->ivk map we must verify the pair is
+    // cryptographically consistent, i.e. that recipient.pk_d actually
+    // derives from nd.ivk and recipient.d. Otherwise a tampered wallet.dat
+    // could plant an attacker-chosen address in mapAddressToIvk, which
+    // z_listaddresses would then display as belonging to the user. The
+    // spend path is independent (it re-derives from the ExtSK) and cannot
+    // be tricked into releasing funds, but the UI spoof alone is enough to
+    // justify the check. Reject silently-invalid pairs and skip the
+    // self-heal for that note; the note itself still loads.
     if (mapIvkToFvk.find(nd.ivk) != mapIvkToFvk.end()
             && mapAddressToIvk.find(nd.recipient) == mapAddressToIvk.end()) {
-        mapAddressToIvk[nd.recipient] = nd.ivk;
-        mapIvkToAddresses[nd.ivk].insert(nd.recipient);
-        LogPrint(BCLog::SAPLING,
-                 "SaplingKeyManager::LoadNote: repaired orphaned diversified address mapping at note %s\n",
-                 cmu.ToString());
+        bool derivation_ok = false;
+        try {
+            auto derived_pkd = sapling::spec::ivk_to_pkd(nd.ivk.key, nd.recipient.d);
+            derivation_ok = (derived_pkd == nd.recipient.pk_d);
+        } catch (const std::exception& e) {
+            // ivk_to_pkd throws when the diversifier or ivk scalar is
+            // invalid -- treat as a failed derivation, not a fatal error.
+            derivation_ok = false;
+        }
+        if (!derivation_ok) {
+            LogPrintf("WARNING: SaplingKeyManager::LoadNote: rejecting tampered "
+                      "ivk->recipient mapping for note %s:%d, recipient does not "
+                      "derive from stored ivk\n",
+                      nd.txid.ToString(), nd.outputIndex);
+        } else {
+            mapAddressToIvk[nd.recipient] = nd.ivk;
+            mapIvkToAddresses[nd.ivk].insert(nd.recipient);
+            LogPrint(BCLog::SAPLING,
+                     "SaplingKeyManager::LoadNote: repaired orphaned diversified address mapping at note %s\n",
+                     cmu.ToString());
+        }
     }
 }
 
