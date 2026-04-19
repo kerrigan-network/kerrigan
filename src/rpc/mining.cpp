@@ -129,6 +129,11 @@ static double GetNetworkHashPSForAlgo(int lookup, int height, const CChain& acti
     if (!pb || !pb->nHeight) return 0;
     if (lookup <= 0) lookup = 120; // ~16 hours per-algo on a 4-algo chain
 
+    // If lookup is larger than chain, clamp it to chain length so we do
+    // not walk back to genesis under cs_main when the requested window
+    // exceeds what this algo has produced.
+    if (lookup > pb->nHeight) lookup = pb->nHeight;
+
     // Walk backward collecting blocks that match this algo,
     // summing per-algo work (not nChainWork which includes all algos).
     const CBlockIndex* pAlgoTip = nullptr;
