@@ -589,51 +589,82 @@ RPCHelpMan z_sendmany()
                         throw JSONRPCError(RPC_WALLET_ERROR, "Cannot derive change address: missing FVK or DK");
                     }
 
-                    // Derive internal FVK (unlinkable to external addresses) via ZIP 316
-                    std::array<uint8_t, 96> fvk_bytes;
-                    std::copy(fvk->ak.begin(), fvk->ak.end(), fvk_bytes.begin());
-                    std::copy(fvk->nk.begin(), fvk->nk.end(), fvk_bytes.begin() + 32);
-                    std::copy(fvk->ovk.begin(), fvk->ovk.end(), fvk_bytes.begin() + 64);
+                    // Derive change-address FVK/DK. ZIP 316 internal derivation
+                    // applies only when the source is an EXTERNAL user-facing
+                    // address: AddSpendingKey eagerly registers the matching
+                    // internal FVK in mapIvkToFvk, so the post-commit
+                    // RegisterDiversifiedAddress call will find the IVK.
+                    //
+                    // If the source is itself an internal address (e.g. a
+                    // previously-stranded change note healed via LoadNote or a
+                    // prior z_sendmany's change being re-spent), calling
+                    // derive_internal_fvk a second time would produce an
+                    // "internal-of-internal" FVK whose IVK is not tracked by
+                    // the wallet, and the register call would fail with
+                    // "unknown IVK". Reuse the source FVK/DK directly in that
+                    // case: privacy is preserved (the source is already
+                    // unlinkable to any external address), and the IVK
+                    // matches mapIvkToFvk because we just passed CanSpend.
+                    std::array<uint8_t, 96> source_fvk_bytes;
+                    std::copy(fvk->ak.begin(), fvk->ak.end(), source_fvk_bytes.begin());
+                    std::copy(fvk->nk.begin(), fvk->nk.end(), source_fvk_bytes.begin() + 32);
+                    std::copy(fvk->ovk.begin(), fvk->ovk.end(), source_fvk_bytes.begin() + 64);
 
-                    auto internalFvk = sapling::zip32::derive_internal_fvk(fvk_bytes, *dk);
+                    std::array<uint8_t, 96> change_fvk_bytes;
+                    std::array<uint8_t, 32> change_dk_bytes;
+                    {
+                        auto sourceIvk = km.GetIvk(fromSapling);
+                        const bool sourceIsExternal =
+                            sourceIvk.has_value() && km.IsExternalIvk(*sourceIvk);
+                        if (sourceIsExternal) {
+                            auto derived = sapling::zip32::derive_internal_fvk(source_fvk_bytes, *dk);
+                            change_fvk_bytes = derived.fvk;
+                            change_dk_bytes  = derived.dk;
+                        } else {
+                            change_fvk_bytes = source_fvk_bytes;
+                            change_dk_bytes  = *dk;
+                        }
+                    }
 
-                    // Derive a fresh diversified address from the internal FVK
+                    // Derive a fresh diversified address from the change FVK
                     std::array<uint8_t, 11> j_start{};
                     GetStrongRandBytes(Span{j_start.data(), 8});
-                    auto internalAddr = sapling::zip32::find_address(internalFvk.fvk, internalFvk.dk, j_start);
+                    auto changeAddrFfi = sapling::zip32::find_address(change_fvk_bytes, change_dk_bytes, j_start);
 
-                    // Use the sender's OVK so they can recover change (but not
-                    // the external FVK's OVK; use the internal FVK's OVK to
-                    // limit exposure). The internal OVK is derived from the
-                    // internal FVK bytes [64..96].
+                    // Use the change FVK's OVK so the sender can recover the
+                    // note from the transaction, while limiting exposure to
+                    // the internal viewing key (not the external OVK). For
+                    // external sources this is the ZIP 316 internal OVK; for
+                    // internal sources it is the source's own OVK, which the
+                    // wallet already holds.
                     std::array<uint8_t, 32> changeOvk;
-                    std::copy(internalFvk.fvk.begin() + 64, internalFvk.fvk.begin() + 96, changeOvk.begin());
+                    std::copy(change_fvk_bytes.begin() + 64, change_fvk_bytes.begin() + 96, changeOvk.begin());
 
-                    if (!builder.AddSaplingOutput(changeOvk, internalAddr.addr, change)) {
+                    if (!builder.AddSaplingOutput(changeOvk, changeAddrFfi.addr, change)) {
                         throw JSONRPCError(RPC_WALLET_ERROR, "Failed to add shielded change output");
                     }
                     nShieldedOutputs++;
 
-                    // Stash the change address + internal IVK. The mapping is
+                    // Stash the change address + change IVK. The mapping is
                     // persisted via RegisterDiversifiedAddress only AFTER
                     // CommitTransaction succeeds, so a send that fails to
                     // build, sign, or broadcast leaves nothing in the wallet
                     // DB. Recovery of the narrow commit-vs-register window
                     // is handled by LoadNote self-heal on next wallet load.
                     sapling::SaplingPaymentAddress changeAddr;
-                    std::copy(internalAddr.addr.begin(), internalAddr.addr.begin() + 11, changeAddr.d.begin());
-                    std::copy(internalAddr.addr.begin() + 11, internalAddr.addr.end(),   changeAddr.pk_d.begin());
+                    std::copy(changeAddrFfi.addr.begin(), changeAddrFfi.addr.begin() + 11, changeAddr.d.begin());
+                    std::copy(changeAddrFfi.addr.begin() + 11, changeAddrFfi.addr.end(),   changeAddr.pk_d.begin());
 
-                    sapling::SaplingIncomingViewingKey internalIvk;
+                    sapling::SaplingIncomingViewingKey changeIvk;
                     try {
-                        internalIvk.key = sapling::zip32::fvk_to_ivk(internalFvk.fvk);
+                        changeIvk.key = sapling::zip32::fvk_to_ivk(change_fvk_bytes);
                     } catch (const std::exception& e) {
                         throw JSONRPCError(RPC_WALLET_ERROR,
-                            strprintf("Failed to derive internal IVK for change address: %s", e.what()));
+                            strprintf("Failed to derive IVK for change address: %s", e.what()));
                     }
 
                     pendingChangeAddr = changeAddr;
-                    pendingChangeIvk = internalIvk;
+                    pendingChangeIvk = changeIvk;
                 }
 
                 // sk cleansed by sk_guard destructor

@@ -793,52 +793,82 @@ public:
                     throw std::runtime_error("Cannot derive change address");
                 }
 
-                std::array<uint8_t, 96> fvk_bytes;
-                std::copy(fvk->ak.begin(), fvk->ak.end(), fvk_bytes.begin());
-                std::copy(fvk->nk.begin(), fvk->nk.end(), fvk_bytes.begin() + 32);
-                std::copy(fvk->ovk.begin(), fvk->ovk.end(), fvk_bytes.begin() + 64);
+                std::array<uint8_t, 96> source_fvk_bytes;
+                std::copy(fvk->ak.begin(), fvk->ak.end(), source_fvk_bytes.begin());
+                std::copy(fvk->nk.begin(), fvk->nk.end(), source_fvk_bytes.begin() + 32);
+                std::copy(fvk->ovk.begin(), fvk->ovk.end(), source_fvk_bytes.begin() + 64);
 
-                // Wrap derivation in try-catch to unreserve notes on failure
-                decltype(sapling::zip32::derive_internal_fvk(fvk_bytes, *dk)) internalFvk;
-                decltype(sapling::zip32::find_address(internalFvk.fvk, internalFvk.dk, std::array<uint8_t, 11>{})) internalAddr;
+                // Derive change-address FVK/DK. ZIP 316 internal derivation
+                // applies only when the source is an EXTERNAL user-facing
+                // address: AddSpendingKey eagerly registers the matching
+                // internal FVK in mapIvkToFvk, so the post-commit
+                // RegisterDiversifiedAddress call will find the IVK.
+                //
+                // If the source is itself an internal address (a previously
+                // stranded change note healed via LoadNote, or change being
+                // re-spent), calling derive_internal_fvk a second time would
+                // produce an "internal-of-internal" FVK whose IVK is not
+                // tracked by the wallet, and the register call would fail
+                // with "unknown IVK". Reuse the source FVK/DK directly in
+                // that case: privacy is preserved (the source is already
+                // unlinkable), and the IVK matches mapIvkToFvk because we
+                // just passed CanSpend.
+                std::array<uint8_t, 96> change_fvk_bytes;
+                std::array<uint8_t, 32> change_dk_bytes;
+                std::array<uint8_t, 43> change_addr_bytes;
                 try {
-                    internalFvk = sapling::zip32::derive_internal_fvk(fvk_bytes, *dk);
+                    auto sourceIvk = km.GetIvk(fromSapling);
+                    const bool sourceIsExternal =
+                        sourceIvk.has_value() && km.IsExternalIvk(*sourceIvk);
+                    if (sourceIsExternal) {
+                        auto derived = sapling::zip32::derive_internal_fvk(source_fvk_bytes, *dk);
+                        change_fvk_bytes = derived.fvk;
+                        change_dk_bytes  = derived.dk;
+                    } else {
+                        change_fvk_bytes = source_fvk_bytes;
+                        change_dk_bytes  = *dk;
+                    }
                     std::array<uint8_t, 11> j_start{};
                     GetStrongRandBytes(Span{j_start.data(), 8});
-                    internalAddr = sapling::zip32::find_address(internalFvk.fvk, internalFvk.dk, j_start);
+                    auto found = sapling::zip32::find_address(change_fvk_bytes, change_dk_bytes, j_start);
+                    change_addr_bytes = found.addr;
                 } catch (...) {
                     if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
                     throw;
                 }
 
+                // Use the change FVK's OVK so the sender can recover the
+                // note while limiting exposure (internal OVK for external
+                // sources; source's own OVK for internal sources, which is
+                // already held by the wallet).
                 std::array<uint8_t, 32> changeOvk;
-                std::copy(internalFvk.fvk.begin() + 64, internalFvk.fvk.begin() + 96, changeOvk.begin());
+                std::copy(change_fvk_bytes.begin() + 64, change_fvk_bytes.begin() + 96, changeOvk.begin());
 
-                if (!builder.AddSaplingOutput(changeOvk, internalAddr.addr, change)) {
+                if (!builder.AddSaplingOutput(changeOvk, change_addr_bytes, change)) {
                     // Unreserve notes before throwing
                     if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
                     throw std::runtime_error("Failed to add shielded change output");
                 }
 
-                // Stash the change address + internal IVK. The mapping is
+                // Stash the change address + change IVK. The mapping is
                 // persisted via RegisterDiversifiedAddress only AFTER
                 // CommitTransaction succeeds (mirrors the RPC z_sendmany
                 // path); LoadNote's self-heal rebuilds anything lost in
                 // the commit-vs-register race on next wallet load.
                 sapling::SaplingPaymentAddress changeAddr;
-                std::copy(internalAddr.addr.begin(), internalAddr.addr.begin() + 11, changeAddr.d.begin());
-                std::copy(internalAddr.addr.begin() + 11, internalAddr.addr.end(),   changeAddr.pk_d.begin());
+                std::copy(change_addr_bytes.begin(), change_addr_bytes.begin() + 11, changeAddr.d.begin());
+                std::copy(change_addr_bytes.begin() + 11, change_addr_bytes.end(),   changeAddr.pk_d.begin());
 
-                sapling::SaplingIncomingViewingKey internalIvk;
+                sapling::SaplingIncomingViewingKey changeIvk;
                 try {
-                    internalIvk.key = sapling::zip32::fvk_to_ivk(internalFvk.fvk);
+                    changeIvk.key = sapling::zip32::fvk_to_ivk(change_fvk_bytes);
                 } catch (...) {
                     if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
                     throw;
                 }
 
                 pendingChangeAddr = changeAddr;
-                pendingChangeIvk = internalIvk;
+                pendingChangeIvk = changeIvk;
             }
         } else {
             // Transparent source
