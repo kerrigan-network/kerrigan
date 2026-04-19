@@ -53,7 +53,8 @@ info "Output:  $RELEASE"
 # --- Host toolchain (cross compilers and docker) --------------------------
 install_host_tools() {
     [ -f /etc/os-release ] || error "Cannot detect distro"
-    . /etc/os-release
+    local ID
+    ID="$( . /etc/os-release; echo "$ID" )"
     case "${ID:-}" in
         ubuntu|debian|linuxmint|pop)
             sudo apt-get update -qq
