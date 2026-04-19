@@ -55,11 +55,16 @@ endef
 $(package)_rust_target:=$(call rust_target,$(package),$(canonical_host),$(host_os))
 
 ifneq ($(canonical_host),$(build))
+# Cross-compile: primary download is the rust-std tarball for the target triple
+# (contains libcore/libstd rlibs for the target), plus the build-host native
+# rust tarball as the extra source (contains rustc/cargo binaries).
 # Use := so $(package)_version / _rust_target / _rust_std_sha256_hash_*
 # expand now (while $(package) is still native_rust) rather than later,
 # when the global $(package) may have been reassigned.
-$(package)_exact_file_name:=rust-std-$($(package)_version)-$($(package)_rust_target).tar.gz
-$(package)_exact_sha256_hash:=$($(package)_rust_std_sha256_hash_$($(package)_rust_target))
+$(package)_file_name:=rust-std-$($(package)_version)-$($(package)_rust_target).tar.gz
+$(package)_sha256_hash:=$($(package)_rust_std_sha256_hash_$($(package)_rust_target))
+$(package)_exact_file_name:=$($(package)_file_name)
+$(package)_exact_sha256_hash:=$($(package)_sha256_hash)
 $(package)_build_subdir=buildos
 $(package)_extra_sources:=$($(package)_file_name_$(build_os))
 
