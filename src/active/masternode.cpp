@@ -219,11 +219,20 @@ bool CActiveMasternodeManager::GetLocalAddress(CService& addrRet)
     AssertLockHeld(cs);
     // First try to find whatever our own local address is known internally.
     // Addresses could be specified via externalip or bind option, discovered via UPnP
-    // or added by TorController. Use some random dummy IPv4 peer to prefer the one
-    // reachable via IPv4.
+    // or added by TorController. Try an IPv4 dummy peer first to bias toward IPv4
+    // when a dual-stack externalip is configured, then fall back to an IPv6 dummy
+    // peer so IPv6-only operators (externalip=[v6]:port, common on v6-only VPS) can
+    // also reach a READY state. ProRegTx explicitly accepts both IPv4 and IPv6 in
+    // src/evo/netinfo.cpp, so rejecting IPv6 here would be inconsistent with the
+    // consensus layer.
     bool fFoundLocal{false};
     if (auto peerAddr = LookupHost("8.8.8.8", false); peerAddr.has_value()) {
         fFoundLocal = GetLocal(addrRet, &peerAddr.value()) && IsValidNetAddr(addrRet);
+    }
+    if (!fFoundLocal) {
+        if (auto peerAddr6 = LookupHost("2001:4860:4860::8888", false); peerAddr6.has_value()) {
+            fFoundLocal = GetLocal(addrRet, &peerAddr6.value()) && IsValidNetAddr(addrRet);
+        }
     }
     if (!fFoundLocal && !Params().RequireRoutableExternalIP()) {
         if (auto addr = Lookup("127.0.0.1", GetListenPort(), false); addr.has_value()) {
@@ -233,10 +242,12 @@ bool CActiveMasternodeManager::GetLocalAddress(CService& addrRet)
     }
     if (!fFoundLocal) {
         bool empty = true;
-        // If we have some peers, let's try to find our local address from one of them
+        // If we have some peers, let's try to find our local address from one of them.
+        // Accept both IPv4 and IPv6 peers; IsValidNetAddr below still rejects any
+        // non-routable or otherwise-invalid answer.
         m_connman.ForEachNodeContinueIf(CConnman::AllNodes, [&](CNode* pnode) {
             empty = false;
-            if (pnode->addr.IsIPv4()) {
+            if (pnode->addr.IsIPv4() || pnode->addr.IsIPv6()) {
                 if (auto addr = ::GetLocalAddress(*pnode); IsValidNetAddr(addr)) {
                     addrRet = addr;
                     fFoundLocal = true;
@@ -246,7 +257,7 @@ bool CActiveMasternodeManager::GetLocalAddress(CService& addrRet)
         });
         // nothing and no live connections, can't do anything for now
         if (empty) {
-            m_error = "Can't detect valid external address. Please consider using the externalip configuration option if problem persists. Make sure to use IPv4 address only.";
+            m_error = "Can't detect valid external address. Please consider using the externalip configuration option if problem persists. IPv4 and IPv6 are both supported.";
             LogPrintf("CActiveMasternodeManager::GetLocalAddress -- ERROR: %s\n", m_error);
             return false;
         }
@@ -256,7 +267,11 @@ bool CActiveMasternodeManager::GetLocalAddress(CService& addrRet)
 
 bool CActiveMasternodeManager::IsValidNetAddr(const CService& addrIn)
 {
-    if (!addrIn.IsValid() || !addrIn.IsIPv4()) return false;
+    // Accept routable IPv4 and IPv6. MnNetInfo::ValidateService and
+    // ExtNetInfo::ValidateService (src/evo/netinfo.cpp) permit both address
+    // families for on-chain ProTx entries, so this self-address validator
+    // must not be stricter.
+    if (!addrIn.IsValid() || (!addrIn.IsIPv4() && !addrIn.IsIPv6())) return false;
     // TODO: regtest is fine with any addresses for now,
     // should probably be a bit smarter if one day we start to implement tests for this
     return !Params().RequireRoutableExternalIP() || (g_reachable_nets.Contains(addrIn) && addrIn.IsRoutable());
