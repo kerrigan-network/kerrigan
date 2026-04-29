@@ -172,6 +172,10 @@ AC_DEFUN([GMP_CHECK],[
             gmp_major_version=6
             gmp_minor_version=3
             ;;
+          *)
+            gmp_major_version=6
+            gmp_minor_version=2
+            ;;
         esac
         ;;
       *)
