@@ -5,10 +5,28 @@
 #include <hmp/privilege.h>
 
 #include <consensus/params.h>
+#include <hmp/identity.h>
 #include <logging.h>
+#include <primitives/block.h>
 
 #include <algorithm>
 #include <set>
+
+namespace {
+/** Map an HMPPrivilegeTier to a stable lowercase string for log lines.
+ *  Kept TU-local so it does not collide with the static helper of the same
+ *  name in src/rpc/hmp.cpp; both intentionally produce the identical mapping. */
+const char* TierName(HMPPrivilegeTier tier)
+{
+    switch (tier) {
+    case HMPPrivilegeTier::BROOD:   return "BROOD";
+    case HMPPrivilegeTier::ELDER:   return "ELDER";
+    case HMPPrivilegeTier::NEW:     return "NEW";
+    case HMPPrivilegeTier::UNKNOWN: return "UNKNOWN";
+    }
+    return "UNKNOWN";
+}
+} // namespace
 
 CHMPPrivilegeTracker::CHMPPrivilegeTracker(const Consensus::Params& params)
     : m_windowSize(params.nHMPPrivilegeWindow),
@@ -152,6 +170,9 @@ HMPPrivilegeTier CHMPPrivilegeTracker::GetTier(const CBLSPublicKey& pubkey, int 
         return HMPPrivilegeTier::UNKNOWN;
     }
 
+    // Compute the tier for this (pubkey, algo) at the current tip.
+    HMPPrivilegeTier tier = HMPPrivilegeTier::NEW;
+
     // Elder: solved >= effective threshold AND has seal participation.
     // The effective threshold is gated by consensus.nHMPSealAlgoFixHeight (v1.2.0):
     // pre-fork it returns the legacy nHMPMinBlocksSolved verbatim (preserving
@@ -165,20 +186,52 @@ HMPPrivilegeTier CHMPPrivilegeTracker::GetTier(const CBLSPublicKey& pubkey, int 
         // Check demotion (equivocation punishment)
         auto demIt = m_demotions[algo].find(pubkey);
         if (demIt != m_demotions[algo].end() && currentHeight < demIt->second) {
-            return HMPPrivilegeTier::UNKNOWN; // demoted
+            tier = HMPPrivilegeTier::UNKNOWN; // demoted
+        } else if (m_mnLookup && m_mnLookup->IsBroodNodeOperator(pubkey, pindex)) {
+            // BROOD: ELDER + active BroodNode operator
+            // Pass pindex so the lookup uses the deterministic MN list at this
+            // block rather than the (non-deterministic) chain tip.
+            tier = HMPPrivilegeTier::BROOD;
+        } else {
+            tier = HMPPrivilegeTier::ELDER;
         }
+    }
+    // else: NEW (past warmup period, but below Elder threshold)
 
-        // BROOD: ELDER + active BroodNode operator
-        // Pass pindex so the lookup uses the deterministic MN list at this
-        // block rather than the (non-deterministic) chain tip.
-        if (m_mnLookup && m_mnLookup->IsBroodNodeOperator(pubkey, pindex)) {
-            return HMPPrivilegeTier::BROOD;
+    // Operator-visibility: log NEW -> ELDER -> BROOD transitions on the canonical
+    // tip-view path (pindex == nullptr). Consensus paths pass a historical pindex
+    // and may legitimately disagree with the tip view (different MN list); those
+    // observations would generate spurious transitions, so we only cache and log
+    // when pindex is null. Local-node tier changes get a more prominent prefix
+    // so operators spot their own node's promotion in the log stream.
+    if (pindex == nullptr) {
+        auto cacheIt = m_lastTier[algo].find(pubkey);
+        if (cacheIt == m_lastTier[algo].end()) {
+            // First observation -- seed the cache without logging.
+            m_lastTier[algo][pubkey] = tier;
+        } else if (cacheIt->second != tier) {
+            const HMPPrivilegeTier prevTier = cacheIt->second;
+            const bool isLocalNode = g_hmp_identity && g_hmp_identity->IsValid() &&
+                                     pubkey == g_hmp_identity->GetPublicKey();
+            if (isLocalNode) {
+                LogPrintf("HMP: *** YOUR NODE *** tier %s -> %s on algo %s (height %d)\n",
+                          TierName(prevTier),
+                          TierName(tier),
+                          GetAlgoName(algo),
+                          currentHeight);
+            } else {
+                LogPrintf("HMP: signer %s... tier %s -> %s on algo %s (height %d)\n",
+                          pubkey.ToString().substr(0, 16),
+                          TierName(prevTier),
+                          TierName(tier),
+                          GetAlgoName(algo),
+                          currentHeight);
+            }
+            cacheIt->second = tier;
         }
-        return HMPPrivilegeTier::ELDER;
     }
 
-    // New: past warmup period
-    return HMPPrivilegeTier::NEW;
+    return tier;
 }
 
 uint32_t CHMPPrivilegeTracker::GetEffectiveWeight(const CBLSPublicKey& pubkey, int algo) const
@@ -373,6 +426,7 @@ void CHMPPrivilegeTracker::Clear()
     for (int a = 0; a < NUM_ALGOS; a++) {
         m_records[a].clear();
         m_demotions[a].clear();
+        m_lastTier[a].clear();
     }
     LogPrintf("HMP: privilege tracker cleared (spork toggle reset)\n");
 }

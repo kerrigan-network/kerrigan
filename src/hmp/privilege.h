@@ -114,6 +114,13 @@ private:
     // Per-algo privilege records: algo_id -> (pubkey -> record)
     std::map<CBLSPublicKey, CPrivilegeRecord> m_records[NUM_ALGOS] GUARDED_BY(cs);
 
+    // Per-algo last-observed privilege tier: algo_id -> (pubkey -> tier).
+    // Populated by GetTier() on the canonical tip-view path (pindex == nullptr)
+    // so we can emit a single log line on each NEW -> ELDER -> BROOD transition.
+    // Mutable because GetTier() is const but logically observes a state machine.
+    // Cleared by Clear() alongside the rest of the tracker state.
+    mutable std::map<CBLSPublicKey, HMPPrivilegeTier> m_lastTier[NUM_ALGOS] GUARDED_BY(cs);
+
     void RebuildFromWindow() EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Get the last N unique block solvers per algo from the extended window.
