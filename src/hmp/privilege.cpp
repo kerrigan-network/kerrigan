@@ -16,7 +16,8 @@ CHMPPrivilegeTracker::CHMPPrivilegeTracker(const Consensus::Params& params)
       m_minBlocksSolved(params.nHMPMinBlocksSolved),
       m_dominanceCatchFloor(params.nHMPDominanceCatchFloor),
       m_extendedWindowSize(params.nHMPDominanceCatchMaxLookback),
-      m_broodDemotionDuration(params.nHMPBroodDemotionDuration)
+      m_broodDemotionDuration(params.nHMPBroodDemotionDuration),
+      m_consensus(&params)
 {
 }
 
@@ -151,8 +152,16 @@ HMPPrivilegeTier CHMPPrivilegeTracker::GetTier(const CBLSPublicKey& pubkey, int 
         return HMPPrivilegeTier::UNKNOWN;
     }
 
-    // Elder: solved >= m_minBlocksSolved AND has seal participation
-    if (rec.blocks_solved >= m_minBlocksSolved && rec.seal_participations > 0) {
+    // Elder: solved >= effective threshold AND has seal participation.
+    // The effective threshold is gated by consensus.nHMPSealAlgoFixHeight (v1.2.0):
+    // pre-fork it returns the legacy nHMPMinBlocksSolved verbatim (preserving
+    // existing chain semantics); post-fork it returns the recalibrated value.
+    // When m_consensus is null (default-constructed tracker, test-only paths)
+    // we fall back to the captured m_minBlocksSolved.
+    const int effMinBlocks = (m_consensus != nullptr)
+        ? m_consensus->GetEffectiveMinBlocksSolved(currentHeight)
+        : m_minBlocksSolved;
+    if (rec.blocks_solved >= effMinBlocks && rec.seal_participations > 0) {
         // Check demotion (equivocation punishment)
         auto demIt = m_demotions[algo].find(pubkey);
         if (demIt != m_demotions[algo].end() && currentHeight < demIt->second) {
@@ -226,12 +235,17 @@ std::vector<CBLSPublicKey> CHMPPrivilegeTracker::GetElderSet(int algo) const
 
     int currentHeight = m_window.empty() ? -1 : m_window.back().height;
 
-    // Normal Elders: solved + sealed within the standard window
+    // Normal Elders: solved + sealed within the standard window.
+    // Threshold gated by consensus.nHMPSealAlgoFixHeight via GetEffectiveMinBlocksSolved
+    // so this query stays in lockstep with GetTier() across the v1.2.0 activation.
+    const int effMinBlocks = (m_consensus != nullptr)
+        ? m_consensus->GetEffectiveMinBlocksSolved(currentHeight)
+        : m_minBlocksSolved;
     std::set<CBLSPublicKey> elderSet;
     for (const auto& [pubkey, rec] : m_records[algo]) {
         if (rec.first_seen_height >= 0 &&
             (currentHeight - rec.first_seen_height) >= m_warmupBlocks &&
-            rec.blocks_solved >= m_minBlocksSolved &&
+            rec.blocks_solved >= effMinBlocks &&
             rec.seal_participations > 0) {
             result.push_back(pubkey);
             elderSet.insert(pubkey);

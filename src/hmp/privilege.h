@@ -87,10 +87,18 @@ private:
 
     int m_windowSize;   // from consensus params (default 100)
     int m_warmupBlocks; // from consensus params (default 10)
-    int m_minBlocksSolved; // from consensus params (default 1)
+    int m_minBlocksSolved; // from consensus params (default 1) -- legacy fallback
     int m_dominanceCatchFloor; // min unique pools per algo (default 6)
     int m_extendedWindowSize;  // max extended lookback (default 1000)
     int m_broodDemotionDuration; // blocks to stay demoted after equivocation (default 1000)
+
+    // Non-owning pointer to the chain's consensus params, captured at construction.
+    // Used by GetTier / GetElderSet to query GetEffectiveMinBlocksSolved(height) so
+    // the Elder threshold is gated by the v1.2.0 nHMPSealAlgoFixHeight activation.
+    // Lifetime is governed by the chainparams singleton (process-long); the default
+    // constructor leaves this null and falls back to m_minBlocksSolved verbatim,
+    // preserving existing test ergonomics.
+    const Consensus::Params* m_consensus{nullptr};
 
     const IMasternodeLookup* m_mnLookup{nullptr}; // non-owning, for BROOD tier queries
 
