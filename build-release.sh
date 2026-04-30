@@ -100,6 +100,15 @@ build_linux() {
     info "configure + build for $tag"
     make clean 2>/dev/null || true
     ./autogen.sh
+
+    # Strip build-tree paths from DWARF debug strings and Rust source refs so
+    # binaries do not leak the operator's home directory. Remaps $SRCDIR -> /build
+    # and cargo home -> /cargo in every compiled object.
+    local remap="-ffile-prefix-map=$SRCDIR=/build -fmacro-prefix-map=$SRCDIR=/build -fdebug-prefix-map=$SRCDIR=/build"
+    export CFLAGS="${CFLAGS:-} $remap"
+    export CXXFLAGS="${CXXFLAGS:-} $remap"
+    export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$SRCDIR=/build --remap-path-prefix=$HOME/.cargo=/cargo"
+
     CONFIG_SITE="$prefix/share/config.site" ./configure \
         --prefix="$prefix" \
         --disable-tests --disable-bench \
@@ -133,7 +142,7 @@ build_windows() {
     info "Windows build inside ubuntu:24.04 container"
     local src="$SRCDIR" rel="$RELEASE" ver="$VERSION"
 
-    docker run --rm \
+    docker run --rm --network host \
         -v "$src:$src" \
         -v "$rel:$rel" \
         -e SRC="$src" -e RELEASE="$rel" -e VERSION="$ver" -e JOBS="$JOBS" \
@@ -146,9 +155,16 @@ build_windows() {
             cd "$SRC"
             make clean 2>/dev/null || true
             ./autogen.sh
+
+            # Strip build-tree paths from DWARF debug strings and Rust source refs
+            REMAP="-ffile-prefix-map=$SRC=/build -fmacro-prefix-map=$SRC=/build -fdebug-prefix-map=$SRC=/build"
+            export CFLAGS="${CFLAGS:-} $REMAP"
+            export CXXFLAGS="${CXXFLAGS:-} $REMAP"
+            export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$SRC=/build --remap-path-prefix=$HOME/.cargo=/cargo"
+
             CONFIG_SITE="$SRC/depends/x86_64-w64-mingw32/share/config.site" ./configure \
                 --prefix=/ \
-                --disable-tests --disable-bench \
+                --disable-bench \
                 --disable-online-rust \
                 --without-libs
             make -j"$JOBS"
@@ -168,6 +184,11 @@ build_windows() {
 
             cd "$RELEASE"
             zip -r "kerrigan-$VERSION-win64.zip" "kerrigan-$VERSION-win64/"
+
+            cd "$SRC"
+            make deploy
+            test -f "kerrigan-$VERSION-win64-setup.exe" || { echo "missing installer"; exit 1; }
+            mv "kerrigan-$VERSION-win64-setup.exe" "$RELEASE/"
         '
     info "Produced $RELEASE/kerrigan-$VERSION-win64.zip"
 }
