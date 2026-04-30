@@ -24,6 +24,11 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <limits>
+
 BOOST_FIXTURE_TEST_SUITE(hmp_tests, BasicTestingSetup)
 
 // Helpers
@@ -2237,6 +2242,243 @@ BOOST_AUTO_TEST_CASE(seal_manager_get_share_count)
         BOOST_CHECK(HMPAccepted(manager.AddSealShare(share)));
         BOOST_CHECK_EQUAL(manager.GetShareCount(blockHash), static_cast<size_t>(i + 1));
     }
+}
+
+// ---------------------------------------------------------------------------
+// v1.2.0 HMP seal-algo fix + activation gate coverage
+//
+// These three cases exercise the consensus changes landed in:
+//   3f4f0c4  consensus: add nHMPSealAlgoFixHeight gate for v1.2.0 HMP fixes
+//   3bd2aab  validation: pass sealed block algo to HMP weight functions post-fork
+//   9ffb7a4  hmp: gate Elder threshold via GetEffectiveMinBlocksSolved for v1.2.0
+//
+// Background. The seal for block N+nHMPSealTrailingDepth is assembled by
+// signers privileged on block N (the SEALED block). Pre-fix, ConnectBlock
+// passed pindex->GetAlgo() (the SEAL-CONTAINING block's algo) to both
+// ComputeSealMultiplier and EvaluateNegativeProof, which filtered the
+// signers against the wrong per-algo Elder set. The result was a
+// no-coverage seal multiplier (10000) combined with a heavy negative-proof
+// penalty (1000), pinning every block's nSealWeight into the 1000-1999
+// broken range and effectively neutralising HMP fork-choice.
+//
+// We exercise the chain-weight + negative-proof helpers directly instead
+// of standing up a full ConnectBlock fixture: the validation.cpp gate is a
+// pure forwarding decision (which algo to pass to the two helpers), so
+// reproducing the pre/post-fork algo-selection mirrors the gate logic
+// without dragging in coinbase, MN list, or seal-manager state.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** Build a privilege tracker with two Elders on the seal-containing block's
+ *  algo (kawpow) and two Elders on the SEALED block's algo (eq200). The
+ *  SEALED-algo Elders are returned via out_eq200_pks so the caller can use
+ *  them as the seal signer set. blocks_solved is set to 3 for every Elder so
+ *  they qualify under both the legacy threshold (nHMPMinBlocksSolved=1) and
+ *  the post-fork recalibrated threshold (GetEffectiveMinBlocksSolved=3),
+ *  letting the same fixture serve pre-fork and post-fork assertions. */
+void BuildSealAlgoElders(CHMPPrivilegeTracker& tracker,
+                         std::vector<CBLSPublicKey>& out_eq200_pks)
+{
+    // Two Elders on KAWPOW (seal-containing block's algo, the buggy lookup target).
+    std::array<CBLSSecretKey, 2> kawpow_sks;
+    std::array<CBLSPublicKey, 2> kawpow_pks;
+    for (size_t i = 0; i < kawpow_sks.size(); i++) {
+        kawpow_sks[i].MakeNewKey();
+        kawpow_pks[i] = kawpow_sks[i].GetPublicKey();
+    }
+
+    // Two Elders on EQUIHASH_200 (sealed block's algo, the correct lookup target).
+    std::array<CBLSSecretKey, 2> eq200_sks;
+    std::array<CBLSPublicKey, 2> eq200_pks;
+    for (size_t i = 0; i < eq200_sks.size(); i++) {
+        eq200_sks[i].MakeNewKey();
+        eq200_pks[i] = eq200_sks[i].GetPublicKey();
+    }
+
+    // Each Elder solves 3 blocks on its algo (covers the legacy = 1 and the
+    // post-fork recalibrated = 3 thresholds) and signs at least one seal under
+    // its own algo so seal_participations > 0.
+    int h = 0;
+    for (size_t round = 0; round < 3; round++) {
+        for (size_t i = 0; i < kawpow_pks.size(); i++) {
+            tracker.BlockConnected(h++, ALGO_KAWPOW, kawpow_pks[i],
+                                   {kawpow_pks[i]},
+                                   {static_cast<uint8_t>(ALGO_KAWPOW)});
+        }
+        for (size_t i = 0; i < eq200_pks.size(); i++) {
+            tracker.BlockConnected(h++, ALGO_EQUIHASH_200, eq200_pks[i],
+                                   {eq200_pks[i]},
+                                   {static_cast<uint8_t>(ALGO_EQUIHASH_200)});
+        }
+    }
+
+    out_eq200_pks.assign(eq200_pks.begin(), eq200_pks.end());
+}
+
+/** Combine seal multiplier and negative-proof penalty exactly as
+ *  ConnectBlock does post-stage-4 (validation.cpp:3032 sw * penalty / 10000,
+ *  with both operands clamped to 20000). Returns the final nSealWeight. */
+uint64_t CombinedSealWeight(uint64_t sealMult, uint64_t penalty)
+{
+    sealMult = std::min(sealMult, uint64_t{20000});
+    penalty  = std::min(penalty,  uint64_t{20000});
+    return sealMult * penalty / 10000;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(ConnectBlock_SealAlgo_PreFork_RetainsBuggyBehavior)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    // Activation height set far in the future: pre-fork window for the entire
+    // synthetic chain. GetEffectiveMinBlocksSolved returns the legacy value.
+    Consensus::Params params;
+    params.nHMPWarmupBlocks    = 0;
+    params.nHMPPrivilegeWindow = 100;
+    params.nHMPMinBlocksSolved = 1;
+    params.nHMPSealTrailingDepth   = 2;
+    params.nHMPSealAlgoFixHeight   = std::numeric_limits<int>::max();
+
+    CHMPPrivilegeTracker tracker(params);
+    std::vector<CBLSPublicKey> eq200_pks;
+    BuildSealAlgoElders(tracker, eq200_pks);
+
+    // Seal signer set: the two EQUIHASH_200 Elders, each declaring its own
+    // (correct, sealed-block) algo. This is what seal_manager.cpp:522 binds
+    // into the BLS message: share.algoId is the SEALED block's algo.
+    std::vector<CBLSPublicKey> signers     = {eq200_pks[0], eq200_pks[1]};
+    std::vector<uint8_t>       signerAlgos = {static_cast<uint8_t>(ALGO_EQUIHASH_200),
+                                              static_cast<uint8_t>(ALGO_EQUIHASH_200)};
+
+    // Pre-fork code path: pass pindex->GetAlgo() = ALGO_KAWPOW (seal-containing
+    // block's algo) to both helpers. This is the bug.
+    const int blockAlgo = ALGO_KAWPOW;
+    uint64_t sealMult = ComputeSealMultiplier(signers, signerAlgos, blockAlgo, &tracker);
+    uint64_t penalty  = EvaluateNegativeProof  (signers, signerAlgos, blockAlgo, &tracker);
+    uint64_t nSealWeight = CombinedSealWeight(sealMult, penalty);
+
+    // ComputeSealMultiplier: KAWPOW Elder set (size 2), eldersPresent = 0
+    // (signers declare EQUIHASH_200), required threshold = 100% so baseMult
+    // collapses to the no-coverage floor 10000. Cross-algo bonus +500 for the
+    // EQUIHASH_200 Elder slice. Mult ~ 10500.
+    BOOST_CHECK_EQUAL(sealMult, 10500u);
+
+    // EvaluateNegativeProof: KAWPOW Elder set (size 2) requires 100% present;
+    // present = 0 (wrong algo) -> presentBps < 5000 -> heavy 0.1x penalty.
+    BOOST_CHECK_EQUAL(penalty, 1000u);
+
+    // Combined seal weight lands in the broken 1000-1999 range observed on
+    // mainnet since launch.
+    BOOST_CHECK_GE(nSealWeight, 1000u);
+    BOOST_CHECK_LT(nSealWeight, 2000u);
+}
+
+BOOST_AUTO_TEST_CASE(ConnectBlock_SealAlgo_PostFork_FiltersCorrectly)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    // Activation height = 1: every block in the synthetic chain is post-fork.
+    // GetEffectiveMinBlocksSolved returns 3, which BuildSealAlgoElders satisfies.
+    Consensus::Params params;
+    params.nHMPWarmupBlocks    = 0;
+    params.nHMPPrivilegeWindow = 100;
+    params.nHMPMinBlocksSolved = 1;
+    params.nHMPSealTrailingDepth   = 2;
+    params.nHMPSealAlgoFixHeight   = 1;
+
+    CHMPPrivilegeTracker tracker(params);
+    std::vector<CBLSPublicKey> eq200_pks;
+    BuildSealAlgoElders(tracker, eq200_pks);
+
+    std::vector<CBLSPublicKey> signers     = {eq200_pks[0], eq200_pks[1]};
+    std::vector<uint8_t>       signerAlgos = {static_cast<uint8_t>(ALGO_EQUIHASH_200),
+                                              static_cast<uint8_t>(ALGO_EQUIHASH_200)};
+
+    // Post-fork code path: pass pAncestor->GetAlgo() = ALGO_EQUIHASH_200 (sealed
+    // block's algo). The signers' declared algos now match the per-algo Elder
+    // set the helpers query.
+    const int sealedAlgo = ALGO_EQUIHASH_200;
+    uint64_t sealMult = ComputeSealMultiplier(signers, signerAlgos, sealedAlgo, &tracker);
+    uint64_t penalty  = EvaluateNegativeProof  (signers, signerAlgos, sealedAlgo, &tracker);
+    uint64_t nSealWeight = CombinedSealWeight(sealMult, penalty);
+
+    // Full coverage on EQUIHASH_200 Elder set (2 of 2 present) -> baseMult
+    // 15000 + 3000 = 18000. No cross-algo bonus (both signers are on the
+    // block algo). Mult = 18000.
+    BOOST_CHECK_EQUAL(sealMult, 18000u);
+
+    // All required Elders present, no mannequins -> neutral 10000.
+    BOOST_CHECK_EQUAL(penalty, 10000u);
+
+    // Combined seal weight sits well above 10000, restoring the positive HMP
+    // fork-choice signal.
+    BOOST_CHECK_GT(nSealWeight, 10000u);
+    BOOST_CHECK_EQUAL(nSealWeight, 18000u);
+}
+
+BOOST_AUTO_TEST_CASE(ConnectBlock_SealAlgo_HeightGate_TransitionsCorrectly)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    // Activation height between two synthetic block heights. The tracker is
+    // built with blocks_solved = 3 for every Elder so the GetEffectiveMinBlocksSolved
+    // step (1 -> 3) does not perturb the Elder set across the boundary; only
+    // the seal-algo selection should change the result.
+    constexpr int kFixHeight = 1000;
+    Consensus::Params params;
+    params.nHMPWarmupBlocks    = 0;
+    params.nHMPPrivilegeWindow = 100;
+    params.nHMPMinBlocksSolved = 1;
+    params.nHMPSealTrailingDepth   = 2;
+    params.nHMPSealAlgoFixHeight   = kFixHeight;
+
+    CHMPPrivilegeTracker tracker(params);
+    std::vector<CBLSPublicKey> eq200_pks;
+    BuildSealAlgoElders(tracker, eq200_pks);
+
+    std::vector<CBLSPublicKey> signers     = {eq200_pks[0], eq200_pks[1]};
+    std::vector<uint8_t>       signerAlgos = {static_cast<uint8_t>(ALGO_EQUIHASH_200),
+                                              static_cast<uint8_t>(ALGO_EQUIHASH_200)};
+
+    // Mirror validation.cpp's gate: pre-fork blocks pass pindex->GetAlgo()
+    // (KAWPOW), post-fork blocks pass pAncestor->GetAlgo() (EQUIHASH_200).
+    auto compute_seal_weight_at = [&](int blockHeight) -> uint64_t {
+        const bool postFork = (params.nHMPSealAlgoFixHeight > 0 &&
+                               blockHeight >= params.nHMPSealAlgoFixHeight);
+        const int chosenAlgo = postFork ? ALGO_EQUIHASH_200 : ALGO_KAWPOW;
+        uint64_t sm = ComputeSealMultiplier(signers, signerAlgos, chosenAlgo, &tracker);
+        uint64_t pn = EvaluateNegativeProof  (signers, signerAlgos, chosenAlgo, &tracker);
+        return CombinedSealWeight(sm, pn);
+    };
+
+    // Evaluate two blocks before the gate and three at-or-after. The transition
+    // is sharp at exactly kFixHeight (>=, not >), with no interpolation.
+    const uint64_t w_998  = compute_seal_weight_at(998);
+    const uint64_t w_999  = compute_seal_weight_at(999);
+    const uint64_t w_1000 = compute_seal_weight_at(1000);
+    const uint64_t w_1001 = compute_seal_weight_at(1001);
+    const uint64_t w_1002 = compute_seal_weight_at(1002);
+
+    // Pre-gate: buggy 1000-1999 range.
+    BOOST_CHECK_GE(w_998, 1000u);
+    BOOST_CHECK_LT(w_998, 2000u);
+    BOOST_CHECK_GE(w_999, 1000u);
+    BOOST_CHECK_LT(w_999, 2000u);
+
+    // At/post-gate: corrected weight strictly above 10000.
+    BOOST_CHECK_GT(w_1000, 10000u);
+    BOOST_CHECK_GT(w_1001, 10000u);
+    BOOST_CHECK_GT(w_1002, 10000u);
+
+    // Pre-block (999) is buggy, the activation block (1000) is fixed: confirm
+    // the transition is a step function, not a ramp.
+    BOOST_CHECK_LT(w_999, 2000u);
+    BOOST_CHECK_GT(w_1000, 10000u);
+    BOOST_CHECK_EQUAL(w_999,  w_998);   // pre-gate values agree
+    BOOST_CHECK_EQUAL(w_1000, w_1001);  // post-gate values agree
+    BOOST_CHECK_EQUAL(w_1001, w_1002);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
