@@ -245,6 +245,12 @@ public:
         // Groth16 proofs are Phase 2 (post-launch hard fork). Proofs are accepted
         // but never required until Phase 2 activates via a future hard fork.
         consensus.nHMPMandatoryProofHeight = 0;
+        // v1.2.0 hard fork: HMP seal-algo correction + Elder threshold recalibration.
+        // See doc/release-notes-v1.2.0.md and consensus/params.h for the full
+        // semantics. Pre-fork seal_weight has been pinned at 1000-1999 since launch
+        // because Elder filtering ran against the wrong algo; this height enables
+        // the corrected fork-choice rule across the network.
+        consensus.nHMPSealAlgoFixHeight = 53000;
         consensus.MinBIP9WarningHeight = 0;
         // Per-algo genesis powLimits -- permissive targets for chain bootstrapping.
         // These are intentionally easy so the first miner on each algo can produce blocks.
@@ -465,6 +471,10 @@ public:
         // Mandatory zk-SNARK proof height: 0 = never enforce.
         // Groth16 proofs are Phase 2 (post-launch hard fork).
         consensus.nHMPMandatoryProofHeight = 0;
+        // v1.2.0 HMP seal-algo + Elder threshold fork. Testnet has been retired
+        // for the v1.2.0 cycle; pin to INT_MAX as a safe default and revisit when
+        // testnet is revived (set this to a real height before bringing testnet up).
+        consensus.nHMPSealAlgoFixHeight = std::numeric_limits<int>::max();
         consensus.MinBIP9WarningHeight = 0;
         // Testnet powLimit: ~uint256(0) >> 1, very easy for CPU mining all algos.
         // Equihash BLAKE2b PoW hash varies per solution; with ~2^254 target, ~30% of
@@ -665,6 +675,9 @@ public:
         // Mandatory zk-SNARK proof height: 0 = never enforce.
         // Groth16 proofs are Phase 2 (post-launch hard fork).
         consensus.nHMPMandatoryProofHeight = 0;
+        // v1.2.0 HMP seal-algo + Elder threshold fork: active from genesis on
+        // devnet so ephemeral chains exercise the post-fork code path by default.
+        consensus.nHMPSealAlgoFixHeight = 1;
         consensus.MinBIP9WarningHeight = 2 + 2016; // withdrawals activation height + miner confirmation window
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on devnet; all algos use global powLimit
@@ -929,6 +942,10 @@ public:
         // Mandatory zk-SNARK proof height: 0 = never enforce.
         // Groth16 proofs are Phase 2 (post-launch hard fork).
         consensus.nHMPMandatoryProofHeight = 0;
+        // v1.2.0 HMP seal-algo + Elder threshold fork: active from genesis on
+        // regtest. Override per-test via -testactivationheight=hmp_seal_algo@N
+        // (see MaybeUpdateHeights in this file) for A/B coverage of the gate.
+        consensus.nHMPSealAlgoFixHeight = 1;
         consensus.MinBIP9WarningHeight = 0;
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on regtest; all algos use global powLimit

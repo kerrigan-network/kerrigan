@@ -180,9 +180,38 @@ struct Params {
     int nHMPDominanceCatchMaxLookback{1000}; // max extended lookback for dominance catch (~33hr)
     int nHMPCommitmentOffset{0};       // Phase 1 pubkey commitment offset (0=disabled, ~10 when enabled)
     int nHMPMandatoryProofHeight{0};   // Height after which empty zkProofs are rejected (0=never enforce)
+    /** v1.2.0 hard-fork activation height for the bundled HMP corrections.
+     *  When height >= nHMPSealAlgoFixHeight (and the field is > 0) two coupled
+     *  changes take effect together:
+     *    1. ConnectBlock passes the SEALED block's algo (pAncestor->GetAlgo()) to
+     *       ComputeSealMultiplier and EvaluateNegativeProof, instead of the
+     *       enclosing block's algo. Pre-fix this filtered Elder signers against
+     *       the wrong algo and capped seal_weight at 1000-1999.
+     *    2. The Elder-tier threshold (blocks_solved) is recalibrated via
+     *       GetEffectiveMinBlocksSolved() to allow Elders to form under the
+     *       observed multi-pool / multi-algo distribution.
+     *  0 = never activate (safe default). Set per-network in chainparams.cpp.
+     *  See doc/release-notes-v1.2.0.md for the full rationale. */
+    int nHMPSealAlgoFixHeight{0};
     int nHMPBroodDemotionDuration{1000}; // blocks to stay demoted after equivocation (~33hr)
     int nHMPBroodChainWeightBonus{300};  // bps bonus per BROOD signer's algo in seal multiplier
     static constexpr int MAX_COMMITMENTS_PER_BLOCK = 16;
+
+    /** Effective Elder-tier blocks_solved threshold at a given chain height.
+     *  Pre-v1.2.0 (height < nHMPSealAlgoFixHeight, or fix never scheduled):
+     *  returns nHMPMinBlocksSolved (legacy bug-compatible value).
+     *  Post-v1.2.0: returns 3, the recalibrated threshold that lets Elders form
+     *  under realistic multi-algo distribution.
+     *  Both call sites in privilege.cpp (GetTier, GetElderSet) MUST use this
+     *  helper so the two queries stay in lockstep across the activation. */
+    int GetEffectiveMinBlocksSolved(int height) const
+    {
+        if (nHMPSealAlgoFixHeight > 0 && height >= nHMPSealAlgoFixHeight) {
+            return 3;
+        }
+        return nHMPMinBlocksSolved;
+    }
+
     /** Don't warn about unknown BIP 9 activations below this height.
      * This prevents us from warning about the CSV and DIP activations. */
     int MinBIP9WarningHeight;
