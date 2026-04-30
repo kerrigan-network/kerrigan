@@ -226,6 +226,48 @@ static RPCHelpMan getsealstatus()
     };
 }
 
+static RPCHelpMan gethmpidentity()
+{
+    return RPCHelpMan{"gethmpidentity",
+        "Returns this daemon's HMP BLS public key (the identity used for seal signing).\n"
+        "\n"
+        "Operators registering a BroodNode via 'protx register_fund_evo' MUST pass the\n"
+        "value returned here as the operatorPubKey argument. Otherwise the daemon will\n"
+        "not recognize itself as a BroodNode (IsBroodNodeOperator() compares against the\n"
+        "key in hmp_identity.dat, not against any wallet-generated BLS key), seal sign\n"
+        "attempts will silently fail, and no Brood-tier privileges will be granted.\n"
+        "\n"
+        "The key is auto-generated on first daemon start and persisted to\n"
+        "<datadir>/hmp_identity.dat. This RPC is read-only and has no consensus impact.\n",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_HEX, "identity", "the local node's HMP BLS public key (48-byte hex), or null if uninitialized"},
+                {RPCResult::Type::BOOL, "valid", "true when hmp_identity.dat is loaded and the keypair is valid"},
+            }
+        },
+        RPCExamples{
+            HelpExampleCli("gethmpidentity", "")
+            + HelpExampleRpc("gethmpidentity", "")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+        {
+            UniValue result(UniValue::VOBJ);
+
+            if (g_hmp_identity && g_hmp_identity->IsValid()) {
+                result.pushKV("identity", g_hmp_identity->GetPublicKey().ToString());
+                result.pushKV("valid", true);
+            } else {
+                result.pushKV("identity", UniValue(UniValue::VNULL));
+                result.pushKV("valid", false);
+            }
+
+            return result;
+        }
+    };
+}
+
 static RPCHelpMan gethmpdiagnostics()
 {
     return RPCHelpMan{"gethmpdiagnostics",
@@ -393,6 +435,7 @@ void RegisterHMPRPCCommands(CRPCTable& t)
         {"hmp", &gethmpinfo},
         {"hmp", &gethmpprivilegedset},
         {"hmp", &getsealstatus},
+        {"hmp", &gethmpidentity},
         {"hmp", &gethmpdiagnostics},
     };
     for (const auto& c : commands) {
