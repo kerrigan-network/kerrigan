@@ -90,7 +90,7 @@ static CUpdatedBlock latestblock GUARDED_BY(cs_blockchange);
 extern void TxToJSON(const CTransaction& tx, const uint256 hashBlock, const CTxMemPool& mempool, const CChainState& active_chainstate, const chainlock::Chainlocks& chainlocks, const llmq::CInstantSendManager& isman, UniValue& entry, TxVerbosity verbosity = TxVerbosity::SHOW_DETAILS);
 
 /* Calculate the difficulty for a given block index.
- * Uses equihash diff1 (0x07ffff at shift 32) for equihash algos,
+ * Uses equihash diff1 (0x07ffff at shift 28) for equihash algos,
  * matching the Zcash/Komodo/Gemlink convention so difficulty values
  * are comparable across the equihash ecosystem.
  */

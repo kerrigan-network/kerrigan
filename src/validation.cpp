@@ -1664,16 +1664,19 @@ double ConvertBitsToDoubleEquihash(unsigned int nBits)
     unsigned int nMantissa = nBits & 0x00ffffff;
     if (nMantissa == 0) return 0.0;
 
-    // Equihash diff1 target: 0x0007ffff... (compact 0x2007ffff)
-    // Standard across Zcash, Komodo, Gemlink, Zero, etc.
+    // Equihash diff1 target: 0x0007ffff... (compact 0x1c07ffff).
+    // Standard across Zcash, Komodo, Gemlink, Zero, etc. -- shift 28
+    // in line with Zcash. Display-only: callers are getdifficulty,
+    // getblock, getblockchaininfo, getmininginfo and stats gauges; no
+    // consensus path consumes this value.
     double dDiff = (double)0x07ffff / (double)nMantissa;
 
-    while (nShift < 32)
+    while (nShift < 28)
     {
         dDiff *= 256.0;
         nShift++;
     }
-    while (nShift > 32)
+    while (nShift > 28)
     {
         dDiff /= 256.0;
         nShift--;
