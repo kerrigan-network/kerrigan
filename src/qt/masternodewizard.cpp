@@ -4,6 +4,7 @@
 
 #include <qt/masternodewizard.h>
 
+#include <chainparams.h>
 #include <interfaces/node.h>
 
 #include <qt/guiutil.h>
@@ -92,18 +93,27 @@ QWidget* MasternodeWizard::createPageType()
     layout->addWidget(title);
 
     m_radioRegular = new QRadioButton(tr("Regular Masternode (10,000 KRGN)"), page);
-    m_radioBrood = new QRadioButton(tr("BroodNode (40,000 KRGN) -- coming soon"), page);
+    m_radioBrood = new QRadioButton(tr("BroodNode (40,000 KRGN)"), page);
     m_radioRegular->setChecked(true);
-    m_radioBrood->setEnabled(false);
 
     layout->addWidget(m_radioRegular);
     layout->addWidget(m_radioBrood);
 
     auto* info = new QLabel(
-        tr("A <b>Regular Masternode</b> requires exactly 10,000 KRGN collateral."),
+        tr("A <b>Regular Masternode</b> requires exactly 10,000 KRGN collateral and "
+           "participates in InstantSend / ChainLocks consensus.<br/><br/>"
+           "A <b>BroodNode</b> requires exactly 40,000 KRGN collateral and additionally "
+           "runs a Platform (HMP/Evo) node providing extended services. BroodNodes need "
+           "Platform fields (Node ID, P2P port, HTTPS port) which can be configured on "
+           "the next pages or supplied later via <code>protx update_service_evo</code>."),
         page);
     info->setWordWrap(true);
     layout->addWidget(info);
+
+    // Toggle Platform-fields visibility on the Service page in response to type changes.
+    connect(m_radioBrood, &QRadioButton::toggled, this, [this](bool checked) {
+        if (m_groupPlatform) m_groupPlatform->setVisible(checked);
+    });
 
     layout->addStretch();
     return page;
@@ -237,6 +247,52 @@ QWidget* MasternodeWizard::createPageService()
     blsLayout->addWidget(secretWarning);
 
     layout->addWidget(blsGroup);
+
+    // --- Platform fields (BroodNode only) ---
+    m_groupPlatform = new QGroupBox(tr("Platform Fields (BroodNode only)"), page);
+    auto* platformLayout = new QVBoxLayout(m_groupPlatform);
+
+    auto* platformHint = new QLabel(
+        tr("BroodNodes run an additional Platform (HMP/Evo) node. The Platform Node ID is a "
+           "40-character hex string derived from your Platform P2P public key. Ports default "
+           "to the chain values shown below; leave them as-is unless your firewall requires "
+           "different ports."),
+        m_groupPlatform);
+    platformHint->setWordWrap(true);
+    platformLayout->addWidget(platformHint);
+
+    auto* platformForm = new QFormLayout;
+
+    m_editPlatformNodeID = new QLineEdit(m_groupPlatform);
+    m_editPlatformNodeID->setPlaceholderText(tr("e.g. f2dbd9b0a1f541a7c44d34a58674d0262f5feca5"));
+    auto* nodeIDValidator = new QRegularExpressionValidator(
+        QRegularExpression(R"(^[0-9a-fA-F]{40}$)"), m_editPlatformNodeID);
+    m_editPlatformNodeID->setValidator(nodeIDValidator);
+    platformForm->addRow(tr("Platform Node ID:"), m_editPlatformNodeID);
+
+    const uint16_t defaultP2P = Params().GetDefaultPlatformP2PPort();
+    const uint16_t defaultHTTP = Params().GetDefaultPlatformHTTPPort();
+
+    m_editPlatformP2PPort = new QLineEdit(QString::number(defaultP2P), m_groupPlatform);
+    m_editPlatformP2PPort->setMaximumWidth(80);
+    auto* p2pPortValidator = new QRegularExpressionValidator(
+        QRegularExpression(R"(^[1-9]\d{0,4}$)"), m_editPlatformP2PPort);
+    m_editPlatformP2PPort->setValidator(p2pPortValidator);
+    platformForm->addRow(tr("Platform P2P Port:"), m_editPlatformP2PPort);
+
+    m_editPlatformHTTPPort = new QLineEdit(QString::number(defaultHTTP), m_groupPlatform);
+    m_editPlatformHTTPPort->setMaximumWidth(80);
+    auto* httpPortValidator = new QRegularExpressionValidator(
+        QRegularExpression(R"(^[1-9]\d{0,4}$)"), m_editPlatformHTTPPort);
+    m_editPlatformHTTPPort->setValidator(httpPortValidator);
+    platformForm->addRow(tr("Platform HTTPS Port:"), m_editPlatformHTTPPort);
+
+    platformLayout->addLayout(platformForm);
+    layout->addWidget(m_groupPlatform);
+
+    // Hidden by default; createPageType()'s toggled() connection reveals it for BroodNode.
+    m_groupPlatform->setVisible(false);
+
     layout->addStretch();
 
     connect(m_btnGenerateBLS, &QPushButton::clicked, this, &MasternodeWizard::onGenerateBLSKeys);
@@ -406,6 +462,33 @@ bool MasternodeWizard::validateCurrentPage()
             QMessageBox::warning(this, tr("Missing BLS Key"),
                                  tr("Please generate or enter a BLS operator public key."));
             return false;
+        }
+        // BroodNode-only Platform fields
+        if (m_radioBrood && m_radioBrood->isChecked()) {
+            const QString nodeId = m_editPlatformNodeID->text().trimmed();
+            if (nodeId.isEmpty()) {
+                QMessageBox::warning(this, tr("Missing Platform Node ID"),
+                                     tr("BroodNode registration requires a 40-character hex "
+                                        "Platform Node ID derived from your Platform P2P public key."));
+                return false;
+            }
+            if (!m_editPlatformNodeID->hasAcceptableInput()) {
+                QMessageBox::warning(this, tr("Invalid Platform Node ID"),
+                                     tr("Platform Node ID must be exactly 40 hexadecimal characters."));
+                return false;
+            }
+            if (m_editPlatformP2PPort->text().trimmed().isEmpty()
+                || !m_editPlatformP2PPort->hasAcceptableInput()) {
+                QMessageBox::warning(this, tr("Invalid Platform P2P Port"),
+                                     tr("Please enter a valid Platform P2P port [1-65535]."));
+                return false;
+            }
+            if (m_editPlatformHTTPPort->text().trimmed().isEmpty()
+                || !m_editPlatformHTTPPort->hasAcceptableInput()) {
+                QMessageBox::warning(this, tr("Invalid Platform HTTPS Port"),
+                                     tr("Please enter a valid Platform HTTPS port [1-65535]."));
+                return false;
+            }
         }
         return true;
     }
@@ -601,16 +684,21 @@ void MasternodeWizard::buildReviewSummary()
                 "<td>" + value.toHtmlEscaped() + "</td></tr>";
     };
 
-    row(tr("Type"), m_radioRegular->isChecked() ? tr("Regular (10,000 KRGN)") : tr("BroodNode (40,000 KRGN)"));
+    const bool isBrood = m_radioBrood && m_radioBrood->isChecked();
+    row(tr("Type"), isBrood ? tr("BroodNode (40,000 KRGN)") : tr("Regular (10,000 KRGN)"));
 
     bool hasExisting = m_comboCollateral->currentIndex() >= 0
                        && m_comboCollateral->currentText().contains(":");
+    QString registrationMode;
     if (hasExisting) {
         row(tr("Collateral"), m_comboCollateral->currentText());
-        row(tr("Registration Mode"), tr("protx register (existing UTXO)"));
+        registrationMode = isBrood ? tr("protx register_evo (existing UTXO)")
+                                   : tr("protx register (existing UTXO)");
     } else {
-        row(tr("Registration Mode"), tr("protx register_fund (new collateral)"));
+        registrationMode = isBrood ? tr("protx register_fund_evo (new collateral)")
+                                   : tr("protx register_fund (new collateral)");
     }
+    row(tr("Registration Mode"), registrationMode);
 
     row(tr("Service"), m_editIP->text() + ":" + m_editPort->text());
     row(tr("Operator Public Key"), m_editOperatorPubKey->text());
@@ -618,6 +706,12 @@ void MasternodeWizard::buildReviewSummary()
     row(tr("Voting Address"), m_editVotingAddr->text());
     row(tr("Payout Address"), m_editPayoutAddr->text());
     row(tr("Operator Reward"), QString::number(m_spinOperatorReward->value()) + "%");
+
+    if (isBrood) {
+        row(tr("Platform Node ID"), m_editPlatformNodeID->text());
+        row(tr("Platform P2P Port"), m_editPlatformP2PPort->text());
+        row(tr("Platform HTTPS Port"), m_editPlatformHTTPPort->text());
+    }
 
     html += "</table>";
     html += "</body></html>";
@@ -663,8 +757,17 @@ void MasternodeWizard::onRegisterMasternode()
         // Derive collateral mode from actual combo state (not flag -- avoids back/forward desync)
         bool hasExistingCollateral = m_comboCollateral->currentIndex() >= 0
                                      && m_comboCollateral->currentText().contains(":");
+        const bool isBrood = m_radioBrood && m_radioBrood->isChecked();
+
+        // Pre-collect Platform fields when BroodNode (validated on Page 2 already).
+        // platformP2PAddrs / platformHTTPSAddrs accept a numeric port string and are then
+        // associated with the primary CORE_P2P service by ProcessNetInfoPlatform().
+        const std::string platformNodeId = isBrood ? m_editPlatformNodeID->text().trimmed().toStdString() : std::string{};
+        const std::string platformP2PPort = isBrood ? m_editPlatformP2PPort->text().trimmed().toStdString() : std::string{};
+        const std::string platformHTTPPort = isBrood ? m_editPlatformHTTPPort->text().trimmed().toStdString() : std::string{};
+
         if (hasExistingCollateral) {
-            // protx register -- use existing collateral UTXO
+            // protx register / register_evo -- use existing collateral UTXO
             QString collateralStr = m_comboCollateral->currentText();
             QStringList parts = collateralStr.split(":");
             if (parts.size() < 2) {
@@ -710,9 +813,14 @@ void MasternodeWizard::onRegisterMasternode()
             params.push_back(votingAddr.toStdString());
             params.push_back(operatorReward.toStdString());
             params.push_back(m_editPayoutAddr->text().toStdString());
+            if (isBrood) {
+                params.push_back(platformNodeId);              // platformNodeID
+                params.push_back(platformP2PPort);             // platformP2PAddrs (numeric port)
+                params.push_back(platformHTTPPort);            // platformHTTPSAddrs (numeric port)
+            }
             params.push_back(feeSourceAddr.toStdString());     // feeSourceAddress (NOT collateral)
         } else {
-            // protx register_fund -- subcommand is part of method name, NOT a param
+            // protx register_fund / register_fund_evo -- subcommand is part of method name
             params.push_back(m_editOwnerAddr->text().toStdString());  // collateralAddress
             params.push_back(addrArr);                                // coreP2PAddrs
             params.push_back(m_editOwnerAddr->text().toStdString());  // ownerAddress
@@ -720,10 +828,20 @@ void MasternodeWizard::onRegisterMasternode()
             params.push_back(votingAddr.toStdString());
             params.push_back(operatorReward.toStdString());
             params.push_back(m_editPayoutAddr->text().toStdString());
+            if (isBrood) {
+                params.push_back(platformNodeId);              // platformNodeID
+                params.push_back(platformP2PPort);             // platformP2PAddrs (numeric port)
+                params.push_back(platformHTTPPort);            // platformHTTPSAddrs (numeric port)
+            }
         }
 
-        // Method name includes subcommand: "protx register" or "protx register_fund"
-        std::string rpcMethod = hasExistingCollateral ? "protx register" : "protx register_fund";
+        // Method name includes subcommand. Route to Evo variant when BroodNode is selected.
+        std::string rpcMethod;
+        if (isBrood) {
+            rpcMethod = hasExistingCollateral ? "protx register_evo" : "protx register_fund_evo";
+        } else {
+            rpcMethod = hasExistingCollateral ? "protx register" : "protx register_fund";
+        }
         UniValue result = m_walletModel->node().executeRpc(rpcMethod, params, walletUri());
         QString txid;
         if (result.isStr()) {

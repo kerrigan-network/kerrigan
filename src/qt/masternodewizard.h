@@ -7,6 +7,7 @@
 
 #include <QComboBox>
 #include <QDialog>
+#include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -75,6 +76,12 @@ private:
     QLineEdit* m_editOperatorSecret{nullptr};
     QPushButton* m_btnToggleSecret{nullptr};
     QPushButton* m_btnCopySecret{nullptr};
+
+    // --- Page 2: Platform fields (BroodNode/Evo only, hidden for Regular) ---
+    QGroupBox* m_groupPlatform{nullptr};
+    QLineEdit* m_editPlatformNodeID{nullptr};
+    QLineEdit* m_editPlatformP2PPort{nullptr};
+    QLineEdit* m_editPlatformHTTPPort{nullptr};
 
     // --- Page 3: Addresses ---
     QLineEdit* m_editOwnerAddr{nullptr};
