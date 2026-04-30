@@ -2964,6 +2964,49 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                     // Skip nSealWeight recomputation during VerifyDB; persisted value
                     // is authoritative when the privilege tracker is stale.
                     if (!fVerifyOnly) {
+                        // v1.2.0 HMP seal-algo fix (gated on nHMPSealAlgoFixHeight).
+                        //
+                        // Pre-fork (legacy bug-compatible): both ComputeSealMultiplier
+                        // and EvaluateNegativeProof received pindex->GetAlgo(), i.e. the
+                        // ENCLOSING block's algo. The Elder set is per-algo, so this
+                        // filtered Elders against the wrong algo and capped seal_weight
+                        // at 1000-1999 across mainnet since launch (HMP effectively off).
+                        //
+                        // Post-fork: both functions receive the SEALED block's algo
+                        // (pAncestor->GetAlgo() at height - nHMPSealTrailingDepth). The
+                        // seal was assembled by signers privileged on the sealed block's
+                        // algo, so that is the algo whose Elder set must be queried.
+                        //
+                        // Critical invariant: ComputeSealMultiplier and
+                        // EvaluateNegativeProof MUST receive the SAME algo on every call.
+                        // Mismatching them (positive bonus vs. negative penalty filtering
+                        // against different Elder sets) would be incoherent and a worse
+                        // bug than the one being fixed.
+                        //
+                        // pAncestor is re-resolved here because the earlier resolution
+                        // at the top of the Stage 3+ block is scoped inside the
+                        // sealForAncestor.IsValid() branch and is not visible here.
+                        int nSealedAlgo = pindex->GetAlgo();
+                        if (hmpConsensus.nHMPSealAlgoFixHeight > 0 &&
+                            pindex->nHeight >= hmpConsensus.nHMPSealAlgoFixHeight) {
+                            const CBlockIndex* pSealedAncestor = pindex->GetAncestor(
+                                pindex->nHeight - hmpConsensus.nHMPSealTrailingDepth);
+                            if (pSealedAncestor != nullptr) {
+                                nSealedAlgo = pSealedAncestor->GetAlgo();
+                            } else {
+                                // Defensive: should be unreachable because the
+                                // bad-seal-wrong-ancestor check above already errors out
+                                // on null ancestor when sealForAncestor is valid. Fall
+                                // back to the enclosing-block algo to avoid a crash.
+                                LogPrintf("HMP: v1.2.0 algo-fix active at height %d but "
+                                          "GetAncestor(%d) returned null; falling back to "
+                                          "pindex->GetAlgo()=%d\n",
+                                          pindex->nHeight,
+                                          pindex->nHeight - hmpConsensus.nHMPSealTrailingDepth,
+                                          static_cast<int>(pindex->GetAlgo()));
+                            }
+                        }
+
                         // Require minimum signers for positive seal weight bonus.
                         // In Stage 4, single-signer blocks still receive negative proof
                         // evaluation below; they only bypass the positive multiplier here.
@@ -2971,7 +3014,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                             pindex->nSealWeight = 10000; // neutral, no positive seal benefit
                         } else {
                             pindex->nSealWeight = ComputeSealMultiplier(sealSignerPubKeys, sealSignerAlgos,
-                                                                        pindex->GetAlgo(), g_hmp_privilege.get(), pindex);
+                                                                        nSealedAlgo, g_hmp_privilege.get(), pindex);
                         }
 
                         // Stage 4 only: apply negative proof penalty.
@@ -2981,7 +3024,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                         if (nHMPStage >= 4) {
                             // Apply negative proof penalty even for empty/single-signer seals
                             uint64_t penalty = EvaluateNegativeProof(sealSignerPubKeys, sealSignerAlgos,
-                                                                      pindex->GetAlgo(), g_hmp_privilege.get());
+                                                                      nSealedAlgo, g_hmp_privilege.get());
                             // Clamp both operands to prevent overflow
                             penalty = std::min(penalty, uint64_t{20000});
                             uint64_t sw = std::min(pindex->nSealWeight, uint64_t{20000});
