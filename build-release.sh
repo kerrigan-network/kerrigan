@@ -127,6 +127,22 @@ build_linux() {
 
     "$strip_cmd" --strip-unneeded "$outdir/bin/"*
 
+    # Sanitize qt_prfxpath: Qt embeds the host_prefix path (built into binaries
+    # at qmake time, not affected by --remap-path-prefix). Rewrite the source
+    # directory portion to /build so binaries do not leak the operator home dir.
+    python3 -c "
+import os, sys
+src = sys.argv[1].encode()
+bindir = sys.argv[2]
+new = b'/build'
+pad = b'\\0' * (len(src) - len(new))
+for name in os.listdir(bindir):
+    p = os.path.join(bindir, name)
+    with open(p, 'rb') as f: data = f.read()
+    if src in data:
+        with open(p, 'wb') as f: f.write(data.replace(src, new + pad))
+" "$SRCDIR" "$outdir/bin"
+
     ( cd "$RELEASE" && tar -czf "kerrigan-$VERSION-$tag.tar.gz" "kerrigan-$VERSION-$tag/" )
     info "Produced $RELEASE/kerrigan-$VERSION-$tag.tar.gz"
 }
