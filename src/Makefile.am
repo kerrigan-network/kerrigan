@@ -153,7 +153,7 @@ RUST_ENV_VARS = \
   CXX="$(CXX)" \
   CXXFLAGS="$(CXXFLAGS)" \
   TERM=dumb \
-  RUSTFLAGS="-C relocation-model=pic -C overflow-checks=on"
+  RUSTFLAGS="$(RUSTFLAGS) -C relocation-model=pic -C overflow-checks=on"
 RUST_BUILD_OPTS = --release --manifest-path $(top_srcdir)/Cargo.toml --target $(RUST_TARGET)
 
 rust_verbose = $(rust_verbose_@AM_V@)
