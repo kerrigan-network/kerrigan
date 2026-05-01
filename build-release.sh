@@ -198,6 +198,23 @@ build_windows() {
 
             x86_64-w64-mingw32-strip "$out/"*.exe
 
+            # Sanitize qt_prfxpath: same fix as Linux post-strip. Qt embeds
+            # the host_prefix path at qmake time; this is a string literal,
+            # not reachable by --remap-path-prefix or -ffile-prefix-map.
+            cat > /tmp/sanitize_qtprfx.py <<"PYEOF"
+import os, sys
+src = sys.argv[1].encode()
+bindir = sys.argv[2]
+new = b"/build"
+pad = b"\0" * (len(src) - len(new))
+for name in os.listdir(bindir):
+    p = os.path.join(bindir, name)
+    with open(p, "rb") as f: data = f.read()
+    if src in data:
+        with open(p, "wb") as f: f.write(data.replace(src, new + pad))
+PYEOF
+            python3 /tmp/sanitize_qtprfx.py "$SRC" "$out"
+
             cd "$RELEASE"
             zip -r "kerrigan-$VERSION-win64.zip" "kerrigan-$VERSION-win64/"
 
