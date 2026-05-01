@@ -477,14 +477,16 @@ bool MasternodeWizard::validateCurrentPage()
                                      tr("Platform Node ID must be exactly 40 hexadecimal characters."));
                 return false;
             }
-            if (m_editPlatformP2PPort->text().trimmed().isEmpty()
-                || !m_editPlatformP2PPort->hasAcceptableInput()) {
+            bool p2pOk = false;
+            const int p2pPort = m_editPlatformP2PPort->text().trimmed().toInt(&p2pOk);
+            if (!p2pOk || p2pPort < 1 || p2pPort > 65535) {
                 QMessageBox::warning(this, tr("Invalid Platform P2P Port"),
                                      tr("Please enter a valid Platform P2P port [1-65535]."));
                 return false;
             }
-            if (m_editPlatformHTTPPort->text().trimmed().isEmpty()
-                || !m_editPlatformHTTPPort->hasAcceptableInput()) {
+            bool httpOk = false;
+            const int httpPort = m_editPlatformHTTPPort->text().trimmed().toInt(&httpOk);
+            if (!httpOk || httpPort < 1 || httpPort > 65535) {
                 QMessageBox::warning(this, tr("Invalid Platform HTTPS Port"),
                                      tr("Please enter a valid Platform HTTPS port [1-65535]."));
                 return false;

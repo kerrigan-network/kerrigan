@@ -46,9 +46,12 @@ bps versus the `10000` bps baseline.
 - A static, reachable IPv4 or IPv6 address for the masternode service.
 - Platform node credentials (`platformNodeID`, Platform P2P port,
   Platform HTTPS port). All three Platform fields are mandatory in the
-  v1.2.0 RPC schema even when Platform itself is not yet in use; a
-  placeholder 20-byte hex `platformNodeID` and ports `0 0` are
-  accepted by the registration RPC.
+  v1.2.0 RPC schema even when Platform itself is not yet in use. The
+  `platformNodeID` may be a placeholder 20-byte hex value, and the
+  ports must be valid TCP port numbers (1-65535); for pre-Platform
+  deployments any port that the daemon's firewall does not actually
+  open (e.g. the chain default) is acceptable, since the daemon does
+  not refuse registration for an unreachable port.
 
 ## Step 1 -- Get this daemon's HMP identity
 
