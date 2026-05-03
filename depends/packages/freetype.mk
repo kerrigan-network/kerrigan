@@ -7,6 +7,7 @@ $(package)_build_subdir=build
 
 define $(package)_set_vars
   $(package)_config_opts := -DCMAKE_BUILD_TYPE=None -DBUILD_SHARED_LIBS=TRUE
+  $(package)_config_opts += -DCMAKE_POLICY_VERSION_MINIMUM=3.5
   $(package)_config_opts += -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=TRUE -DCMAKE_DISABLE_FIND_PACKAGE_PNG=TRUE
   $(package)_config_opts += -DCMAKE_DISABLE_FIND_PACKAGE_HarfBuzz=TRUE -DCMAKE_DISABLE_FIND_PACKAGE_BZip2=TRUE
   $(package)_config_opts += -DCMAKE_DISABLE_FIND_PACKAGE_BrotliDec=TRUE
