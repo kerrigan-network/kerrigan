@@ -2481,4 +2481,361 @@ BOOST_AUTO_TEST_CASE(ConnectBlock_SealAlgo_HeightGate_TransitionsCorrectly)
     BOOST_CHECK_EQUAL(w_1001, w_1002);
 }
 
+// ---------------------------------------------------------------------------
+// v1.2.0 BROOD bonus stacking validation
+//
+// Three runtime rehearsals (regtest, devnet x2) failed to reach the BROOD-
+// active code path due to structurally different blockers (subsidy cap,
+// devnet-genesis treasury, dead-code CLI args). The arithmetic at
+// src/hmp/chain_weight.cpp:~114 (broodBonus = min(broodAlgos.size() * 300,
+// 1200)) had never executed under test. These six cases drive
+// ComputeSealMultiplier directly with a synthetic privilege tracker that
+// owns a faked IMasternodeLookup, exercising the addend at 1, 2, 3, and 4
+// unique BROOD algos plus the empty-set and clamped-at-max boundaries.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** Test-only IMasternodeLookup. Returns true for any pubkey registered via
+ *  AddBrood(). pindex is ignored -- BROOD tier promotion is purely a function
+ *  of (pubkey, MN-membership) on this fixture. */
+class FakeMNLookup : public IMasternodeLookup
+{
+public:
+    std::set<CBLSPublicKey> broodOps;
+    bool IsBroodNodeOperator(const CBLSPublicKey& operatorPubKey,
+                             const CBlockIndex* /*pindex*/) const override
+    {
+        return broodOps.count(operatorPubKey) > 0;
+    }
+    void AddBrood(const CBLSPublicKey& pk) { broodOps.insert(pk); }
+};
+
+/** Build a fresh CBLSSecretKey/CBLSPublicKey pair. */
+CBLSPublicKey FreshPubKey()
+{
+    CBLSSecretKey sk;
+    sk.MakeNewKey();
+    return sk.GetPublicKey();
+}
+
+/** Promote pk to ELDER on `algo` by recording one solved block + one seal
+ *  participation under the same algo. Caller advances `h` past the block
+ *  height used. With nHMPMinBlocksSolved=1 and nHMPWarmupBlocks=0 a single
+ *  call is sufficient for ELDER tier on the queried algo. */
+void MakeElderOn(CHMPPrivilegeTracker& tracker, const CBLSPublicKey& pk,
+                 int algo, int& h)
+{
+    tracker.BlockConnected(h++, algo, pk, {pk},
+                           {static_cast<uint8_t>(algo)});
+}
+
+/** Build a privilege tracker for BROOD-bonus tests. Configures a flat
+ *  warmup-free, blocks_solved=1 environment. The caller seeds Elders on the
+ *  block algo via MakeElderOn() and registers pubkeys with the FakeMNLookup
+ *  before they're declared as BroodNode signers. */
+void InitBroodTestParams(Consensus::Params& params)
+{
+    params.nHMPWarmupBlocks      = 0;
+    params.nHMPPrivilegeWindow   = 100;
+    params.nHMPMinBlocksSolved   = 1;
+    params.nHMPSealTrailingDepth = 2;
+    params.nHMPSealAlgoFixHeight = 0;   // legacy threshold (=1) for these tests
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(ComputeSealMultiplier_BROOD_singleAlgo_addsBaseBonus)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    Consensus::Params params;
+    InitBroodTestParams(params);
+    CHMPPrivilegeTracker tracker(params);
+    FakeMNLookup mn;
+    tracker.SetMasternodeLookup(&mn);
+
+    // Two X11 Elders, plus one X11 Elder who is also a BroodNode operator.
+    // elderCount(X11) = 3 -> requiredCount = ceil(3*66/100) = 2; full
+    // agreement (3 of 3 signers on X11) -> baseMult = 18000.
+    auto pkE1 = FreshPubKey();
+    auto pkE2 = FreshPubKey();
+    auto pkB1 = FreshPubKey();
+    mn.AddBrood(pkB1);
+
+    int h = 0;
+    MakeElderOn(tracker, pkE1, ALGO_X11, h);
+    MakeElderOn(tracker, pkE2, ALGO_X11, h);
+    MakeElderOn(tracker, pkB1, ALGO_X11, h);
+
+    // Sanity: tier bookkeeping is what we expect.
+    BOOST_CHECK(tracker.GetTier(pkE1, ALGO_X11) == HMPPrivilegeTier::ELDER);
+    BOOST_CHECK(tracker.GetTier(pkE2, ALGO_X11) == HMPPrivilegeTier::ELDER);
+    BOOST_CHECK(tracker.GetTier(pkB1, ALGO_X11) == HMPPrivilegeTier::BROOD);
+
+    std::vector<CBLSPublicKey> signers     = {pkE1, pkE2, pkB1};
+    std::vector<uint8_t>       signerAlgos = {static_cast<uint8_t>(ALGO_X11),
+                                              static_cast<uint8_t>(ALGO_X11),
+                                              static_cast<uint8_t>(ALGO_X11)};
+
+    uint64_t mult = ComputeSealMultiplier(signers, signerAlgos, ALGO_X11, &tracker);
+
+    // baseMult = 18000 (full coverage).
+    // elderAlgos = {X11}, after erase(X11) = {} -> crossAlgoBonus = 0.
+    // broodAlgos = {X11} -> broodBonus = 1 * 300 = 300.
+    // Total = 18300.
+    BOOST_CHECK_EQUAL(mult, 18300u);
+}
+
+BOOST_AUTO_TEST_CASE(ComputeSealMultiplier_BROOD_twoAlgos_stacksBonus)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    Consensus::Params params;
+    InitBroodTestParams(params);
+    CHMPPrivilegeTracker tracker(params);
+    FakeMNLookup mn;
+    tracker.SetMasternodeLookup(&mn);
+
+    // Block algo = X11. Two X11 Elders for full coverage; one X11 Elder is also
+    // a BroodNode (broodAlgos += X11). Plus one KAWPOW Elder/BroodNode signing
+    // on KAWPOW (broodAlgos += KAWPOW). Cross-algo bonus picks up KAWPOW.
+    auto pkE1 = FreshPubKey();
+    auto pkE2 = FreshPubKey();
+    auto pkBX = FreshPubKey();
+    auto pkBK = FreshPubKey();
+    mn.AddBrood(pkBX);
+    mn.AddBrood(pkBK);
+
+    int h = 0;
+    MakeElderOn(tracker, pkE1, ALGO_X11,    h);
+    MakeElderOn(tracker, pkE2, ALGO_X11,    h);
+    MakeElderOn(tracker, pkBX, ALGO_X11,    h);
+    MakeElderOn(tracker, pkBK, ALGO_KAWPOW, h);
+
+    BOOST_CHECK(tracker.GetTier(pkBX, ALGO_X11)    == HMPPrivilegeTier::BROOD);
+    BOOST_CHECK(tracker.GetTier(pkBK, ALGO_KAWPOW) == HMPPrivilegeTier::BROOD);
+
+    std::vector<CBLSPublicKey> signers     = {pkE1, pkE2, pkBX, pkBK};
+    std::vector<uint8_t>       signerAlgos = {static_cast<uint8_t>(ALGO_X11),
+                                              static_cast<uint8_t>(ALGO_X11),
+                                              static_cast<uint8_t>(ALGO_X11),
+                                              static_cast<uint8_t>(ALGO_KAWPOW)};
+
+    uint64_t mult = ComputeSealMultiplier(signers, signerAlgos, ALGO_X11, &tracker);
+
+    // baseMult = 18000 (3 of 3 X11 Elders present on the X11 elder set).
+    // elderAlgos = {X11, KAWPOW}, after erase(X11) = {KAWPOW} -> +500 cross.
+    // broodAlgos = {X11, KAWPOW} -> 2 * 300 = 600.
+    // Total = 18000 + 500 + 600 = 19100.
+    BOOST_CHECK_EQUAL(mult, 19100u);
+}
+
+BOOST_AUTO_TEST_CASE(ComputeSealMultiplier_BROOD_threeAlgos_stacksBonus)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    Consensus::Params params;
+    InitBroodTestParams(params);
+    CHMPPrivilegeTracker tracker(params);
+    FakeMNLookup mn;
+    tracker.SetMasternodeLookup(&mn);
+
+    // Three BROOD algos: X11 (block algo) + KAWPOW + EQUIHASH_200.
+    auto pkE1 = FreshPubKey();
+    auto pkE2 = FreshPubKey();
+    auto pkBX = FreshPubKey();
+    auto pkBK = FreshPubKey();
+    auto pkBE = FreshPubKey();
+    mn.AddBrood(pkBX);
+    mn.AddBrood(pkBK);
+    mn.AddBrood(pkBE);
+
+    int h = 0;
+    MakeElderOn(tracker, pkE1, ALGO_X11,          h);
+    MakeElderOn(tracker, pkE2, ALGO_X11,          h);
+    MakeElderOn(tracker, pkBX, ALGO_X11,          h);
+    MakeElderOn(tracker, pkBK, ALGO_KAWPOW,       h);
+    MakeElderOn(tracker, pkBE, ALGO_EQUIHASH_200, h);
+
+    std::vector<CBLSPublicKey> signers = {pkE1, pkE2, pkBX, pkBK, pkBE};
+    std::vector<uint8_t>       signerAlgos = {
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_KAWPOW),
+        static_cast<uint8_t>(ALGO_EQUIHASH_200),
+    };
+
+    uint64_t mult = ComputeSealMultiplier(signers, signerAlgos, ALGO_X11, &tracker);
+
+    // baseMult = 18000.
+    // elderAlgos = {X11, KAWPOW, EQ200}, after erase(X11) = {KAWPOW, EQ200}
+    //   -> 2 * 500 = 1000 cross-algo bonus.
+    // broodAlgos = {X11, KAWPOW, EQ200} -> 3 * 300 = 900.
+    // Total = 18000 + 1000 + 900 = 19900.
+    BOOST_CHECK_EQUAL(mult, 19900u);
+}
+
+BOOST_AUTO_TEST_CASE(ComputeSealMultiplier_BROOD_fourAlgos_capsAt1200)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    Consensus::Params params;
+    InitBroodTestParams(params);
+    CHMPPrivilegeTracker tracker(params);
+    FakeMNLookup mn;
+    tracker.SetMasternodeLookup(&mn);
+
+    // Four BROOD algos = NUM_ALGOS. broodAlgos.size() * 300 = 1200, exactly at
+    // the std::min cap. Confirms the cap behavior is correct at exactly 4
+    // (since NUM_ALGOS = 4, we cannot exceed it; the cap is exact, not
+    // strict-greater). To keep the per-algo Elder set on X11 stable (size 3)
+    // we still use two non-BROOD X11 Elders + the BROOD X11 Elder.
+    auto pkE1 = FreshPubKey();
+    auto pkE2 = FreshPubKey();
+    auto pkBX = FreshPubKey();
+    auto pkBK = FreshPubKey();
+    auto pkBE2 = FreshPubKey();
+    auto pkBE1 = FreshPubKey();
+    mn.AddBrood(pkBX);
+    mn.AddBrood(pkBK);
+    mn.AddBrood(pkBE2);
+    mn.AddBrood(pkBE1);
+
+    int h = 0;
+    MakeElderOn(tracker, pkE1,  ALGO_X11,          h);
+    MakeElderOn(tracker, pkE2,  ALGO_X11,          h);
+    MakeElderOn(tracker, pkBX,  ALGO_X11,          h);
+    MakeElderOn(tracker, pkBK,  ALGO_KAWPOW,       h);
+    MakeElderOn(tracker, pkBE2, ALGO_EQUIHASH_200, h);
+    MakeElderOn(tracker, pkBE1, ALGO_EQUIHASH_192, h);
+
+    std::vector<CBLSPublicKey> signers = {pkE1, pkE2, pkBX, pkBK, pkBE2, pkBE1};
+    std::vector<uint8_t>       signerAlgos = {
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_KAWPOW),
+        static_cast<uint8_t>(ALGO_EQUIHASH_200),
+        static_cast<uint8_t>(ALGO_EQUIHASH_192),
+    };
+
+    uint64_t mult = ComputeSealMultiplier(signers, signerAlgos, ALGO_X11, &tracker);
+
+    // baseMult = 18000.
+    // elderAlgos = {X11, KAWPOW, EQ200, EQ192}, after erase(X11) =
+    //   {KAWPOW, EQ200, EQ192} -> 3 * 500 = 1500 cross-algo bonus
+    //   (cap = 1500, exactly).
+    // broodAlgos = {X11, KAWPOW, EQ200, EQ192} -> min(4 * 300, 1200) = 1200
+    //   (cap, exact).
+    // Total = 18000 + 1500 + 1200 = 20700.
+    BOOST_CHECK_EQUAL(mult, 20700u);
+
+    // Confirm the brood addend is a saturating min: dropping one algo should
+    // produce a strictly smaller bonus, demonstrating the cap is tight.
+    std::vector<CBLSPublicKey> signers3 = {pkE1, pkE2, pkBX, pkBK, pkBE2};
+    std::vector<uint8_t>       signerAlgos3 = {
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_KAWPOW),
+        static_cast<uint8_t>(ALGO_EQUIHASH_200),
+    };
+    uint64_t mult3 = ComputeSealMultiplier(signers3, signerAlgos3, ALGO_X11, &tracker);
+    // 18000 + 1000 (2 cross-algo) + 900 (3 brood) = 19900.
+    BOOST_CHECK_EQUAL(mult3, 19900u);
+    BOOST_CHECK_LT(mult3, mult);
+}
+
+BOOST_AUTO_TEST_CASE(ComputeSealMultiplier_BROOD_clampedAtMax)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    Consensus::Params params;
+    InitBroodTestParams(params);
+    CHMPPrivilegeTracker tracker(params);
+    FakeMNLookup mn;
+    tracker.SetMasternodeLookup(&mn);
+
+    // Same fixture as the four-algo cap test: 18000 base + 1500 cross + 1200
+    // brood = 20700 raw. CombinedSealWeight clamps both operands to 20000
+    // before multiplying, mirroring validation.cpp:3032's pre-multiply clamp.
+    // With a neutral negative-proof penalty of 10000 the final nSealWeight
+    // saturates at exactly 20000.
+    auto pkE1 = FreshPubKey();
+    auto pkE2 = FreshPubKey();
+    auto pkBX = FreshPubKey();
+    auto pkBK = FreshPubKey();
+    auto pkBE2 = FreshPubKey();
+    auto pkBE1 = FreshPubKey();
+    mn.AddBrood(pkBX);
+    mn.AddBrood(pkBK);
+    mn.AddBrood(pkBE2);
+    mn.AddBrood(pkBE1);
+
+    int h = 0;
+    MakeElderOn(tracker, pkE1,  ALGO_X11,          h);
+    MakeElderOn(tracker, pkE2,  ALGO_X11,          h);
+    MakeElderOn(tracker, pkBX,  ALGO_X11,          h);
+    MakeElderOn(tracker, pkBK,  ALGO_KAWPOW,       h);
+    MakeElderOn(tracker, pkBE2, ALGO_EQUIHASH_200, h);
+    MakeElderOn(tracker, pkBE1, ALGO_EQUIHASH_192, h);
+
+    std::vector<CBLSPublicKey> signers = {pkE1, pkE2, pkBX, pkBK, pkBE2, pkBE1};
+    std::vector<uint8_t>       signerAlgos = {
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_X11),
+        static_cast<uint8_t>(ALGO_KAWPOW),
+        static_cast<uint8_t>(ALGO_EQUIHASH_200),
+        static_cast<uint8_t>(ALGO_EQUIHASH_192),
+    };
+
+    uint64_t rawMult = ComputeSealMultiplier(signers, signerAlgos, ALGO_X11, &tracker);
+    BOOST_CHECK_EQUAL(rawMult, 20700u);
+
+    // ConnectBlock combines mult * penalty / 10000 with both operands clamped
+    // to 20000 first. With penalty = 10000 (no negative proof), the final
+    // weight is clamp(20700) = 20000.
+    uint64_t finalWeight = CombinedSealWeight(rawMult, 10000u);
+    BOOST_CHECK_EQUAL(finalWeight, 20000u);
+}
+
+BOOST_AUTO_TEST_CASE(ComputeSealMultiplier_BROOD_emptyBroodAlgos_noBonus)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    Consensus::Params params;
+    InitBroodTestParams(params);
+    CHMPPrivilegeTracker tracker(params);
+    FakeMNLookup mn;  // no broods registered
+    tracker.SetMasternodeLookup(&mn);
+
+    // Two X11 Elders, no BroodNodes anywhere. broodAlgos stays empty, so the
+    // brood addend MUST be exactly 0 -- this is the regression guard against
+    // any future change that turns the bonus into "always at least N bps".
+    auto pkE1 = FreshPubKey();
+    auto pkE2 = FreshPubKey();
+
+    int h = 0;
+    MakeElderOn(tracker, pkE1, ALGO_X11, h);
+    MakeElderOn(tracker, pkE2, ALGO_X11, h);
+
+    BOOST_CHECK(tracker.GetTier(pkE1, ALGO_X11) == HMPPrivilegeTier::ELDER);
+    BOOST_CHECK(tracker.GetTier(pkE2, ALGO_X11) == HMPPrivilegeTier::ELDER);
+
+    std::vector<CBLSPublicKey> signers     = {pkE1, pkE2};
+    std::vector<uint8_t>       signerAlgos = {static_cast<uint8_t>(ALGO_X11),
+                                              static_cast<uint8_t>(ALGO_X11)};
+
+    uint64_t mult = ComputeSealMultiplier(signers, signerAlgos, ALGO_X11, &tracker);
+
+    // elderCount(X11) = 2; full coverage 2 of 2 -> baseMult = 15000 + 3000 = 18000.
+    // elderAlgos = {X11}, after erase = {} -> cross = 0.
+    // broodAlgos = {} -> brood = 0.
+    // Total = 18000 (pre-BROOD baseline preserved).
+    BOOST_CHECK_EQUAL(mult, 18000u);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
