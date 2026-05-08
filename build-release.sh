@@ -137,7 +137,7 @@ bindir = sys.argv[2]
 new = b'/build'
 if len(src) < len(new):
     sys.exit('FATAL: SRCDIR (%d bytes) must be at least %d bytes for in-place rewrite' % (len(src), len(new)))
-pad = b'\\0' * (len(src) - len(new))
+pad = b'x' * (len(src) - len(new))
 for name in os.listdir(bindir):
     p = os.path.join(bindir, name)
     with open(p, 'rb') as f: data = f.read()
@@ -209,7 +209,7 @@ src_path = sys.argv[1].encode()
 new = b"/build"
 if len(src_path) < len(new):
     sys.exit("FATAL: SRC (%d bytes) must be at least %d bytes for in-place rewrite" % (len(src_path), len(new)))
-pad = b"\0" * (len(src_path) - len(new))
+pad = b"x" * (len(src_path) - len(new))
 for f in sys.argv[2:]:
     with open(f, "rb") as fh: data = fh.read()
     if src_path in data:
