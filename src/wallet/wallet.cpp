@@ -2089,6 +2089,11 @@ void CWallet::blockDisconnected(const CBlock& block, int height)
     // Rewind Sapling shielded state for the disconnected block.
     if (!m_sapling_key_manager.IsEmpty()) {
         m_sapling_key_manager.RewindBlock(disconnect_height, block, &batch);
+        // Re-arm the F1-F5 self-heal: RewindBlock only clears witnesses for notes
+        // confirmed at-or-above the disconnected height. Notes below keep stored
+        // witnesses with the disconnected blocks leaves baked in, so the next
+        // updatedBlockTip must run DetectStaleWitnesses to detect and rebuild.
+        m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
     }
 
     // reset cache to make sure no longer mature coins are excluded
