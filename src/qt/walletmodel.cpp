@@ -442,7 +442,13 @@ bool WalletModel::isSaplingAvailable() const
 QString WalletModel::getNewSaplingAddress()
 {
     try {
-        return QString::fromStdString(m_wallet->getNewSaplingAddress());
+        QString address = QString::fromStdString(m_wallet->getNewSaplingAddress());
+        // z-addresses bypass the transparent address book, so push the entry
+        // into the Qt list cache directly (no NotifyAddressBookChanged fires).
+        if (addressTableModel && !address.isEmpty()) {
+            addressTableModel->notifyShieldedAddressAdded(address);
+        }
+        return address;
     } catch (const std::exception& e) {
         Q_EMIT message(tr("Shielded Address"), QString::fromStdString(e.what()),
                      CClientUIInterface::MSG_ERROR);

@@ -156,6 +156,17 @@ public:
         }
     }
 
+    void addShieldedRow(const QString &address)
+    {
+        auto lower = std::lower_bound(cachedAddressTable.begin(), cachedAddressTable.end(),
+                                      address, AddressTableEntryLessThan());
+        if (lower != cachedAddressTable.end() && lower->address == address) return; // dedupe
+        int lowerIndex = (lower - cachedAddressTable.begin());
+        parent->beginInsertRows(QModelIndex(), lowerIndex, lowerIndex);
+        cachedAddressTable.insert(lowerIndex, AddressTableEntry(
+            AddressTableEntry::ShieldedReceiving, QString("(shielded)"), address));
+        parent->endInsertRows();
+    }
     int size()
     {
         return cachedAddressTable.size();
@@ -352,6 +363,12 @@ void AddressTableModel::updateEntry(const QString &address,
 {
     // Update address book model from Kerrigan core
     priv->updateEntry(address, label, isMine, purpose, status);
+}
+
+void AddressTableModel::notifyShieldedAddressAdded(const QString &address)
+{
+    if (address.isEmpty()) return;
+    priv->addShieldedRow(address);
 }
 
 QString AddressTableModel::addRow(const QString &type, const QString &label, const QString &address)

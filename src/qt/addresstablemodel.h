@@ -100,6 +100,11 @@ public Q_SLOTS:
      */
     void updateEntry(const QString &address, const QString &label, bool isMine, const QString &purpose, int status);
 
+    /* Insert a newly-generated Sapling shielded address into the cached list
+     * (z-addresses bypass NotifyAddressBookChanged so the list won't update on
+     * its own). */
+    void notifyShieldedAddressAdded(const QString &address);
+
     friend class AddressTablePriv;
 };
 
