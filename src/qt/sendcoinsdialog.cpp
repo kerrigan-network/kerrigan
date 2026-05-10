@@ -519,16 +519,31 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
         }
         fromAddress = QString::fromStdString(bestAddr);
     } else {
-        // No shielded funds (or no z-addrs), use transparent address for t->z
-        auto walletAddrs = model->wallet().getAddresses();
-        if (!walletAddrs.empty()) {
-            fromAddress = QString::fromStdString(EncodeDestination(walletAddrs[0].dest));
-        } else {
+        // No shielded funds: pick our own transparent receive address with the
+        // highest spendable UTXO sum. getAddresses() also returns purpose="send"
+        // entries; blindly picking [0] often hits one whose script matches no
+        // UTXOs, sourcing zero coins and throwing "Insufficient transparent funds".
+        auto coinsByDest = model->wallet().listCoins();
+        CTxDestination bestDest;
+        CAmount bestBal = -1;
+        for (const auto& a : model->wallet().getAddresses()) {
+            if (a.is_mine == wallet::ISMINE_NO || a.purpose != "receive") continue;
+            CAmount bal = 0;
+            auto it = coinsByDest.find(a.dest);
+            if (it != coinsByDest.end()) {
+                for (const auto& [op, wtxout] : it->second) {
+                    if (wtxout.depth_in_main_chain >= 1 && !wtxout.is_spent) bal += wtxout.txout.nValue;
+                }
+            }
+            if (bal > bestBal) { bestBal = bal; bestDest = a.dest; }
+        }
+        if (bestBal < 0 || !IsValidDestination(bestDest)) {
             QMessageBox::critical(this, tr("Send Shielded"),
-                tr("No addresses available to send from."));
+                tr("No spendable transparent receive address available to send from."));
             fNewRecipientAllowed = true;
             return;
         }
+        fromAddress = QString::fromStdString(EncodeDestination(bestDest));
     }
 
     QList<QPair<QString, CAmount>> shieldedRecipients;
