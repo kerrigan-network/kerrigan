@@ -716,6 +716,13 @@ public:
     DisconnectResult DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, bool fVerifyOnly = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool ConnectBlock(const CBlock& block, BlockValidationState& state, CBlockIndex* pindex, CCoinsViewCache& view, bool fJustCheck = false, bool fVerifyOnly = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Deterministic taint-root freeze: ensure g_taint_set is computed and valid
+     *  for enforcing a block at @p enforce_height (>= nFreezeActivationHeight) on
+     *  the active chain, recomputing from the canonical chain after a reorg.
+     *  Returns false only on an unrecoverable block-read error (fail-closed).
+     *  See policy/outpoint_blacklist.h and the definition in validation.cpp. */
+    bool EnsureTaintSetComputed(int enforce_height) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     // Apply the effects of a block disconnection on the UTXO set.
     bool DisconnectTip(BlockValidationState& state, DisconnectedBlockTransactions* disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
 

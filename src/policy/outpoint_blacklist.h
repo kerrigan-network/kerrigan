@@ -306,13 +306,14 @@ public:
     }
 
     /**
-     * @brief Adopt an externally-built set (unit tests only).
+     * @brief Adopt a freshly-computed set + its activation height + anchor hash.
      *
-     * Lets a test inject a synthetic frozen set + anchor without a real chain.
-     * Production code uses the chain-walking path, not this. Caller MUST hold
-     * cs_main (or be single-threaded, as in unit tests).
+     * Used by the production chain-walk (CChainState::EnsureTaintSetComputed) to
+     * publish a recomputed set, and by unit tests to inject a synthetic one.
+     * Replaces any prior contents atomically from the caller's view. Caller MUST
+     * hold cs_main (or be single-threaded, as in unit tests).
      */
-    void SetForTest(std::set<COutPoint> outpoints, int height, const uint256& anchor)
+    void Adopt(std::set<COutPoint> outpoints, int height, const uint256& anchor)
     {
         tainted_ = std::move(outpoints);
         computed_ = true;

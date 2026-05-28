@@ -25,6 +25,7 @@
 #include <node/blockstorage.h>
 #include <node/interface_ui.h>
 #include <node/utxo_snapshot.h>
+#include <policy/outpoint_blacklist.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <pow.h>
@@ -1025,6 +1026,64 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                         "bad-growth-escrow-spend",
                         "escrow spends must be included directly in blocks after governance approval");
                 }
+            }
+        }
+    }
+
+    // Deterministic taint-root freeze (relay side). Once the next block would be
+    // at/after the activation height H, refuse mempool entry to any tx that spends
+    // a frozen outpoint or a coin paying the seed drain script -- it could never be
+    // mined under the consensus rule above anyway, so keep it out of the mempool.
+    // Default-inert when nFreezeActivationHeight == 0. The set is computed lazily
+    // by the ConnectBlock path; if it is not yet computed (e.g. before the chain
+    // reaches H), the outpoint membership test is simply empty -- we still apply
+    // the live drain-script check, which is conservative.
+    {
+        const int H = chainparams.GetConsensus().nFreezeActivationHeight;
+        const int next_height = m_active_chainstate.m_chain.Height() + 1;
+        if (H > 0 && next_height >= H) {
+            static const CScript drainScript = [] {
+                const auto b = ParseHex(freeze_seed::DRAIN_SCRIPT_HEX);
+                return CScript(b.begin(), b.end());
+            }();
+            for (const auto& txin : tx.vin) {
+                bool frozen = g_taint_set.Contains(txin.prevout);
+                if (!frozen) {
+                    const Coin& coin = m_view.AccessCoin(txin.prevout);
+                    frozen = !coin.IsSpent() && coin.out.scriptPubKey == drainScript;
+                }
+                if (frozen) {
+                    LogPrintf("Taint freeze: rejecting mempool tx %s (spends frozen outpoint %s)\n",
+                              tx.GetHash().ToString(), txin.prevout.ToStringShort());
+                    return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                        "frozen-outpoint-spend",
+                        "transaction spends a frozen (tainted) outpoint");
+                }
+            }
+        }
+    }
+
+    // Outpoint blacklist (Layer 1, MANUAL relay/policy): if this node operator has
+    // configured a freeze list (-blacklistoutpoints / -blacklistaddr), refuse
+    // mempool entry to any tx that spends a listed outpoint or script. NON-consensus:
+    // the node simply declines to relay/mine. Default OFF (IsActive() == false on an
+    // un-configured node). See policy/outpoint_blacklist.h.
+    if (g_outpoint_blacklist.IsActive()) {
+        for (const auto& txin : tx.vin) {
+            if (g_outpoint_blacklist.ContainsOutpoint(txin.prevout)) {
+                LogPrintf("Outpoint blacklist: rejecting mempool tx %s (spends frozen outpoint %s)\n",
+                          tx.GetHash().ToString(), txin.prevout.ToStringShort());
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                    "blacklisted-outpoint-spend",
+                    "transaction spends a blacklisted (frozen) outpoint");
+            }
+            const Coin& coin = m_view.AccessCoin(txin.prevout);
+            if (!coin.IsSpent() && g_outpoint_blacklist.ContainsScript(coin.out.scriptPubKey)) {
+                LogPrintf("Outpoint blacklist: rejecting mempool tx %s (spends frozen script via %s)\n",
+                          tx.GetHash().ToString(), txin.prevout.ToStringShort());
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                    "blacklisted-script-spend",
+                    "transaction spends an output paying a blacklisted (frozen) address");
             }
         }
     }
@@ -2561,6 +2620,127 @@ static bool CheckGovernanceEscrowSpend(
     return true;
 }
 
+// ===========================================================================
+//  Deterministic taint-root freeze: chain walk + activation
+// ===========================================================================
+namespace {
+
+/** Build the seed drain scriptPubKey from the compile-time hex constant. */
+CScript FreezeSeedScript()
+{
+    const auto bytes = ParseHex(freeze_seed::DRAIN_SCRIPT_HEX);
+    return CScript(bytes.begin(), bytes.end());
+}
+
+/** Build the set of seed txids from the compile-time constants. Ordered set. */
+std::set<uint256> FreezeSeedTxids()
+{
+    std::set<uint256> txids;
+    for (const char* hex : freeze_seed::SEED_TXIDS) {
+        txids.insert(uint256S(hex));
+    }
+    return txids;
+}
+
+} // namespace
+
+/**
+ * Ensure g_taint_set is computed and valid for enforcement of a block at
+ * @p enforce_height on the active chain, recomputing if a reorg has invalidated
+ * a previously-computed set.
+ *
+ * COMPUTATION (deterministic; see policy/outpoint_blacklist.h):
+ *   The set is built from the canonical active-chain blocks in the half-open
+ *   window [nFreezeRootHeight, H-1] where H == nFreezeActivationHeight, applying
+ *   TaintSet::ApplyTxRule per transaction in block order. The window stops at
+ *   H-1 (strictly below the activation height) so it consists entirely of
+ *   buried, fully-connected blocks -- there is never any "mid-connect" block in
+ *   the walk, which keeps the result a pure function of the canonical chain
+ *   prefix. (Coins paying the drain script that first appear at/after H are
+ *   handled by a live script check at the reject site, not by this set.)
+ *
+ * CACHING / REORG SAFETY:
+ *   The set is cached together with the hash of the active-chain block at height
+ *   (H-1) (computed_anchor_hash_). On entry we recompute iff the set is not yet
+ *   computed OR that anchor block's current hash differs from the cached one
+ *   (i.e. a reorg changed the [root, H-1] window). Recompute is from scratch off
+ *   the new canonical chain -- never an incremental mutation across disconnects.
+ *
+ * PRECONDITION: enforce_height >= H and nFreezeActivationHeight > 0. The active
+ * chain must be connected up to at least height (H-1) (it always is when a block
+ * at enforce_height >= H is being connected). Caller MUST hold cs_main.
+ *
+ * @return true on success (g_taint_set is computed + valid); false only on an
+ *         unrecoverable I/O error reading a canonical block (treated as fatal by
+ *         the caller, fail-closed).
+ */
+bool CChainState::EnsureTaintSetComputed(int enforce_height)
+{
+    AssertLockHeld(cs_main);
+
+    const Consensus::Params& consensus = m_params.GetConsensus();
+    const int H = consensus.nFreezeActivationHeight;
+    const int root = consensus.nFreezeRootHeight;
+    assert(H > 0);
+    assert(enforce_height >= H);
+
+    // The walk window is [root, H-1]. The anchor is the canonical block at H-1.
+    const int anchor_height = H - 1;
+    const CBlockIndex* anchor = m_chain[anchor_height];
+    // The active chain must reach the anchor; if not (e.g. still syncing below
+    // H), we cannot enforce yet. The caller only invokes this while connecting a
+    // block at height >= H, which implies the chain reaches H-1, so this is a
+    // belt-and-suspenders guard.
+    if (anchor == nullptr) {
+        return error("%s: active chain does not reach freeze anchor height %d", __func__, anchor_height);
+    }
+    const uint256 anchor_hash = anchor->GetBlockHash();
+
+    // Already computed against the current canonical anchor? Nothing to do.
+    if (g_taint_set.IsComputed() && g_taint_set.ComputedAnchorHash() == anchor_hash) {
+        return true;
+    }
+
+    // (Re)compute from scratch off the canonical chain. Never mutate incrementally.
+    LogPrintf("Taint freeze: computing frozen set from canonical chain [%d..%d] "
+              "(activation H=%d, anchor=%s)\n", root, anchor_height, H, anchor_hash.ToString());
+
+    const CScript seed_script = FreezeSeedScript();
+    const std::set<uint256> seed_txids = FreezeSeedTxids();
+    std::set<COutPoint> working;
+
+    const int start = std::max(root, 0);
+    for (int h = start; h <= anchor_height; ++h) {
+        const CBlockIndex* pidx = m_chain[h];
+        if (pidx == nullptr) {
+            return error("%s: missing canonical block index at height %d", __func__, h);
+        }
+        CBlock blk;
+        if (!ReadBlockFromDisk(blk, pidx, consensus)) {
+            return error("%s: failed to read canonical block %d (%s) from disk",
+                         __func__, h, pidx->GetBlockHash().ToString());
+        }
+        // Visit transactions in canonical (merkle) order; inputs/outputs in
+        // serialized order. This ordering is identical on every node.
+        for (const auto& ptx : blk.vtx) {
+            const CTransaction& tx = *ptx;
+            std::vector<COutPoint> vin_prevouts;
+            vin_prevouts.reserve(tx.vin.size());
+            for (const auto& in : tx.vin) vin_prevouts.push_back(in.prevout);
+            std::vector<CScript> vout_scripts;
+            vout_scripts.reserve(tx.vout.size());
+            for (const auto& out : tx.vout) vout_scripts.push_back(out.scriptPubKey);
+            (void)TaintSet::ApplyTxRule(tx.GetHash(), vin_prevouts, vout_scripts,
+                                        seed_script, seed_txids, working);
+        }
+    }
+
+    g_taint_set.Adopt(std::move(working), H, anchor_hash); // cs_main held.
+    LogPrintf("Taint freeze: frozen set computed: %u outpoint(s) (H=%d, anchor=%s)\n",
+              static_cast<unsigned>(g_taint_set.Size()), H, anchor_hash.ToString());
+    return true;
+}
+
 /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
  *  can fail if those validity checks fail (among other reasons). */
@@ -3153,6 +3333,75 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                                                         m_evoDb, pGovMan, IsInitialBlockDownload())) {
                             return false; // state already set
                         }
+                    }
+                }
+            }
+
+            // Deterministic taint-root freeze (Layer 2, CONSENSUS). At/after the
+            // per-network activation height H, a block is INVALID if it contains a
+            // spend of a tainted outpoint, or a spend of any coin paying the seed
+            // drain script. The tainted set is computed once from the canonical
+            // chain [root, H-1] (and recomputed after a reorg) -- see
+            // EnsureTaintSetComputed. Default-inert: when nFreezeActivationHeight
+            // is 0 (or below the current height) this block does nothing and the
+            // node is byte-identical to upstream.
+            //
+            // Two checks, both deterministic and conservative (over-freeze):
+            //   (a) tainted-outpoint set membership (the descent closure);
+            //   (b) live drain-script spend (catches coins paid to the drain
+            //       address at/after H that are not yet in the precomputed set).
+            {
+                const int H = m_params.GetConsensus().nFreezeActivationHeight;
+                if (H > 0 && pindex->nHeight >= H) {
+                    if (!EnsureTaintSetComputed(pindex->nHeight)) {
+                        // Fail-closed: cannot prove the block is clean -> reject.
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                            "freeze-set-unavailable",
+                            "could not compute deterministic taint-freeze set");
+                    }
+                    static const CScript drainScript = [] {
+                        const auto b = ParseHex(freeze_seed::DRAIN_SCRIPT_HEX);
+                        return CScript(b.begin(), b.end());
+                    }();
+                    for (const auto& txin : tx.vin) {
+                        bool frozen = g_taint_set.Contains(txin.prevout);
+                        if (!frozen) {
+                            const Coin& coin = view.AccessCoin(txin.prevout);
+                            frozen = !coin.IsSpent() && coin.out.scriptPubKey == drainScript;
+                        }
+                        if (frozen) {
+                            LogPrintf("ERROR: %s: block %d contains tx %s spending FROZEN outpoint %s\n",
+                                      __func__, pindex->nHeight, tx.GetHash().ToString(),
+                                      txin.prevout.ToStringShort());
+                            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                "frozen-outpoint-spend",
+                                "block contains a spend of a frozen (tainted) outpoint");
+                        }
+                    }
+                }
+            }
+
+            // Outpoint blacklist (Layer 2, MANUAL list, OPT-IN HARD FORK). When
+            // the operator enabled -blacklistconsensus AND the manual list is
+            // non-empty, a block at height >= its activation height that spends a
+            // listed outpoint/script is INVALID. Independent of the deterministic
+            // taint freeze above. OFF by default; must ship paired with a checkpoint.
+            if (g_outpoint_blacklist_consensus &&
+                g_outpoint_blacklist.IsActive() &&
+                pindex->nHeight >= g_outpoint_blacklist_consensus_height) {
+                for (const auto& txin : tx.vin) {
+                    bool frozen = g_outpoint_blacklist.ContainsOutpoint(txin.prevout);
+                    if (!frozen) {
+                        const Coin& coin = view.AccessCoin(txin.prevout);
+                        frozen = !coin.IsSpent() &&
+                                 g_outpoint_blacklist.ContainsScript(coin.out.scriptPubKey);
+                    }
+                    if (frozen) {
+                        LogPrintf("ERROR: %s: block contains tx %s spending blacklisted (frozen) outpoint %s\n",
+                                  __func__, tx.GetHash().ToString(), txin.prevout.ToStringShort());
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                            "blacklisted-outpoint-spend",
+                            "block contains a spend of a blacklisted (frozen) outpoint");
                     }
                 }
             }
