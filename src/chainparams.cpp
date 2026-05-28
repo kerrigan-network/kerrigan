@@ -12,6 +12,7 @@
 #include <crypto/sha256.h>
 #include <deploymentinfo.h>
 #include <llmq/params.h>
+#include <policy/outpoint_blacklist.h>
 #include <script/script.h>
 #include <util/ranges.h>
 #include <util/strencodings.h>
@@ -324,6 +325,14 @@ public:
             "210208fcb17aa95588e3f37da5aa6513ecb8cca193249c67af7997a416993b6bbe8e53ae");
         consensus.nGrowthEscrowEndHeight = 262800; // ~12 months, 40% burns via OP_RETURN after this
 
+        // Deterministic taint-root freeze (incident 2026-05). MAINNET ONLY.
+        // HUMAN MUST FINALISE nFreezeActivationHeight (H) BEFORE TAG: it has to sit
+        // comfortably above the tip at deploy time and after all operators upgrade.
+        // A checkpoint at H is added below to anchor the frozen chain. See
+        // policy/outpoint_blacklist.h for the algorithm + determinism argument.
+        consensus.nFreezeActivationHeight = freeze_seed::DEFAULT_FREEZE_ACTIVATION_HEIGHT; // 55000 (placeholder)
+        consensus.nFreezeRootHeight       = freeze_seed::DEFAULT_FREEZE_ROOT_HEIGHT;       // 54351 (theft block)
+
         // "KRGN" Kerrigan mainnet network magic
         pchMessageStart[0] = 0x4b; // K
         pchMessageStart[1] = 0x52; // R
@@ -398,6 +407,13 @@ public:
         checkpointData = {
             {
                 {0, uint256S("0x00000444f8dbee14c599ac723b35cc8021b12d48d092c7ac67d45f6d8a0b9c32")},
+                // Taint-root freeze anchor (incident 2026-05). HUMAN MUST FILL IN
+                // the real block hash at the finalised activation height H once
+                // that block exists on the canonical (frozen) chain, BEFORE TAG.
+                // This checkpoint anchors the frozen chain so a node cannot be
+                // fooled onto a fork that omits the freeze. Until filled in, leave
+                // it commented out -- a placeholder hash would reject the real chain.
+                // {freeze_seed::DEFAULT_FREEZE_ACTIVATION_HEIGHT, uint256S("0x<fill-in-hash-of-block-55000>")},
             }
         };
 
@@ -529,6 +545,14 @@ public:
         consensus.devFundPaymentScript = BuildTreasuryScript("6b642237272cd37fd77de4b299579f8850b8cd09");
         consensus.growthEscrowScript = BuildTreasuryScript("62401dcf73aa0e06c91f44add1e5c24d96ae07ac");
         consensus.nGrowthEscrowEndHeight = 262800; // Same sunset as mainnet
+
+        // Taint-root freeze: TESTNET is not subject to the incident freeze. Use a
+        // far-future activation height so the mechanism stays inert here (testnet
+        // is reset periodically; no incident to freeze). A future testnet rehearsal
+        // can lower H + set a root. Kept non-zero so the gating code path is the
+        // same as mainnet, but never reached.
+        consensus.nFreezeActivationHeight = 2000000000; // ~inert (far above any tip)
+        consensus.nFreezeRootHeight       = 0;
 
         // "krgt" - Kerrigan testnet network magic
         pchMessageStart[0] = 0x6b; // k
@@ -732,6 +756,11 @@ public:
         consensus.devFundPaymentScript = BuildTreasuryScript("a39764ebef30eb2dfce24d626784b88ee053e3b7");
         consensus.growthEscrowScript = BuildTreasuryScript("0df05cdab550e3dff3d2ec86f0a6e5cda72efccb");
         consensus.nGrowthEscrowEndHeight = 262800;
+
+        // Taint-root freeze: DEVNET activates at height 1 so functional tests can
+        // exercise the consensus path. Root = 1 (walk from genesis+1).
+        consensus.nFreezeActivationHeight = 1;
+        consensus.nFreezeRootHeight       = 1;
 
         UpdateDevnetSubsidyAndDiffParametersFromArgs(args);
         genesis = CreateGenesisBlock(1773446400, 1, 0x207fffff, 1, 25 * COIN);
@@ -1000,6 +1029,11 @@ public:
         consensus.devFundPaymentScript = BuildTreasuryScript("5d9f2310a8602b46e6e93c8277a8c9e8ea7c7ee6");
         consensus.growthEscrowScript = BuildTreasuryScript("b0841b8f59f554fb92c7951ed9f890faba8e8f89");
         consensus.nGrowthEscrowEndHeight = 500; // Short for regtest
+
+        // Taint-root freeze: REGTEST activates at height 1 so unit/functional
+        // tests can exercise the consensus path deterministically.
+        consensus.nFreezeActivationHeight = 1;
+        consensus.nFreezeRootHeight       = 1;
 
         UpdateActivationParametersFromArgs(args);
         UpdateDIP3ParametersFromArgs(args);

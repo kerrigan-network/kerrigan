@@ -243,6 +243,23 @@ namespace freeze_seed {
 constexpr char DRAIN_SCRIPT_HEX[] =
     "76a91425cc2352fd7ad476659aa18203967a6e2073adc988ac";
 
+/**
+ * MAINNET activation height H placeholder. The human MUST finalise this before
+ * tagging the release: it has to sit comfortably above the chain tip at deploy
+ * time (tip was ~54459 at the time of the incident) so the backfill window
+ * [DEFAULT_FREEZE_ROOT_HEIGHT, H-1] is buried and stable, and so every operator
+ * has upgraded before H is reached. A checkpoint at H should be added in the
+ * same release (see chainparams.cpp).
+ *
+ * Devnet/regtest use H=1 (so tests exercise the path); testnet uses a far-future
+ * placeholder. Changing any of these is a consensus change.
+ */
+constexpr int DEFAULT_FREEZE_ACTIVATION_HEIGHT = 55000;
+
+/** MAINNET taint-root height: the theft block. The walk inspects blocks from
+ *  here up to H-1. */
+constexpr int DEFAULT_FREEZE_ROOT_HEIGHT = 54351;
+
 /** Seed txids: the theft tx and any consolidation siblings. ALL outputs of these
  *  txids are seed taints regardless of script. One 64-hex string per entry. */
 constexpr const char* SEED_TXIDS[] = {
