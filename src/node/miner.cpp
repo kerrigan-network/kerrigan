@@ -16,6 +16,7 @@
 #include <deploymentstatus.h>
 #include <node/context.h>
 #include <policy/feerate.h>
+#include <policy/outpoint_blacklist.h>
 #include <policy/policy.h>
 #include <pow.h>
 #include <primitives/transaction.h>
@@ -610,6 +611,58 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
                 continue;
             }
             signals.insert({*signal, 0});
+        }
+
+        // Freeze enforcement in the block template: never build a template that
+        // spends a frozen coin, so a pool running this build never mines the
+        // thief's onward spends (including any t->z shield). Two independent
+        // sources, both consulted under cs_main (held by CreateNewBlock):
+        //   (a) the MANUAL OutpointBlacklist (Layer 1, default OFF unless the
+        //       operator configured -blacklistoutpoints / -blacklistaddr);
+        //   (b) the DETERMINISTIC taint set (Layer 2), but only once the chain
+        //       has reached the per-network activation height -- below it the
+        //       set is inert and this is a stock template.
+        // The consensus reject in ConnectBlock is the real guard; this is a
+        // belt-and-suspenders template exclusion so a frozen spend that somehow
+        // entered the mempool (e.g. accepted before activation) is never mined.
+        {
+            const CTransaction& candidate = iter->GetTx();
+            const int next_height = pindexPrev->nHeight + 1;
+            const int freeze_h = chainparams.GetConsensus().nFreezeActivationHeight;
+            const bool taint_active =
+                freeze_h > 0 && next_height >= freeze_h && g_taint_set.IsComputed();
+            const bool manual_active = g_outpoint_blacklist.IsActive();
+
+            if (taint_active || manual_active) {
+                bool spends_frozen = false;
+                for (const auto& txin : candidate.vin) {
+                    if (taint_active && g_taint_set.Contains(txin.prevout)) {
+                        spends_frozen = true;
+                        break;
+                    }
+                    if (manual_active) {
+                        if (g_outpoint_blacklist.ContainsOutpoint(txin.prevout)) {
+                            spends_frozen = true;
+                            break;
+                        }
+                        const Coin& coin = m_chainstate.CoinsTip().AccessCoin(txin.prevout);
+                        if (!coin.IsSpent() &&
+                            g_outpoint_blacklist.ContainsScript(coin.out.scriptPubKey)) {
+                            spends_frozen = true;
+                            break;
+                        }
+                    }
+                }
+                if (spends_frozen) {
+                    if (fUsingModified) {
+                        mapModifiedTx.get<ancestor_score>().erase(modit);
+                        failedTx.insert(iter);
+                    }
+                    LogPrintf("%s: tx %s skipped: spends a frozen outpoint\n",
+                              __func__, candidate.GetHash().ToString());
+                    continue;
+                }
+            }
         }
 
         // We skip mapTx entries that are inBlock, and mapModifiedTx shouldn't

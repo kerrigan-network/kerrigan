@@ -1,0 +1,62 @@
+# Kerrigan outpoint/address freeze list -- incident 2026-05
+#
+# Defensive, opt-in, REVERSIBLE. Loaded via:
+#   -blacklistoutpoints=/path/to/incident-2026-05.blacklist
+#
+# A node running with this list will REFUSE TO RELAY (mempool) and REFUSE TO
+# MINE (block template) any transaction that spends a listed outpoint, or any
+# output paying a listed address. This is Layer 1 (relay/policy) only: it does
+# NOT split the chain. If a supermajority of pool hashpower runs it, the
+# thief's onward spends -- including any transparent->Sapling shield -- cannot
+# confirm.
+#
+# It does NOT move, seize, or redirect funds and touches no key material.
+#
+# FORMAT (one entry per line):
+#   <txid>:<vout>     freeze a specific outpoint (most precise)
+#   <address>         freeze every output paying this address
+#   # ...             comment (whole-line or trailing); blank lines ignored
+#
+# TO REMOVE an entry later (un-freeze): delete the line (or the whole option)
+# and restart the daemon. No on-disk consensus state is created by Layer 1.
+#
+# Source of these entries: red-swarm fund trace (A-fund-trace.md), Kerrigan
+# MAINNET, theft confirmed in block 54351 (2026-05-27 20:35:59 UTC). The drain
+# address is empty (funds moved); these are the live resting points + the most
+# precise known peel-chain outpoints.
+
+# ---------------------------------------------------------------------------
+# PRECISE OUTPOINTS (highest confidence -- the bulk + the held leaf)
+# ---------------------------------------------------------------------------
+# tx 49e0a721... at block 54431, the freshest hop holding the bulk:
+49e0a7217b3330f9c4e81e2d00f5443fb2c5d3c3a8b124ea0d0689855da62020:1  # 229,942.79 -> KMSZ3sph...  (BULK)
+49e0a7217b3330f9c4e81e2d00f5443fb2c5d3c3a8b124ea0d0689855da62020:0  # 6,678.91   -> KJXEbmzr...  (held leaf)
+
+# ---------------------------------------------------------------------------
+# ADDRESSES (catches the coins wherever they currently rest at these scripts,
+# and any future output paying them). Address freeze is broader than a single
+# outpoint: it covers re-peels back to the same address.
+# ---------------------------------------------------------------------------
+# Drain (now empty, kept for completeness / future re-use by the thief):
+KAezrjvRyUpd8Nwvshv9eLvZDWL46hLExd
+# Current bulk resting point (229,942.79):
+KMSZ3sphARAURpnyQTEFWLKfdPbeUPESc1
+# Held leaves (unmoved at time of trace):
+KKZij8mbZdmzyXUVKgSKt47Z8oMqoafkoh   # 8,000 held
+KJXEbmzre5W5Nc62dX6V7SdEco5RxuC4nT   # 6,678.91 held
+# Peel-chain intermediate hops (already forwarded or forwarding -- freezing the
+# address denies re-use and catches change returning to them):
+KCRiqPU4uPkFErbVCFVR4ySez49UQfX1ZF
+K7bCGq4bNgCe1evsBiXWMZkunJRmfUZc96
+KSmKqGod2ji3T6T7ZvPEWbmwd3dMebUyM4
+KFivyToQHkEPGRSzVtjorF9FUvENgMzqbi
+KJdrrgtVq9z3X6B7ZMFFZLvMpsWQGntgtW
+KTdi4gHe5FxF7Jtoh7VZ7mAkHq7B3EzJWH
+# Change address seen on the theft consolidation tx (53c99b...):
+KRN7bTuUivqFJw8UbYudT3yqfo4u4nAGwP
+
+# NOTE: addresses listed in A-fund-trace.md by short prefix only (KW9Piau...,
+# KFw8gd1..., KAMv9KK..., KEEj58y..., KG4fWU...) are intentionally OMITTED here:
+# a freeze entry must be a full, valid address. Add them as full strings once
+# resolved from the explorer. Invalid/partial lines are skipped + logged, not
+# fatal -- but do not rely on a truncated address being matched.

@@ -454,6 +454,7 @@ BITCOIN_CORE_H = \
   outputtype.h \
   policy/feerate.h \
   policy/fees.h \
+  policy/outpoint_blacklist.h \
   policy/packages.h \
   policy/policy.h \
   policy/settings.h \
@@ -1117,6 +1118,7 @@ libbitcoin_common_a_SOURCES = \
   net_permissions.cpp \
   outputtype.cpp \
   policy/feerate.cpp \
+  policy/outpoint_blacklist.cpp \
   policy/policy.cpp \
   protocol.cpp \
   psbt.cpp \

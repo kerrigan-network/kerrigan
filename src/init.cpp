@@ -50,6 +50,7 @@
 #include <node/txreconciliation.h>
 #include <policy/feerate.h>
 #include <policy/fees.h>
+#include <policy/outpoint_blacklist.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <rpc/blockchain.h>
@@ -693,6 +694,32 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-alertnotify=<cmd>", "Execute command when an alert is raised (%s in cmd is replaced by message)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
     argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip their script verification (0 to verify all, default: %s, testnet: %s, devnet: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), devnetChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    // --- Outpoint blacklist ("freeze list") -----------------------------------
+    // Opt-in Layer 1 (relay/policy), default OFF. An un-configured node behaves
+    // exactly as stock. INDEPENDENT of the deterministic Layer 2 taint freeze
+    // (which is gated by the per-network nFreezeActivationHeight consensus param,
+    // not by these flags). See policy/outpoint_blacklist.h.
+    argsman.AddArg("-blacklistoutpoints=<file>",
+                   "Path to a freeze list file. Each line is either \"<txid>:<vout>\" (an outpoint to freeze) "
+                   "or an address (freeze any output paying it); blank lines and '#' comments are ignored. "
+                   "When set, this node refuses to relay (mempool) or mine (block template) any transaction "
+                   "that spends a listed outpoint/address. Relay/policy only (Layer 1) -- causes no chain split. "
+                   "Default: not set (feature disabled). Reversible: remove the entry/option and restart.",
+                   ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-blacklistaddr=<address>",
+                   "Freeze a single address (repeatable). Equivalent to one address line in -blacklistoutpoints. "
+                   "Relay/policy only (Layer 1). Default: not set.",
+                   ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-blacklistconsensus",
+                   "EXPERT/HARD-FORK: also enforce the manual freeze list as a CONSENSUS rule (Layer 2) -- blocks "
+                   "containing a frozen-outpoint spend become invalid at/after -blacklistactivationheight. "
+                   "This SPLITS the chain unless universally adopted and MUST be paired with a checkpoint. "
+                   "Independent of the deterministic taint freeze. Default: 0 (disabled).",
+                   ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-blacklistactivationheight=<n>",
+                   "Activation height for the Layer 2 manual freeze rule (only meaningful with "
+                   "-blacklistconsensus). Default: 0.",
+                   ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksdir=<dir>", "Specify directory to hold blocks subdirectory for *.dat files (default: <datadir>)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-fastprune", "Use smaller block files and lower minimum prune height for testing purposes", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-tinyblk", "Use smaller block files for testing purposes", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
@@ -1656,6 +1683,79 @@ bool AppInitInterfaces(NodeContext& node)
     return true;
 }
 
+/**
+ * Populate the process-wide MANUAL outpoint blacklist (Layer 1 + optional Layer
+ * 2) from configuration.
+ *
+ * Reads -blacklistoutpoints (a file), -blacklistaddr (repeatable address), and
+ * the Layer 2 flags -blacklistconsensus / -blacklistactivationheight. Decodes
+ * addresses against the already-selected network params, so it must run after
+ * SelectParams() and after logging has started, but before any networking or
+ * validation thread is launched (the list is treated as immutable thereafter).
+ *
+ * NOTE: This configures only the MANUAL freeze list. The deterministic taint
+ * freeze (g_taint_set) needs NO configuration -- it is seeded from compile-time
+ * constants and computed lazily under cs_main once the active chain reaches the
+ * per-network activation height. See policy/outpoint_blacklist.h.
+ *
+ * Fail-soft on malformed individual entries (logged + skipped) so a typo does
+ * not abort the node, but a hard error (e.g. an unreadable file the operator
+ * explicitly pointed at) returns false via InitError.
+ *
+ * Cold path (startup only).
+ */
+static bool InitOutpointBlacklist(const ArgsManager& args)
+{
+    std::vector<std::string> errors;
+    std::size_t loaded = 0;
+
+    if (args.IsArgSet("-blacklistoutpoints")) {
+        const fs::path path = args.GetPathArg("-blacklistoutpoints");
+        const std::size_t n = g_outpoint_blacklist.LoadFromFile(path, errors);
+        if (n == 0 && !errors.empty()) {
+            // Distinguish "file unreadable" (hard error) from "all lines bad".
+            // LoadFromFile pushes a single "could not open" message in the
+            // unreadable case; treat that as fatal so a misconfigured path is loud.
+            for (const auto& e : errors) {
+                if (e.rfind("could not open blacklist file:", 0) == 0) {
+                    return InitError(Untranslated("Outpoint blacklist: " + e));
+                }
+            }
+        }
+        loaded += n;
+    }
+
+    // -blacklistaddr may be specified multiple times.
+    for (const std::string& addr : args.GetArgs("-blacklistaddr")) {
+        if (g_outpoint_blacklist.AddAddressString(addr, errors)) ++loaded;
+    }
+
+    for (const std::string& e : errors) {
+        LogPrintf("Outpoint blacklist: WARNING: skipped invalid entry: %s\n", e);
+    }
+
+    // Layer 2 (consensus) wiring for the MANUAL list. OFF unless explicitly enabled.
+    g_outpoint_blacklist_consensus = args.GetBoolArg("-blacklistconsensus", false);
+    g_outpoint_blacklist_consensus_height =
+        static_cast<int>(args.GetIntArg("-blacklistactivationheight", 0));
+
+    if (g_outpoint_blacklist.IsActive()) {
+        LogPrintf("Outpoint blacklist ACTIVE (Layer 1 relay/policy): %u outpoint(s), %u script(s) frozen.\n",
+                  static_cast<unsigned>(g_outpoint_blacklist.OutpointCount()),
+                  static_cast<unsigned>(g_outpoint_blacklist.ScriptCount()));
+        if (g_outpoint_blacklist_consensus) {
+            LogPrintf("Outpoint blacklist: Layer 2 CONSENSUS rule ENABLED from height %d. "
+                      "WARNING: this is a hard fork; it splits the chain unless universally "
+                      "adopted and should be paired with a checkpoint.\n",
+                      g_outpoint_blacklist_consensus_height);
+        }
+    } else if (g_outpoint_blacklist_consensus) {
+        LogPrintf("Outpoint blacklist: -blacklistconsensus set but freeze list is empty; rule is inert.\n");
+    }
+
+    return true;
+}
+
 bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 {
     const ArgsManager& args = *Assert(node.args);
@@ -1685,6 +1785,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                   "from a different location, it will be unable to locate the current data files. There could "
                   "also be data loss if Kerrigan is started while in a temporary directory.\n",
                   args.GetArg("-datadir", ""), fs::PathToString(fs::current_path()));
+    }
+
+    // Load the optional MANUAL outpoint/address freeze list (default OFF). Must
+    // be done after params selection + logging start and before networking /
+    // validation threads spin up, since the list is treated as immutable
+    // afterwards. (The deterministic taint freeze needs no loader here.)
+    if (!InitOutpointBlacklist(args)) {
+        return false; // InitError already reported the cause.
     }
 
     InitSignatureCache();

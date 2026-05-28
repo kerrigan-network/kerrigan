@@ -286,6 +286,32 @@ struct Params {
      */
     int nGrowthEscrowEndHeight{0};
 
+    /**
+     * DETERMINISTIC TAINT-ROOT FREEZE (incident 2026-05).
+     *
+     * nFreezeActivationHeight (H): the consensus activation height for the
+     * deterministic taint freeze. At/after H, a block that spends a tainted
+     * outpoint is INVALID. When the active chain first reaches H, each node walks
+     * its OWN canonical chain from nFreezeRootHeight up to H, applies the
+     * propagation rule (seed = drain script + seed txids, see
+     * policy/outpoint_blacklist.h), and builds a bit-identical frozen set.
+     *
+     * 0 == DISABLED: the mechanism is fully inert and the node is byte-identical
+     * to upstream. This is the default so every network that does not explicitly
+     * opt in keeps stock behaviour.
+     *
+     * nFreezeRootHeight: the earliest block the walk inspects (the theft block).
+     * Outputs paying the drain script or belonging to a seed txid only count as
+     * seed taint at/after this height. Ignored when nFreezeActivationHeight == 0.
+     *
+     * H is per-network (mainnet finalised before tag, devnet/regtest = 1 so tests
+     * can exercise it, testnet = a far-future placeholder). H MUST be chosen
+     * comfortably above the tip at deploy time so the [root..H] window is buried
+     * and stable; see the reorg-safety note in policy/outpoint_blacklist.h.
+     */
+    int nFreezeActivationHeight{0};
+    int nFreezeRootHeight{0};
+
     /** these parameters are only used on devnet and can be configured from the outside */
     int nMinimumDifficultyBlocks{0};
     int nHighSubsidyBlocks{0};
