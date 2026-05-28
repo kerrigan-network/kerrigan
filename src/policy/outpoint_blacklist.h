@@ -253,8 +253,14 @@ constexpr char DRAIN_SCRIPT_HEX[] =
  *
  * Devnet/regtest use H=1 (so tests exercise the path); testnet uses a far-future
  * placeholder. Changing any of these is a consensus change.
+ *
+ * UNIFIED ACTIVATION (release-v1.2.0-freeze): mainnet
+ * consensus.nHMPSealAlgoFixHeight (the bundled v1.2.0 HMP fork) is pinned to this
+ * same value so both consensus boundaries activate together at H. When the release
+ * engineer confirms the final H at tag time, update this constant AND
+ * CMainParams::nHMPSealAlgoFixHeight AND the CMainParams checkpoint together.
  */
-constexpr int DEFAULT_FREEZE_ACTIVATION_HEIGHT = 55000;
+constexpr int DEFAULT_FREEZE_ACTIVATION_HEIGHT = 55000; // placeholder; confirm at tag time
 
 /** MAINNET taint-root height: the theft block. The walk inspects blocks from
  *  here up to H-1. */

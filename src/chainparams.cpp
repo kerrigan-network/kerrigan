@@ -251,7 +251,18 @@ public:
         // semantics. Pre-fork seal_weight has been pinned at 1000-1999 since launch
         // because Elder filtering ran against the wrong algo; this height enables
         // the corrected fork-choice rule across the network.
-        consensus.nHMPSealAlgoFixHeight = 53000;
+        //
+        // UNIFIED ACTIVATION: the v1.2.0 HMP fork and the deterministic taint-root
+        // freeze (incident 2026-05, set below) activate at the SAME mainnet height H
+        // so operators cross both consensus boundaries in a single coordinated
+        // upgrade. H must equal nFreezeActivationHeight
+        // (freeze_seed::DEFAULT_FREEZE_ACTIVATION_HEIGHT).
+        //
+        // PLACEHOLDER: 55000 must sit comfortably above the tip at deploy time and
+        // after all operators upgrade. The release engineer CONFIRMS the final H at
+        // tag time and updates it HERE, in freeze_seed::DEFAULT_FREEZE_ACTIVATION_HEIGHT,
+        // and in the CMainParams checkpoint below -- all three in lockstep.
+        consensus.nHMPSealAlgoFixHeight = 55000;
         consensus.MinBIP9WarningHeight = 0;
         // Per-algo genesis powLimits -- permissive targets for chain bootstrapping.
         // These are intentionally easy so the first miner on each algo can produce blocks.
