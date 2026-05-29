@@ -26,6 +26,7 @@
 #include <node/interface_ui.h>
 #include <node/utxo_snapshot.h>
 #include <policy/outpoint_blacklist.h>
+#include <policy/planx_rollback.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <pow.h>
@@ -1015,13 +1016,20 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
 
     // Growth escrow: escrow spends are never valid in mempool -- they must be mined
     // directly by the 2-of-3 keyholders after governance approval (ConnectBlock validates).
+    //
+    // "From escrow" means the coin pays the CURRENT growthEscrowScript OR
+    // any superseded legacyEscrowScripts entry (IsGrowthEscrowScript). After a key
+    // rotation the old escrow balance must stay relay-locked too, otherwise the
+    // governance gate (enforced in ConnectBlock) could be bypassed at the mempool
+    // boundary. Default-inert: with no escrow scripts configured this never fires.
     {
-        const auto& escrowScriptVec = chainparams.GetConsensus().growthEscrowScript;
-        if (!escrowScriptVec.empty()) {
-            const CScript escrowScript(escrowScriptVec.begin(), escrowScriptVec.end());
-            for (const auto& txin : tx.vin) {
-                const Coin& coin = m_view.AccessCoin(txin.prevout);
-                if (!coin.IsSpent() && coin.out.scriptPubKey == escrowScript) {
+        const Consensus::Params& consensus = chainparams.GetConsensus();
+        for (const auto& txin : tx.vin) {
+            const Coin& coin = m_view.AccessCoin(txin.prevout);
+            if (!coin.IsSpent()) {
+                std::vector<unsigned char> spk(coin.out.scriptPubKey.begin(),
+                                               coin.out.scriptPubKey.end());
+                if (consensus.IsGrowthEscrowScript(spk)) {
                     return state.Invalid(TxValidationResult::TX_CONSENSUS,
                         "bad-growth-escrow-spend",
                         "escrow spends must be included directly in blocks after governance approval");
@@ -1085,6 +1093,23 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                     "blacklisted-script-spend",
                     "transaction spends an output paying a blacklisted (frozen) address");
             }
+        }
+    }
+
+    // PLAN X only-to-7b (relay side). A tx that spends a compromised coin is only
+    // valid if every non-marker output pays the recovery "7b" script; reject any
+    // other compromised spend from the mempool so it can never be mined. Driven by
+    // compiled state, not by -activaterollback; inert when the recovery set is empty
+    // (off mainnet) or the recovery script is unfinalized (the predicate
+    // short-circuits to allowed). See policy/planx_rollback.h.
+    {
+        const char* reason = nullptr;
+        if (!PlanXOnlyToRecoveryAllowed(tx, m_view, &reason)) {
+            LogPrintf("PLAN X: rejecting mempool tx %s (compromised-coin spend not paying recovery script)\n",
+                      tx.GetHash().ToString());
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                reason ? reason : "planx-only-to-recovery",
+                "transaction spends compromised coins to a destination other than the recovery treasury");
         }
     }
 
@@ -2476,16 +2501,55 @@ static int64_t nTimeTotal = 0;
 static int64_t nBlocksTotal = 0;
 
 /** Validate a governance-approved escrow release spend.
- *  Checks the OP_RETURN marker, governance proposal funding, output matching, and anti-replay. */
+ *  Checks the OP_RETURN marker, governance proposal funding, output matching, and anti-replay.
+ *
+ *  `escrowScript` is the EXACT escrow scriptPubKey the spend's inputs came
+ *  from -- the current growthEscrowScript OR a superseded legacyEscrowScripts entry
+ *  (the caller selects it via Consensus::Params::IsGrowthEscrowScript and passes the
+ *  matched script here). All output guards below are expressed against that single
+ *  `escrowScript`, so a governance-approved release of EITHER a current or a legacy
+ *  escrow is validated identically: the approved payout (step 6/7a) may be any
+ *  governance-approved destination -- including the rotated NEW escrow, which is how
+ *  an old->new consolidation sweep is authorized -- and "change" (step 7b) is the
+ *  funding `escrowScript` itself. The single-payment / unauthorized-output guards are
+ *  unchanged.
+ *
+ *  @param escrowScript the matched (current or legacy) escrow scriptPubKey the
+ *                      inputs were funded from; change is permitted only back to it.
+ *  @param nEscrowUnlockHeight the consensus unlock floor (Consensus::Params::
+ *                      nEscrowUnlockHeight). An escrow release at a height STRICTLY
+ *                      below this value is consensus-invalid on every node,
+ *                      unconditionally (the step-0 unlock floor). 0 == disabled. */
 static bool CheckGovernanceEscrowSpend(
     const CTransaction& tx,
     const CScript& escrowScript,
     int nBlockHeight,
+    int nEscrowUnlockHeight,
     BlockValidationState& state,
     CEvoDB& evodb,
-    CGovernanceManager* pGovMan,
-    bool fIBD)
+    CGovernanceManager* pGovMan)
 {
+    // 0. HARD UNLOCK FLOOR. An escrow release is consensus-
+    //    invalid below nEscrowUnlockHeight, unconditionally. This covers the entire
+    //    PLAN X re-mine window: during the rollback the whole coalition is in IBD
+    //    and cannot verify governance funding at mining time, so no escrow release
+    //    may occur AT ALL until the chain is provably caught up (height >= H_unlock).
+    //    Pure height test -- no initial-block-download state, no best-header
+    //    height, no flag, no governance lookup -- so every honest node reaches the
+    //    identical verdict. Above the floor the network is out of IBD and the full
+    //    funded-governance check (steps 4+) runs at mining time, the canonical
+    //    pattern. Placed BEFORE the OP_RETURN marker parse and BEFORE any
+    //    MarkEscrowReleaseExecuted, so the forged-latch path is unreachable below
+    //    the floor.
+    if (nEscrowUnlockHeight > 0 && nBlockHeight < nEscrowUnlockHeight) {
+        LogPrintf("ERROR: %s: tx %s attempts escrow release at height %d, below the "
+                  "recovery unlock floor %d\n",
+                  __func__, tx.GetHash().ToString(), nBlockHeight, nEscrowUnlockHeight);
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+            "bad-escrow-locked-window",
+            "escrow release forbidden below the recovery unlock height");
+    }
+
     // 1. Find OP_RETURN output with "KRGN" + 32-byte governance proposal hash
     static const std::vector<unsigned char> KRGN_MAGIC{'K', 'R', 'G', 'N'};
     uint256 proposalHash;
@@ -2516,11 +2580,14 @@ static bool CheckGovernanceEscrowSpend(
             "bad-escrow-already-executed", "escrow release proposal already executed");
     }
 
-    // 3. During IBD, trust the chain (governance objects not yet synced via P2P)
-    if (fIBD) {
-        MarkEscrowReleaseExecuted(evodb, proposalHash, nBlockHeight);
-        return true;
-    }
+    // 3. (REMOVED) The former IBD trust-shortcut is gone. It keyed
+    //    a consensus accept/reject on node-state-dependent inputs (initial-block-
+    //    download state, the best-header height, the rollback flag) and split three
+    //    times. The step-0 height floor above supersedes it: below H_unlock every
+    //    release is rejected unconditionally, and at/above H_unlock the network is
+    //    provably out of IBD so the FULL funded-governance check (steps 4+) always
+    //    runs. There is no longer ANY path that accepts a release without that full
+    //    verification.
 
     // 4. Look up the governance object and verify it is funded
     if (!pGovMan) {
@@ -3314,25 +3381,45 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-accumulated-fee-outofrange");
             }
 
-            // Growth escrow: consensus-locked unless governance-approved release
+            // Growth escrow: consensus-locked unless governance-approved release.
+            //
+            // A coin paying the CURRENT growthEscrowScript OR any superseded
+            // legacyEscrowScripts entry (IsGrowthEscrowScript) is an escrow input. We
+            // capture the EXACT script the inputs came from and pass it to
+            // CheckGovernanceEscrowSpend, so the change/unauthorized-output guards
+            // match against whichever escrow script (current or legacy) actually
+            // funded the spend -- enabling a governance-approved old->new sweep while
+            // keeping the single-payment/output guards intact. Default-inert when no
+            // escrow scripts are configured.
             {
-                const auto& escrowScriptVec = m_params.GetConsensus().growthEscrowScript;
-                if (!escrowScriptVec.empty()) {
-                    const CScript escrowScript(escrowScriptVec.begin(), escrowScriptVec.end());
-                    bool spendsFromEscrow = false;
-                    for (const auto& txin : tx.vin) {
-                        const Coin& coin = view.AccessCoin(txin.prevout);
-                        if (!coin.IsSpent() && coin.out.scriptPubKey == escrowScript) {
+                const Consensus::Params& consensus = m_params.GetConsensus();
+                CScript escrowScript; // the matched escrow script the inputs came from
+                bool spendsFromEscrow = false;
+                for (const auto& txin : tx.vin) {
+                    const Coin& coin = view.AccessCoin(txin.prevout);
+                    if (!coin.IsSpent()) {
+                        std::vector<unsigned char> spk(coin.out.scriptPubKey.begin(),
+                                                       coin.out.scriptPubKey.end());
+                        if (consensus.IsGrowthEscrowScript(spk)) {
                             spendsFromEscrow = true;
+                            escrowScript = coin.out.scriptPubKey;
                             break;
                         }
                     }
-                    if (spendsFromEscrow) {
-                        CGovernanceManager* pGovMan = m_chain_helper ? &m_chain_helper->GetGovernanceManager() : nullptr;
-                        if (!CheckGovernanceEscrowSpend(tx, escrowScript, pindex->nHeight, state,
-                                                        m_evoDb, pGovMan, IsInitialBlockDownload())) {
-                            return false; // state already set
-                        }
+                }
+                if (spendsFromEscrow) {
+                    CGovernanceManager* pGovMan = m_chain_helper ? &m_chain_helper->GetGovernanceManager() : nullptr;
+                    // The escrow gate's verdict depends ONLY on the
+                    // block's own height versus the baked consensus floor
+                    // (nEscrowUnlockHeight) below the floor, and on the full
+                    // funded-governance check at/above it. No node-state input
+                    // (IsInitialBlockDownload / m_best_header / g_activate_rollback)
+                    // is passed in -- that is what makes the verdict identical on
+                    // every honest node.
+                    if (!CheckGovernanceEscrowSpend(tx, escrowScript, pindex->nHeight,
+                                                    consensus.nEscrowUnlockHeight, state,
+                                                    m_evoDb, pGovMan)) {
+                        return false; // state already set
                     }
                 }
             }
@@ -3403,6 +3490,27 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                             "blacklisted-outpoint-spend",
                             "block contains a spend of a blacklisted (frozen) outpoint");
                     }
+                }
+            }
+
+            // PLAN X only-to-7b (CONSENSUS). A block is INVALID if it contains a
+            // tx that spends compromised coins to anywhere other than the recovery
+            // "7b" treasury (OP_RETURN / provably-unspendable markers excepted; a
+            // change-back into the compromised set is NOT permitted). Driven by
+            // compiled state, not by -activaterollback; inert when the recovery set
+            // is empty (off mainnet) or the recovery script is unfinalized -- the
+            // predicate short-circuits to allowed, so a node off mainnet (or an
+            // unfinalized build) behaves exactly as upstream. See
+            // policy/planx_rollback.h.
+            {
+                const char* reason = nullptr;
+                if (!PlanXOnlyToRecoveryAllowed(tx, view, &reason)) {
+                    LogPrintf("ERROR: %s: block %d contains tx %s spending compromised coins to a "
+                              "non-recovery destination\n",
+                              __func__, pindex->nHeight, tx.GetHash().ToString());
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                        reason ? reason : "planx-only-to-recovery",
+                        "block contains a compromised-coin spend not paying the recovery treasury");
                 }
             }
 
@@ -5216,6 +5324,92 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
         if (pcheckpoint && nHeight < pcheckpoint->nHeight) {
             LogPrintf("ERROR: %s: forked chain older than last checkpoint (height %d)\n", __func__, nHeight);
             return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-fork-prior-to-checkpoint");
+        }
+    }
+
+    // PLAN X contingency rollback (incident 2026-05). HEADER-level enforcement of
+    // controls (1) checkpoint pin and (2) disallow the attack block + its
+    // descendants. This is CONSENSUS VALIDITY, driven by BAKED PER-NETWORK
+    // chainparams (consensus.nRollbackHeight / rollbackAnchorHash + the baked theft
+    // hash), NOT by the -activaterollback flag -- so every node running the recovery
+    // binary applies identical fork-choice, and a fresh sync (or "delete blocks/ +
+    // chainstate/ and re-sync") converges on the recovered chain WITHOUT relying on
+    // an operator remembering the flag. -activaterollback now gates only the
+    // in-process reorg ACTION + the startup interlock (init.cpp), not validity.
+    //
+    // MAINNET-SCOPED BY CONSTRUCTION: nRollbackHeight is 54350 on mainnet and 0 on
+    // testnet/regtest/devnet/upstream, so this whole block is skipped off-mainnet
+    // (the mainnet-specific theft/anchor hashes are never consulted there) and the
+    // node is byte-identical to upstream. Each control is also internally
+    // null-guarded, so an unfinalized build stays inert even on mainnet.
+    const Consensus::Params& cons = chainman.GetConsensus();
+    if (cons.nRollbackHeight > 0) {
+        const uint256 thisHash = block.GetHash();
+
+        // (2a) DISALLOW THE ATTACK BLOCK -- reject the theft block by hash. This
+        //      is the direct half of the durability guarantee: the theft block can
+        //      never be (re)accepted into the index. Uses the per-network disallowed
+        //      hash (set only on mainnet), so no other network's value is consulted.
+        if (!cons.rollbackDisallowedHash.IsNull() && thisHash == cons.rollbackDisallowedHash) {
+            LogPrintf("ERROR: %s: PLAN X rejects disallowed (theft) block %s at height %d\n",
+                      __func__, thisHash.ToString(), nHeight);
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "planx-disallowed-block",
+                                 "block is the PLAN X disallowed (theft) block");
+        }
+
+        // (2b) DISALLOW ANY DESCENDANT OF THE ATTACK BLOCK -- reject any block
+        //      whose ancestry includes the disallowed hash. pindexPrev is the
+        //      fully-connected parent index; walking its ancestry (O(log n) via the
+        //      skiplist) lets us reject an entire chain that builds on the theft.
+        //      This is what makes the rollback DURABLE: it is not enough to prefer
+        //      the re-mined chain by work; the theft chain must be permanently
+        //      invalid so no amount of attacker hashpower can reorg it back in.
+        const uint256 disallowed = cons.rollbackDisallowedHash;
+        if (!disallowed.IsNull()) {
+            // The disallowed block sits at nRollbackHeight + 1 (theft block =
+            // anchor + 1). Use the per-network anchor height (we are inside the
+            // nRollbackHeight > 0 / mainnet scope). Look up the ancestor at that
+            // height; if it hashes to the disallowed block, this header descends
+            // from the theft.
+            const int theft_height = cons.nRollbackHeight + 1;
+            const CBlockIndex* pAncestorAtTheft = pindexPrev->GetAncestor(theft_height);
+            if (pAncestorAtTheft != nullptr &&
+                pAncestorAtTheft->GetBlockHash() == disallowed) {
+                LogPrintf("ERROR: %s: PLAN X rejects block %s at height %d -- ancestry includes the "
+                          "disallowed (theft) block %s at height %d\n",
+                          __func__, thisHash.ToString(), nHeight, disallowed.ToString(), theft_height);
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "planx-descends-disallowed",
+                                     "block descends from the PLAN X disallowed (theft) block");
+            }
+        }
+
+        // (1) CHECKPOINT PIN -- require the canonical pre-theft anchor as ancestor.
+        //     When finalized (non-null anchor) and this header is at/above the
+        //     anchor height, the chain MUST contain exactly the anchor block at
+        //     DEFAULT_ROLLBACK_HEIGHT. A chain that omits/replaces it is rejected.
+        //     Prefer the per-network consensus param when set; fall back to the
+        //     compile-time constants. Both must agree at activation.
+        const int pin_height = (cons.nRollbackHeight > 0) ? cons.nRollbackHeight
+                                                          : planx::DEFAULT_ROLLBACK_HEIGHT;
+        const uint256 pin_hash = !cons.rollbackAnchorHash.IsNull() ? cons.rollbackAnchorHash
+                                                                  : PlanXRollbackAnchorHash();
+        if (!pin_hash.IsNull() && pin_height > 0 && nHeight >= pin_height) {
+            const CBlockIndex* pAnchor = (nHeight == pin_height)
+                                             ? pindexPrev // anchor is this block's own slot; check below
+                                             : pindexPrev->GetAncestor(pin_height);
+            // When nHeight == pin_height, the anchor is *this* block, so compare its
+            // own hash; otherwise compare the ancestor at the pin height.
+            const uint256 anchorHashSeen = (nHeight == pin_height)
+                                               ? thisHash
+                                               : (pAnchor ? pAnchor->GetBlockHash() : uint256());
+            if (anchorHashSeen != pin_hash) {
+                LogPrintf("ERROR: %s: PLAN X checkpoint-pin mismatch at height %d: required anchor %s "
+                          "at height %d, chain has %s\n",
+                          __func__, nHeight, pin_hash.ToString(), pin_height,
+                          anchorHashSeen.IsNull() ? "none" : anchorHashSeen.ToString());
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "planx-anchor-mismatch",
+                                     "block is not anchored to the required PLAN X rollback ancestor");
+            }
         }
     }
 

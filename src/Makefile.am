@@ -455,6 +455,8 @@ BITCOIN_CORE_H = \
   policy/feerate.h \
   policy/fees.h \
   policy/outpoint_blacklist.h \
+  policy/planx_rollback.h \
+  policy/shielded_spend_freeze.h \
   policy/packages.h \
   policy/policy.h \
   policy/settings.h \
@@ -1119,6 +1121,8 @@ libbitcoin_common_a_SOURCES = \
   outputtype.cpp \
   policy/feerate.cpp \
   policy/outpoint_blacklist.cpp \
+  policy/planx_rollback.cpp \
+  policy/shielded_spend_freeze.cpp \
   policy/policy.cpp \
   protocol.cpp \
   psbt.cpp \

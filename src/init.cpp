@@ -50,7 +50,9 @@
 #include <node/txreconciliation.h>
 #include <policy/feerate.h>
 #include <policy/fees.h>
+#include <key_io.h>
 #include <policy/outpoint_blacklist.h>
+#include <policy/planx_rollback.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <rpc/blockchain.h>
@@ -719,6 +721,20 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-blacklistactivationheight=<n>",
                    "Activation height for the Layer 2 manual freeze rule (only meaningful with "
                    "-blacklistconsensus). Default: 0.",
+                   ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    // --- PLAN X: contingency rollback (incident 2026-05) -----------------------
+    // Recovery release: community vote passed; hashes/keys/compromised set are
+    // finalized. EXPERT / HARD-FORK gate, default OFF. When off, the node is
+    // byte-identical to upstream. See policy/planx_rollback.h.
+    argsman.AddArg("-activaterollback",
+                   "EXPERT/HARD-FORK: perform the contingency rollback's one-time in-process reorg at "
+                   "startup (incident 2026-05). The three coupled CONSENSUS rules -- (1) pin the chain to "
+                   "the required pre-theft ancestor, (2) permanently disallow the theft block and any chain "
+                   "containing it, (3) restrict spends of the compromised coins so they may only move to "
+                   "the fresh recovery treasury -- are ALWAYS enforced on mainnet by this release, with or "
+                   "without this flag. This flag only makes an already-synced node reorg immediately to the "
+                   "pre-theft anchor instead of waiting for the recovered chain to overtake by work; "
+                   "coalition miners need it to re-mine. Default: 0 (disabled).",
                    ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksdir=<dir>", "Specify directory to hold blocks subdirectory for *.dat files (default: <datadir>)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-fastprune", "Use smaller block files and lower minimum prune height for testing purposes", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
@@ -1756,6 +1772,340 @@ static bool InitOutpointBlacklist(const ArgsManager& args)
     return true;
 }
 
+/**
+ * PLAN X -- CONTINGENCY ROLLBACK (incident 2026-05). Seed the compromised recovery
+ * set from the compile-time, per-network seed constants, and read the
+ * -activaterollback flag (which gates only the in-process reorg, not validity).
+ * See policy/planx_rollback.h.
+ *
+ * Recovery release: community vote passed; the rotated keys, block hashes, and the
+ * compromised set are finalized (production).
+ *
+ * The compromised set is seeded UNCONDITIONALLY from the compiled seed constants,
+ * because the recovery spend restriction is consensus validity and must not depend
+ * on a launch flag. There are NO operator-supplied set extensions: validity has no
+ * per-node inputs. The set is empty (and the rule inert) off mainnet, since the
+ * compiled addresses decode only under mainnet parameters; the disallow-block and
+ * checkpoint-pin rules likewise stay inert while their per-network hashes are zero.
+ *
+ * When -activaterollback IS set, the startup interlock additionally refuses to boot
+ * if any rotated treasury slot / recovery destination is still a placeholder, and
+ * the one-time in-process reorg is performed (ActivatePlanXRollbackReorg).
+ *
+ * Must run after SelectParams() + logging start and before any networking /
+ * validation thread (the set is treated as immutable thereafter). Cold path.
+ */
+static bool InitPlanXRollback(const ArgsManager& args)
+{
+    // The contingency rollback's consensus VALIDITY rules -- the header-level
+    // disallow / descendant / checkpoint pins (validation.cpp, scoped by the
+    // per-network consensus.nRollbackHeight) and the recovery spend restriction
+    // (scoped by the compromised set below being non-empty) -- are driven by
+    // compiled, per-network state, NOT by -activaterollback. Seeding the
+    // compromised set here UNCONDITIONALLY is what lets a node that has not passed
+    // -activaterollback still enforce identical block validity, so that a fresh
+    // sync (or a "delete the block and chainstate databases and re-sync")
+    // converges on the recovered chain without depending on a launch flag.
+    //
+    // Mainnet-scoped by construction: the seed entries are mainnet addresses that
+    // decode only under mainnet parameters, so on every other network (and on a
+    // build with an empty seed list) the set stays empty and the recovery spend
+    // restriction is inert -- matching the header pins, which are inert wherever
+    // consensus.nRollbackHeight == 0.
+    //
+    // -activaterollback now gates ONLY the operational in-process reorg
+    // (ActivatePlanXRollbackReorg) and the activation interlock further below.
+    {
+        std::vector<std::string> seed_errors;
+
+        for (const char* token : planx::SEED_COMPROMISED_OUTPOINTS) {
+            const std::string s = TrimString(std::string(token));
+            if (s.empty()) continue;
+            const std::size_t colon = s.rfind(':');
+            if (colon == std::string::npos) {
+                seed_errors.emplace_back("rollback seed outpoint missing ':vout': " + s);
+                continue;
+            }
+            const std::string txidHex = TrimString(s.substr(0, colon));
+            const std::string voutStr = TrimString(s.substr(colon + 1));
+            uint32_t vout = 0;
+            if (txidHex.size() != 64 || !IsHex(txidHex) || !ParseUInt32(voutStr, &vout)) {
+                seed_errors.emplace_back("rollback seed outpoint invalid: " + s);
+                continue;
+            }
+            g_compromised_recovery_set.AddOutpoint(COutPoint(uint256S(txidHex), vout));
+        }
+
+        // Decode each compromised address to its scriptPubKey and match it via
+        // ContainsScript, covering any output that pays a compromised address once
+        // the rollback restores it. An address that does not decode under the
+        // active network's parameters is skipped (expected off mainnet).
+        for (const char* token : planx::SEED_COMPROMISED_ADDRESSES) {
+            const std::string addr = TrimString(std::string(token));
+            if (addr.empty()) continue;
+            const CTxDestination dest = DecodeDestination(addr);
+            if (!IsValidDestination(dest)) {
+                seed_errors.emplace_back("rollback seed address invalid for this network: " + addr);
+                continue;
+            }
+            const CScript script = GetScriptForDestination(dest);
+            if (script.empty()) {
+                seed_errors.emplace_back("rollback seed address produced empty script: " + addr);
+                continue;
+            }
+            g_compromised_recovery_set.AddScript(script);
+        }
+
+        for (const std::string& e : seed_errors) {
+            LogPrintf("Contingency rollback: skipped invalid compiled seed entry: %s\n", e);
+        }
+
+        // Build invariant: the recovery destination must never itself be a member
+        // of the compromised set, or a sweep to it would be a forbidden re-entry
+        // and the recovered funds would be locked by the very rule meant to free
+        // them. Fail closed on any build that violates this.
+        const CScript recovery = PlanXRecoveryScript();
+        if (!recovery.empty() && g_compromised_recovery_set.ContainsScript(recovery)) {
+            return InitError(Untranslated(
+                "Contingency rollback: the recovery destination is itself in the "
+                "compromised set -- recovered funds would be permanently locked. "
+                "Refusing to start. Re-derive the recovery destination so that it is "
+                "not one of the compromised addresses."));
+        }
+    }
+
+    // -activaterollback gates only the in-process reorg ACTION + the interlock.
+    g_activate_rollback = args.GetBoolArg("-activaterollback", false);
+    if (!g_activate_rollback) {
+        // Consensus validity is already armed above from compiled state; we simply
+        // do not perform the in-process reorg. Fork choice alone still rejects the
+        // disallowed chain and converges a fresh sync on the recovered chain.
+        if (g_compromised_recovery_set.IsActive() && !PlanXRecoveryScript().empty()) {
+            LogPrintf("Contingency rollback: consensus rules armed from compiled state; "
+                      "-activaterollback not set, so no in-process reorg is performed.\n");
+        }
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // INTERLOCK (incident 2026-05 key rotation). The gate is ON. Before doing
+    // ANYTHING, refuse to start if the rollback is not fully finalized -- i.e. if
+    // recovery would point at an unfinalized/placeholder address, or the baked
+    // block hashes are still null. This makes it structurally impossible for a
+    // shipped binary to ACTIVATE the rollback while pointing the only-to-7b
+    // recovery at a placeholder. The interlock checks:
+    //
+    //   (a) the recovery "7b" script is finalized (not empty / not the sentinel);
+    //   (b) every rotated treasury slot (founders/7a, devfund/7b, growth-escrow)
+    //       is finalized (not empty / not the sentinel);
+    //   (c) the recovery destination MATCHES the rotated devfund/7b and escrow
+    //       scripts (per spec, escrow + 7b share key set; recovery == that 7b
+    //       script). A drift here means the recovery constant was not re-pointed
+    //       at the rotated treasury -- fail closed rather than recover to a stale
+    //       address;
+    //   (d) the checkpoint-pin anchor hash and the disallowed-block hash are both
+    //       finalized (non-null). With the gate on, a null hash would silently
+    //       disable that control; we require them present so an activated node
+    //       cannot run a half-armed rollback.
+    //
+    // The placeholder sentinel is documented in policy/planx_rollback.h
+    // (PLACEHOLDER_SENTINEL_SCRIPT = a P2SH whose hash160 is all-0xEE). The baked
+    // hashes and the rotated PRODUCTION treasury/recovery scripts in this build are
+    // concrete (not the sentinel), so this interlock PASSES in the recovery-release
+    // build; it fires only if a slot is left/returned to a placeholder.
+    {
+        const Consensus::Params& cons = Params().GetConsensus();
+        const CScript recovery = PlanXRecoveryScript();
+        auto as_script = [](const std::vector<unsigned char>& v) {
+            return CScript(v.begin(), v.end());
+        };
+        const CScript founders = as_script(cons.foundersPaymentScript);
+        const CScript devfund  = as_script(cons.devFundPaymentScript);
+        const CScript escrow   = as_script(cons.growthEscrowScript);
+
+        std::vector<std::string> faults;
+        if (PlanXScriptIsPlaceholder(recovery)) {
+            faults.emplace_back("recovery-script (7b) is empty/placeholder");
+        }
+        if (PlanXScriptIsPlaceholder(founders)) {
+            faults.emplace_back("foundersPaymentScript (7a) is empty/placeholder");
+        }
+        if (PlanXScriptIsPlaceholder(devfund)) {
+            faults.emplace_back("devFundPaymentScript (7b) is empty/placeholder");
+        }
+        if (PlanXScriptIsPlaceholder(escrow)) {
+            faults.emplace_back("growthEscrowScript is empty/placeholder");
+        }
+        // (c) recovery must equal the rotated 7b/escrow Set-A script. Only check
+        //     once we know neither side is a placeholder, to keep the message clear.
+        if (!PlanXScriptIsPlaceholder(recovery) && !PlanXScriptIsPlaceholder(devfund) &&
+            recovery != devfund) {
+            faults.emplace_back("recovery-script (7b) does not match rotated devFundPaymentScript");
+        }
+        if (!PlanXScriptIsPlaceholder(recovery) && !PlanXScriptIsPlaceholder(escrow) &&
+            recovery != escrow) {
+            faults.emplace_back("recovery-script (7b) does not match rotated growthEscrowScript");
+        }
+        if (PlanXRollbackAnchorHash().IsNull() && cons.rollbackAnchorHash.IsNull()) {
+            faults.emplace_back("rollback anchor hash (checkpoint pin) is null/unfinalized");
+        }
+        if (cons.rollbackDisallowedHash.IsNull()) {
+            faults.emplace_back("disallowed (theft) block hash is null/unfinalized");
+        }
+
+        if (!faults.empty()) {
+            std::string joined;
+            for (const std::string& f : faults) {
+                joined += "\n  - " + f;
+            }
+            return InitError(Untranslated(strprintf(
+                "PLAN X interlock: -activaterollback was set but the rollback is NOT finalized; "
+                "refusing to start so recovery cannot point at a placeholder/unfinalized address. "
+                "Finalize the rotated treasury scripts + recovery destination + block hashes "
+                "before activating. Faults:%s", joined)));
+        }
+    }
+
+    // The compromised set is fully defined by the compiled, per-network seed
+    // (seeded unconditionally above, with the recovery-not-in-set self-lock already
+    // enforced there). There are NO per-node consensus inputs: validity does not
+    // depend on any launch argument, so two nodes always agree on which coins are
+    // subject to the recovery spend restriction.
+
+    LogPrintf("PLAN X CONTINGENCY ROLLBACK ACTIVATED (-activaterollback). "
+              "WARNING: this is a HARD FORK; it splits the chain unless universally adopted "
+              "and MUST be paired with the release checkpoint + finalized hashes/address.\n");
+    LogPrintf("PLAN X: compromised recovery set: %u outpoint(s), %u script(s); "
+              "disallowed-block %s; checkpoint-pin %s; recovery-script %s.\n",
+              static_cast<unsigned>(g_compromised_recovery_set.OutpointCount()),
+              static_cast<unsigned>(g_compromised_recovery_set.ScriptCount()),
+              Params().GetConsensus().rollbackDisallowedHash.IsNull() ? "UNFINALIZED(inert)" : "set",
+              PlanXRollbackAnchorHash().IsNull() ? "UNFINALIZED(inert)" : "set",
+              PlanXRecoveryScript().empty() ? "UNFINALIZED(inert)" : "set");
+    if (!g_compromised_recovery_set.IsActive() || PlanXRecoveryScript().empty()) {
+        LogPrintf("PLAN X: only-to-7b spend restriction is INERT (seed list empty and/or recovery "
+                  "script unfinalized). Finalize before relying on the rollback.\n");
+    }
+    return true;
+}
+
+/**
+ * Self-effecting rollback on an ALREADY-SYNCED running node.
+ *
+ * The header-level disallow/pin rules in ContextualCheckBlockHeader only run for
+ * NEW (not-yet-indexed) headers, so a node already at a tip that includes the
+ * theft block never rolls itself back -- it keeps building on the theft chain.
+ * This step closes that gap: when the -activaterollback gate is on and the active
+ * chain CONTAINS the disallowed (theft) block, it programmatically invalidates
+ * that block via the SAME path the `invalidateblock` RPC uses
+ * (CChainState::InvalidateBlock + ActivateBestChain), forcing an in-process reorg
+ * back to the pre-theft anchor (height DEFAULT_ROLLBACK_HEIGHT). The existing
+ * header-level disallow rule then PINS the chain so the theft block can never be
+ * reconnected.
+ *
+ * P-7 (Q-p7-sapling-unwind-test.md) PROVED that this running-node in-process reorg
+ * unwinds the Sapling shielded pool cleanly (no AbortNode). We deliberately do NOT
+ * use offline reindex / ReplayBlocks (that path lands in the armed crash-recovery
+ * SaplingDB-inconsistency guard and can AbortNode).
+ *
+ * ACTIVATION MODEL: activation = the coalition restarts the binary with
+ * -activaterollback at one coordinated UTC time. Because every coalition node
+ * runs this step on startup, they all reorg to the same anchor; the population
+ * then splits cleanly into coalition (rolled back + pinned) vs non-upgraded (still
+ * on the theft chain), which is the P-3 split bounded to exactly that boundary.
+ *
+ * GUARDS (fail-safe): does nothing unless the gate is on AND the disallowed hash
+ * is finalized AND the block is present AND it is on the ACTIVE chain. If any
+ * guard is not met (e.g. a freshly re-synced node that already rejected the theft
+ * header, or a node already at/below the anchor), this is a logged no-op.
+ *
+ * Must run AFTER chainstate load (the block index + active chain must exist) and
+ * BEFORE networking starts (so the node does not relay/extend the theft chain
+ * before rolling back). Cold path; runs once.
+ *
+ * @return true on success or a no-op; false only if the forced reorg itself fails
+ *         (in which case startup aborts via InitError rather than silently running
+ *         on the un-rolled-back chain).
+ */
+static bool ActivatePlanXRollbackReorg(ChainstateManager& chainman)
+{
+    if (!g_activate_rollback) {
+        return true; // gate off -> inert
+    }
+    // Use the per-network disallowed hash (the same value the consensus disallow-pin
+    // enforces), so the reorg action and validity agree on a single source of truth.
+    const uint256 disallowed = chainman.GetConsensus().rollbackDisallowedHash;
+    if (disallowed.IsNull()) {
+        return true; // disallowed hash unfinalized -> nothing to invalidate
+    }
+
+    // Look up the disallowed block index and verify it is on the active chain,
+    // under cs_main. We then release the lock before invalidating, exactly as the
+    // invalidateblock RPC does (InvalidateBlock/ActivateBestChain take cs_main
+    // themselves).
+    CBlockIndex* pblockindex = nullptr;
+    {
+        LOCK(cs_main);
+        pblockindex = chainman.m_blockman.LookupBlockIndex(disallowed);
+        if (pblockindex == nullptr) {
+            LogPrintf("PLAN X: disallowed (theft) block %s is NOT in the block index; "
+                      "no in-process rollback needed (node never saw it / already below the anchor).\n",
+                      disallowed.ToString());
+            return true;
+        }
+        if (!chainman.ActiveChain().Contains(pblockindex)) {
+            LogPrintf("PLAN X: disallowed (theft) block %s is present but NOT on the active chain; "
+                      "no in-process rollback needed (already reorged away / on a different chain).\n",
+                      disallowed.ToString());
+            return true;
+        }
+        // Sanity: the theft block sits at the anchor height + 1. Log loudly if the
+        // height does not match the expected slot (we still proceed -- the hash is
+        // the authoritative identifier -- but this surfaces a misconfiguration).
+        const int expected_height = planx::DEFAULT_ROLLBACK_HEIGHT + 1;
+        if (pblockindex->nHeight != expected_height) {
+            LogPrintf("PLAN X: WARNING: disallowed block %s is at height %d, expected %d "
+                      "(anchor %d + 1). Proceeding by hash.\n",
+                      disallowed.ToString(), pblockindex->nHeight, expected_height,
+                      planx::DEFAULT_ROLLBACK_HEIGHT);
+        }
+        LogPrintf("PLAN X: FORCING IN-PROCESS ROLLBACK. Active chain contains the disallowed (theft) "
+                  "block %s at height %d. Invalidating it to reorg back to the pre-theft anchor at "
+                  "height %d. This is the running-node reorg proven clean by the P-7 Sapling-unwind "
+                  "test; the header-level disallow rule then pins the chain.\n",
+                  disallowed.ToString(), pblockindex->nHeight, planx::DEFAULT_ROLLBACK_HEIGHT);
+    }
+
+    // Same call sequence as the invalidateblock RPC (src/rpc/blockchain.cpp).
+    BlockValidationState state;
+    CChainState& active_chainstate = chainman.ActiveChainstate();
+    active_chainstate.InvalidateBlock(state, pblockindex);
+    if (state.IsValid()) {
+        active_chainstate.ActivateBestChain(state);
+    }
+    if (!state.IsValid()) {
+        return InitError(Untranslated(strprintf(
+            "PLAN X: forced rollback of the disallowed (theft) block %s FAILED: %s. Refusing to start "
+            "on the un-rolled-back chain.", disallowed.ToString(), state.ToString())));
+    }
+
+    // Ensure validation-interface subscribers (wallet, indexes) observe all the
+    // BlockDisconnected events before we proceed, mirroring the RPC.
+    SyncWithValidationInterfaceQueue();
+
+    // Report the new tip. With the disallow rule active, the theft block is now
+    // BLOCK_FAILED_VALID and the anchor is the new active tip.
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip = chainman.ActiveChain().Tip();
+        LogPrintf("PLAN X: rollback reorg complete. Active tip is now %s at height %d "
+                  "(target anchor height %d).\n",
+                  tip ? tip->GetBlockHash().ToString() : "null",
+                  tip ? tip->nHeight : -1, planx::DEFAULT_ROLLBACK_HEIGHT);
+    }
+    return true;
+}
+
 bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 {
     const ArgsManager& args = *Assert(node.args);
@@ -1792,6 +2142,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // validation threads spin up, since the list is treated as immutable
     // afterwards. (The deterministic taint freeze needs no loader here.)
     if (!InitOutpointBlacklist(args)) {
+        return false; // InitError already reported the cause.
+    }
+
+    // PLAN X contingency rollback (incident 2026-05). Default OFF. Same lifecycle
+    // constraints as the freeze list above (after params + logging, before
+    // networking/validation threads). See policy/planx_rollback.h.
+    if (!InitPlanXRollback(args)) {
         return false; // InitError already reported the cause.
     }
 
@@ -2546,6 +2903,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     ChainstateManager& chainman = *Assert(node.chainman);
+
+    // PLAN X: force the in-process rollback reorg on an already-synced
+    // node BEFORE rebuilding HMP state and BEFORE networking, so all downstream
+    // state (HMP trackers, peer relay) reflects the rolled-back chain. Default
+    // no-op (gate off / theft block absent / not on the active chain). See
+    // ActivatePlanXRollbackReorg + policy/planx_rollback.h.
+    if (!ActivatePlanXRollbackReorg(chainman)) {
+        return false; // InitError already reported the cause.
+    }
 
     // Wire BroodNode lookup into HMP privilege tracker (requires dmnman from LoadChainstate)
     if (g_hmp_privilege && node.dmnman) {

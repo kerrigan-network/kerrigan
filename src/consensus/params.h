@@ -280,6 +280,48 @@ struct Params {
     std::vector<unsigned char> growthEscrowScript;       // 40% consensus-locked growth escrow (burns at nGrowthEscrowEndHeight)
 
     /**
+     * Legacy (superseded) growth-escrow scriptPubKeys (serialized CScripts).
+     *
+     * INCIDENT 2026-05 (P-8 fix). When the growth-escrow keys are rotated to a
+     * fresh script (growthEscrowScript above), any coins still sitting at a PRIOR
+     * escrow script would otherwise stop matching the single-script consensus lock
+     * -- the governance gate would never fire and the old balance would become
+     * spendable with just the old (compromised) keys. To keep those coins
+     * consensus-locked AND governance-gated, every superseded escrow script is
+     * recorded here. The mempool relay check and the ConnectBlock consensus check
+     * treat a coin paying growthEscrowScript OR any entry in this list as an
+     * escrow input, routing it through the same CheckGovernanceEscrowSpend gate.
+     *
+     * A governance-approved release may sweep EITHER the current or a legacy escrow
+     * script (enabling a later old->new consolidation), so the gate matches the
+     * approved payout against whichever script the inputs actually came from.
+     *
+     * Mainnet seeds the pre-rotation escrow P2SH; testnet/devnet/regtest are empty
+     * (default-inert: with no legacy scripts the behaviour is byte-identical to a
+     * single-script lock).
+     */
+    std::vector<std::vector<unsigned char>> legacyEscrowScripts;
+
+    /**
+     * True iff `spk` (a serialized scriptPubKey) is an escrow-locked script: the
+     * current growthEscrowScript OR any superseded legacyEscrowScripts entry. Empty
+     * scripts never match (an unconfigured escrow lock is inert). Used by both the
+     * mempool relay lock and the ConnectBlock consensus lock so the two sites stay
+     * in lockstep over the full escrow script set.
+     *
+     * @return true if `spk` is a current or legacy escrow scriptPubKey.
+     */
+    bool IsGrowthEscrowScript(const std::vector<unsigned char>& spk) const
+    {
+        if (spk.empty()) return false;
+        if (!growthEscrowScript.empty() && spk == growthEscrowScript) return true;
+        for (const auto& legacy : legacyEscrowScripts) {
+            if (!legacy.empty() && spk == legacy) return true;
+        }
+        return false;
+    }
+
+    /**
      * Growth escrow sunset height. After this block, the 40% coinbase allocation
      * burns via OP_RETURN instead of entering the escrow. Existing escrow UTXOs
      * become permanently unspendable. Set to 0 to disable (no sunset).
@@ -311,6 +353,44 @@ struct Params {
      */
     int nFreezeActivationHeight{0};
     int nFreezeRootHeight{0};
+
+    /**
+     * PLAN X -- CONTINGENCY ROLLBACK (incident 2026-05). See
+     * policy/planx_rollback.h for the full design.
+     *
+     * PENDING COMMUNITY VOTE -- do not deploy without vote + finalized
+     * hashes/address.
+     *
+     * These per-network params mirror the compile-time PLAN X constants so a
+     * network can carry the required-ancestor (checkpoint pin) height/hash in
+     * its chainparams alongside the hardcoded checkpoint. They are ONLY consulted
+     * when the -activaterollback gate is on (g_activate_rollback). With the gate
+     * off and these left at their defaults (height 0 / null hash) the rollback is
+     * fully inert and the node is byte-identical to upstream.
+     *
+     * nRollbackHeight: required-ancestor height (the last honest block before the
+     *   theft; placeholder 54350). 0 == disabled.
+     * rollbackAnchorHash: hash of the canonical block at nRollbackHeight. Null ==
+     *   not finalized (rule inert; a null anchor is never enforced).
+     * rollbackDisallowedHash: hash of the theft block (nRollbackHeight + 1). The
+     *   header acceptance path rejects this block and any block descending from it.
+     *   Per-network so the disallow/descendant pins never consult another network's
+     *   value; null == not finalized (rule inert).
+     */
+    int nRollbackHeight{0};
+    uint256 rollbackAnchorHash;
+    uint256 rollbackDisallowedHash;
+
+    /**
+     * nEscrowUnlockHeight (H_unlock): the earliest block height at which an escrow
+     * release (a spend of growthEscrowScript or any legacyEscrowScripts entry) may
+     * be valid. A block that contains an escrow-release spend at a height STRICTLY
+     * BELOW this value is consensus-invalid on every node, unconditionally -- no
+     * governance lookup, no IBD branch. This forbids any escrow movement during the
+     * PLAN X recovery re-mine window, where governance state cannot be verified at
+     * mining time. 0 == disabled (no unlock floor; pre-incident behaviour).
+     */
+    int nEscrowUnlockHeight{0};
 
     /** these parameters are only used on devnet and can be configured from the outside */
     int nMinimumDifficultyBlocks{0};

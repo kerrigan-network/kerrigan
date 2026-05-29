@@ -13,6 +13,7 @@
 #include <deploymentinfo.h>
 #include <llmq/params.h>
 #include <policy/outpoint_blacklist.h>
+#include <policy/planx_rollback.h>
 #include <script/script.h>
 #include <util/ranges.h>
 #include <util/strencodings.h>
@@ -318,31 +319,148 @@ public:
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};
 
-        // Fund addresses: 2-of-3 P2SH multisig for security
+        // Fund addresses: 2-of-3 P2SH multisig for security.
+        //
+        // ====================================================================
+        //  KEY ROTATION -- incident 2026-05 (community vote passed)
+        // --------------------------------------------------------------------
+        //  The original treasury keys below were compromised in the 2026-05
+        //  theft. The recovery release ROTATES them to two fresh 2-of-3 multisig
+        //  key sets, per the community spec:
+        //    - Set A (escrow 40% + devfund/7b 15%): SAME fresh signer set, so the
+        //      40% escrow and the 7b recovery destination share one key set.
+        //    - Set B (founders/7a 5%):              a DIFFERENT fresh signer set.
+        //  The only-to-7b recovery destination (policy/planx_rollback.h,
+        //  DEFAULT_RECOVERY_SCRIPT_7B) points at the SAME Set-A P2SH scriptPubKey
+        //  as growthEscrow + devFund here, so drained coins can only ever move to
+        //  the fresh Set-A treasury.
+        //
+        //  PRODUCTION KEYSET (recovery rotation, incident 2026-05). The Set-A /
+        //  Set-B redeemScripts below are the production 2-of-3 multisigs derived
+        //  offline via `createmultisig 2 [...]` from the collected signer pubkeys
+        //  (recovery-pubkeys.md), key order as collected:
+        //    Set-A addr 7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5 (escrow 40% + devfund/7b
+        //               15% + only-to-7b recovery destination -- one shared key set)
+        //    Set-B addr 7egyDfuQbiXFr8Qq8kwjHHinyot41dsBWc (founders/7a 5%)
+        // ====================================================================
+        //
+        // --- PRIOR (COMPROMISED) VALUES, kept as history only -----------------
         // founders (5%):        7aP2bhZGE6mT6Ae7DhPAbWz54gZahCqHP8 (2-of-3)
         // devfund (15%):        7bMQKKigBdndVPqitNQuzUXPMVcTqjWHP5 (2-of-3)
         // growth escrow (40%):  7TrJoc8f9AD32D225cV63CcdibhLyRXiP3 (2-of-3, consensus-locked)
+        // consensus.foundersPaymentScript = BuildP2SHTreasuryScript(
+        //     "5221035d9b548bdfe19f60e351a65a7b97a5752dd1063247ca204cc10663696e79fad2"
+        //     "210385a58f276109b9bfb16e68da9ba1262f8f75c86ebc1ae543c130459fc715a049"
+        //     "21031feba692dd7ec8cfad6558b15240097d085f356d81cfc7675cb47815c51d077053ae");
+        // consensus.devFundPaymentScript = BuildP2SHTreasuryScript(
+        //     "5221024dd90cdbcf689fee2292677df1a632ea389a626e8f11b1af6e0afac1db897282"
+        //     "2102204507581c8864c2d7ba124c14d131b972644956b04c8e6922e34c523c56e9ea"
+        //     "210289473d7b9bc4af599e99ced0fa74805f1492b6930a4eac1f2384126ade33024653ae");
+        // consensus.growthEscrowScript = BuildP2SHTreasuryScript(
+        //     "522103261171e2b23bf1d194df2c7a5d1d538c32b8f89663e44dd120f81d6c2247c4a5"
+        //     "210389c01e16affdc212dad4041fdcb541bb16cbc70228b6073243ee8139bb6d1a28"
+        //     "210208fcb17aa95588e3f37da5aa6513ecb8cca193249c67af7997a416993b6bbe8e53ae");
+        //
+        // --- ROTATED (FRESH) VALUES -- PRODUCTION KEYSET ---------------------
+        // founders (7a, 5%) -> Set B (different signers).
+        // 7egyDfuQbiXFr8Qq8kwjHHinyot41dsBWc
         consensus.foundersPaymentScript = BuildP2SHTreasuryScript(
-            "5221035d9b548bdfe19f60e351a65a7b97a5752dd1063247ca204cc10663696e79fad2"
-            "210385a58f276109b9bfb16e68da9ba1262f8f75c86ebc1ae543c130459fc715a049"
-            "21031feba692dd7ec8cfad6558b15240097d085f356d81cfc7675cb47815c51d077053ae");
+            "52210359e11029ee22bd0b0f8debdd1afe51bf0c6ee68f761d6828e9025098ec4024df"
+            "2103917af420524f31daccde4ae260a3ba74b0e92123ecc6c6a8c1430224b39cf43e"
+            "2103799f0c605e359557827d0e9707232469c1468e955fc0f7653b42dd6b9000f3ff53ae");
+        // devfund (7b, 15%) -> Set A (escrow + 7b share signers; == recovery dest).
+        // 7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5
         consensus.devFundPaymentScript = BuildP2SHTreasuryScript(
-            "5221024dd90cdbcf689fee2292677df1a632ea389a626e8f11b1af6e0afac1db897282"
-            "2102204507581c8864c2d7ba124c14d131b972644956b04c8e6922e34c523c56e9ea"
-            "210289473d7b9bc4af599e99ced0fa74805f1492b6930a4eac1f2384126ade33024653ae");
+            "5221030302c0ab19d44d26494e7e4189e14e91b861317ce813aa544efebacc13fb9600"
+            "21036a26c1b83b3cf923c1b4d7e3abbc04d91265d47d00a0ca6c985f92adb04bf992"
+            "210394a5d10cda90e851553c925f419d01e1a2316f63749fb4d90943c1d15006d4be53ae");
+        // growth escrow (40%) -> Set A (same signers as devfund/7b, per spec).
+        // 7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5
         consensus.growthEscrowScript = BuildP2SHTreasuryScript(
+            "5221030302c0ab19d44d26494e7e4189e14e91b861317ce813aa544efebacc13fb9600"
+            "21036a26c1b83b3cf923c1b4d7e3abbc04d91265d47d00a0ca6c985f92adb04bf992"
+            "210394a5d10cda90e851553c925f419d01e1a2316f63749fb4d90943c1d15006d4be53ae");
+
+        // Legacy (pre-rotation) growth-escrow scripts (incident 2026-05).
+        //
+        // The rotation above moved growthEscrowScript to the fresh Set-A P2SH, but
+        // the ~500k KRGN still parked at the OLD compromised escrow P2SH would no
+        // longer match the single-script consensus lock -- so the governance gate
+        // would never fire and the old balance would be spendable with just the old
+        // (compromised) keys. Recording the old escrow script here keeps those coins
+        // consensus-locked AND governance-gated at BOTH lock sites (mempool relay +
+        // ConnectBlock), and lets a future governance-approved old->new sweep run
+        // through the same gate.
+        //
+        // OLD growth-escrow address: 7TrJoc8f9AD32D225cV63CcdibhLyRXiP3 (2-of-3 P2SH).
+        // Recovered from release-v1.2.0-freeze:src/chainparams.cpp (the pre-rotation
+        // mainnet growthEscrowScript) and from the "PRIOR (COMPROMISED) VALUES"
+        // comment block above. Its redeemScript was:
+        //   522103261171e2b23bf1d194df2c7a5d1d538c32b8f89663e44dd120f81d6c2247c4a5
+        //   210389c01e16affdc212dad4041fdcb541bb16cbc70228b6073243ee8139bb6d1a28
+        //   210208fcb17aa95588e3f37da5aa6513ecb8cca193249c67af7997a416993b6bbe8e53ae
+        // hash160(redeemScript) = 0fd2497322e9d0a0c681fd5b4beb374d1b89392d, so the
+        // P2SH scriptPubKey is a9140fd2497322e9d0a0c681fd5b4beb374d1b89392d87 (the
+        // BuildP2SHTreasuryScript output for that same redeemScript -- used here so
+        // the value is derived, not hand-transcribed).
+        consensus.legacyEscrowScripts.push_back(BuildP2SHTreasuryScript(
             "522103261171e2b23bf1d194df2c7a5d1d538c32b8f89663e44dd120f81d6c2247c4a5"
             "210389c01e16affdc212dad4041fdcb541bb16cbc70228b6073243ee8139bb6d1a28"
-            "210208fcb17aa95588e3f37da5aa6513ecb8cca193249c67af7997a416993b6bbe8e53ae");
+            "210208fcb17aa95588e3f37da5aa6513ecb8cca193249c67af7997a416993b6bbe8e53ae"));
+
+        // Escrow-release unlock floor (incident 2026-05). No escrow
+        // release -- current or legacy -- may be mined below this height. This spans
+        // the entire PLAN X re-mine window (anchor 54350, old tip ~55011) plus a wide
+        // out-of-IBD safety margin, so the only-ever-legitimate escrow spend (the
+        // later old->new 500k consolidation) is forced to a height where the network
+        // is provably caught up and full funded-governance verification runs at mining
+        // time on every miner. Below this height the IBD-trust question never arises,
+        // so the unlock floor needs no node-state-dependent branch.
+        consensus.nEscrowUnlockHeight = 60000;
+
         consensus.nGrowthEscrowEndHeight = 262800; // ~12 months, 40% burns via OP_RETURN after this
 
         // Deterministic taint-root freeze (incident 2026-05). MAINNET ONLY.
-        // HUMAN MUST FINALISE nFreezeActivationHeight (H) BEFORE TAG: it has to sit
-        // comfortably above the tip at deploy time and after all operators upgrade.
-        // A checkpoint at H is added below to anchor the frozen chain. See
-        // policy/outpoint_blacklist.h for the algorithm + determinism argument.
-        consensus.nFreezeActivationHeight = freeze_seed::DEFAULT_FREEZE_ACTIVATION_HEIGHT; // 55000 (placeholder)
-        consensus.nFreezeRootHeight       = freeze_seed::DEFAULT_FREEZE_ROOT_HEIGHT;       // 54351 (theft block)
+        //
+        // On this recovery-release the v1.2.0 transparent taint-freeze is made
+        // INERT on this branch. It is DISABLED via the canonical "gate off"
+        // sentinel nFreezeActivationHeight == 0 (the enforcement guards in
+        // validation.cpp are `H > 0 && height >= H`, see PreChecks ~L1045 and
+        // ConnectBlock ~L3372, so H == 0 means the freeze ConnectBlock/PreChecks
+        // path is NEVER entered on mainnet). Rationale: this recovery release
+        // performs an in-process reorg back to the pre-theft anchor (height 54350)
+        // -- after that rollback the theft is reversed, so the freeze has no taint
+        // seed to descend from (its root is the theft block 54351 / drain script,
+        // both of which no longer exist on the canonical chain). Leaving the freeze
+        // armed would only collide with the 54350/54351 rollback range (the freeze
+        // root 54351 == the PLAN X disallowed theft block). The only-to-7b spend
+        // restriction (PLAN X, gated by -activaterollback) is the control that
+        // constrains the recovered coins; the transparent freeze is redundant and
+        // is therefore disabled here.
+        //
+        // NOTE: nFreezeRootHeight is left unchanged for documentation/provenance,
+        // but it is dead while nFreezeActivationHeight == 0 (the freeze set is only
+        // computed and consulted under `H > 0`).
+        consensus.nFreezeActivationHeight = 0; // freeze DISABLED (inert) on recovery-release
+        consensus.nFreezeRootHeight       = freeze_seed::DEFAULT_FREEZE_ROOT_HEIGHT;       // 54351 (theft block; dead while H==0)
+
+        // PLAN X -- CONTINGENCY ROLLBACK (incident 2026-05). MAINNET ONLY.
+        // Community vote PASSED; the block hashes below are the FINAL real values.
+        // These per-network params carry the consensus VALIDITY rules (the
+        // required-ancestor checkpoint pin and the disallowed theft block). They are
+        // enforced by every node running this release whenever set (nRollbackHeight
+        // > 0 == mainnet), independent of -activaterollback; off mainnet they are 0 /
+        // null and the node behaves as upstream. The height is the last honest block
+        // before the theft (54350); the anchor hash is the canonical block-54350
+        // hash; the disallowed hash is the theft block (54351). See
+        // policy/planx_rollback.h.
+        consensus.nRollbackHeight   = planx::DEFAULT_ROLLBACK_HEIGHT; // 54350 (final)
+        consensus.rollbackAnchorHash =
+            uint256S("0x35bdbd05e21cd0e9321b9406683efe77b52c32ae50dbbf9444bef20d55ce7aee");
+        // Per-network theft (disallowed) block hash, derived from the compiled
+        // constant so there is a single source of truth. Set only on mainnet; null
+        // on every other network, where the disallow/descendant pins stay inert.
+        consensus.rollbackDisallowedHash = PlanXDisallowedBlockHash();
 
         // "KRGN" Kerrigan mainnet network magic
         pchMessageStart[0] = 0x4b; // K
@@ -408,10 +526,23 @@ public:
         nPoolMaxParticipants = 20;
         nFulfilledRequestExpireTime = 60*60; // fulfilled requests expire in 1 hour
 
-        vSporkAddresses = {"KRnfZa6oT2hwLybJWVqgZ3TDPYB579deVr",
-                           "K8ENPxi1XejZ6cAEGe8jq6eD7NABkzeZaE",
-                           "KUi71L87dCrq2FLgXVUmzMfgCfaj3nGnSp"};
-        nMinSporkKeys = 2; // 2-of-3 spork key threshold
+        // KEY ROTATION -- incident 2026-05. The spork keys were rotated alongside
+        // the treasury (the prior spork private keys are in the compromised set).
+        // The spork is keyID/address-based (M-of-N over keyIDs, NOT P2SH); the
+        // recovery release wires the production Set-C 2-of-3 spork set with a fresh,
+        // dedicated key set that is separate from the treasury (recovery-pubkeys.md).
+        //
+        // --- PRIOR (COMPROMISED) spork set, kept as history only --------------
+        // vSporkAddresses = {"KRnfZa6oT2hwLybJWVqgZ3TDPYB579deVr",
+        //                    "K8ENPxi1XejZ6cAEGe8jq6eD7NABkzeZaE",
+        //                    "KUi71L87dCrq2FLgXVUmzMfgCfaj3nGnSp"};
+        // nMinSporkKeys = 2; // 2-of-3 spork key threshold
+        //
+        // --- ROTATED (FRESH) spork set -- PRODUCTION (Set C, 2-of-3) ----------
+        vSporkAddresses = {"KMBnmiFdQYtdFotANL8X1FmBsdEBWbWKLk",  // setC-signer1
+                           "KKCXQ3hJi3qscrDfkLXxqXU1X3uNneNikh",  // setC-signer2
+                           "KMskRADT8F1KbvDVeFpDquQMf4Td21Wbhb"}; // setC-signer3
+        nMinSporkKeys = 2; // 2-of-3 spork key threshold (dedicated recovery spork set)
 
         nCreditPoolPeriodBlocks = 576;
 
@@ -425,6 +556,13 @@ public:
                 // fooled onto a fork that omits the freeze. Until filled in, leave
                 // it commented out -- a placeholder hash would reject the real chain.
                 // {freeze_seed::DEFAULT_FREEZE_ACTIVATION_HEIGHT, uint256S("0x<fill-in-hash-of-block-55000>")},
+
+                // PLAN X rollback anchor (incident 2026-05). Community vote PASSED.
+                // This is the real block-54350 hash (the last honest block before
+                // the theft), matching consensus.rollbackAnchorHash above. This
+                // hardcoded checkpoint reinforces the checkpoint-pin so a node
+                // cannot be fooled onto a fork that omits the rollback.
+                {planx::DEFAULT_ROLLBACK_HEIGHT, uint256S("0x35bdbd05e21cd0e9321b9406683efe77b52c32ae50dbbf9444bef20d55ce7aee")},
             }
         };
 
