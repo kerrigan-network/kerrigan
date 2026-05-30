@@ -153,11 +153,12 @@ for name in os.listdir(bindir):
         with open(p, 'wb') as f: f.write(data.replace(src, new + pad))
 " "$SRCDIR" "$outdir/bin"
 
-    # Deterministic tarball: same source -> same SHA across rebuilds. The
-    # commit-time of the release tag (or, when not on a tagged commit, HEAD)
-    # provides a stable SOURCE_DATE_EPOCH; tar is normalised (sorted entries,
-    # owner=root, fixed mode bits, mtime pinned to SDE) and gzip is run with
-    # -n so no timestamp leaks into the gzip header.
+    # Deterministic tarball: same source -> same SHA across rebuilds. The HEAD
+    # commit time (whatever commit is checked out, tagged or not) is the stable
+    # SOURCE_DATE_EPOCH; tar is normalised (sorted entries, owner=root, fixed
+    # mode bits, mtime pinned to SDE) and gzip is run with -n so no timestamp
+    # leaks into the gzip header. The caller is responsible for checking out
+    # the release tag before invoking this script.
     local SDE
     SDE=$(git -C "$SRCDIR" log -1 --format=%ct 2>/dev/null || echo 0)
     export SOURCE_DATE_EPOCH="$SDE"

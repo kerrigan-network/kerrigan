@@ -165,16 +165,14 @@ CAmount PlatformShare(const CAmount reward)
             // Devfund legacy fallback sunsets at nLegacyDevfundSunsetHeight.
             // At/after sunset, a coinbase paying devfund to any legacy address
             // is bad-cb-payee; only the current devFundPaymentScript is valid.
-            const int sunset = m_consensus_params.nLegacyDevfundSunsetHeight;
-            if (sunset == 0 || nBlockHeight < sunset) {
+            if (IsLegacyTreasuryConsulted(nBlockHeight, m_consensus_params.nLegacyDevfundSunsetHeight)) {
                 legacies = &m_consensus_params.legacyDevFundScripts;
             }
         } else if (current_spk == m_consensus_params.foundersPaymentScript) {
             // Founders legacy fallback is gated by the same sunset for symmetry.
             // The v1.2.0 founders (Set-B) rotation went cleanly; this is a
             // hygiene-only sunset, not a leakage fix.
-            const int sunset = m_consensus_params.nLegacyDevfundSunsetHeight;
-            if (sunset == 0 || nBlockHeight < sunset) {
+            if (IsLegacyTreasuryConsulted(nBlockHeight, m_consensus_params.nLegacyDevfundSunsetHeight)) {
                 legacies = &m_consensus_params.legacyFoundersPaymentScripts;
             }
         }

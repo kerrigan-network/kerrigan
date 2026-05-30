@@ -4,6 +4,10 @@ This is free software; you can redistribute it and/or modify it under the
 terms of the MIT license. A copy of the license can be found in the file
 "LICENSE" at the root of this distribution.
 -----------------------------------------------------------------------------*/
+/* LOCAL PATCH (kerrigan v1.2.5): __DATE__/__TIME__ removed from the version
+ * print path for reproducible builds. Preserve on any dashbls refresh; without
+ * it, every build embeds the wall-clock time of compilation and breaks
+ * byte-identical determinism. See depends/patches/mimalloc/ if upstreamed. */
 #include "mimalloc.h"
 #include "mimalloc/internal.h"
 #include "mimalloc/atomic.h"

@@ -1792,9 +1792,9 @@ static bool InitOutpointBlacklist(const ArgsManager& args)
  * helper below.
  *
  * REMOVED (chain + network + ephemeral runtime state):
- *   blocks/, chainstate/, sapling/, evodb/, llmq/, indexes/
- *   mempool.dat, peers.dat, banlist.json, anchors.dat, netfulfilled.dat
- *   mncache.dat, governance.dat, sporks.dat, hmp_identity.dat
+ *   blocks/ (honors -blocksdir), chainstate/, sapling/, evodb/, llmq/, indexes/
+ *   mempool.dat, peers.dat, banlist.json, banlist.dat, anchors.dat,
+ *   netfulfilled.dat, mncache.dat, governance.dat, sporks.dat, hmp_identity.dat
  *   debug.log, fee_estimates.dat
  *
  * PRESERVED (operator data; never touched):
@@ -1802,47 +1802,100 @@ static bool InitOutpointBlacklist(const ArgsManager& args)
  *   settings.json, the PID lockfile and the datadir .lock are intentionally
  *   left alone (held by the running process).
  *
- * Runs once at startup before logging is open so the wipe of debug.log is safe.
- * Cold path.
+ * Runs once at startup BEFORE logging is open so the wipe of debug.log is safe.
+ * A second LogPrintf confirmation is emitted from RecordResetChainstate() after
+ * StartLogging() opens the new debug.log, so the wipe is visible on disk even
+ * when stderr is closed (e.g. -daemon).
+ *
+ * REFUSAL: -resetchainstate is honored ONLY when provided on the command line.
+ * A `resetchainstate=1` line in kerrigan.conf is the same footgun class as
+ * historical `reindex=1`: forget to remove it, every restart wipes state. We
+ * refuse to act on the conf-file source and ask the operator to pass the flag
+ * on the command line. Cold path.
  */
+static bool g_resetchainstate_fired = false; // true if a wipe ran this boot
+
 static bool ResetChainstateIfRequested(const ArgsManager& args, const fs::path& datadir)
 {
     if (!args.GetBoolArg("-resetchainstate", false)) {
         return true;
     }
 
+    // SOURCE GATE: only honor when the flag was on the command line. A
+    // resetchainstate=1 line in kerrigan.conf would wipe on EVERY restart --
+    // the operator forgets the line, loses peers.dat + state every boot. Same
+    // class as Bitcoin Core's historical reindex=1 footgun, worse because we
+    // also drop network state. GetCommandLineArgs() returns the CLI map only.
+    {
+        const auto cli = args.GetCommandLineArgs();
+        if (cli.find("resetchainstate") == cli.end()) {
+            return InitError(Untranslated(
+                "-resetchainstate was set in kerrigan.conf (or settings.json), not on "
+                "the command line. This flag is one-shot and destructive: leaving it "
+                "in a config file would wipe chain state on every restart. Remove the "
+                "line from the config and pass -resetchainstate on the command line "
+                "for a single boot."));
+        }
+    }
+
     // Loud stderr notice: the daemon log is about to be wiped, so without this
     // line the operator has no on-screen record that the destructive flag fired.
+    // (Under -daemon stderr is also gone after fork; the post-StartLogging
+    // LogPrintf in RecordResetChainstate() records the wipe in the new log.)
     tfm::format(std::cerr,
         "WARNING: -resetchainstate provided; wiping all on-disk chain-derived state in %s\n"
         "         (kerrigan.conf, wallets, and backups are preserved).\n",
         fs::PathToString(datadir));
 
+    // Resolve the blocks directory the same way the rest of the daemon does
+    // (ArgsManager::GetBlocksDirPath): honors -blocksdir + appends the network
+    // subdir + "blocks". Without this we'd wipe chainstate but leave an
+    // external blocks/ tree behind, producing inconsistent state on next boot.
+    // When -blocksdir is unset, this resolves to <datadir>/blocks (the same
+    // path the old code used). Side effect: GetBlocksDirPath() creates the dir
+    // if missing; for a first-boot reset that just makes an empty dir we
+    // immediately remove_all. Returns an empty path if -blocksdir points at a
+    // non-directory; refuse to wipe in that case so the operator sees the
+    // problem rather than a silent no-op.
+    const fs::path blocks_path = args.GetBlocksDirPath();
+    if (blocks_path.empty()) {
+        return InitError(Untranslated(
+            "-resetchainstate: could not resolve the blocks directory "
+            "(check -blocksdir points at an existing directory)."));
+    }
+
     // Directory trees to remove wholesale. fs::remove_all is std::filesystem's
     // (no-throw, ec overload); missing paths return 0 with no error set.
-    static const char* const kSubdirsToWipe[] = {
-        "blocks", "chainstate", "sapling", "evodb", "llmq", "indexes",
+    struct WipeTarget { const char* label; fs::path path; };
+    const WipeTarget kSubdirsToWipe[] = {
+        {"blocks",     blocks_path},
+        {"chainstate", datadir / "chainstate"},
+        {"sapling",    datadir / "sapling"},
+        {"evodb",      datadir / "evodb"},
+        {"llmq",       datadir / "llmq"},
+        {"indexes",    datadir / "indexes"},
     };
-    for (const char* sub : kSubdirsToWipe) {
-        const fs::path p = datadir / sub;
+    for (const auto& target : kSubdirsToWipe) {
         std::error_code ec;
-        const auto removed = fs::remove_all(p, ec);
+        const auto removed = fs::remove_all(target.path, ec);
         if (ec) {
             return InitError(Untranslated(strprintf(
                 "-resetchainstate: failed to remove %s: %s",
-                fs::PathToString(p), ec.message())));
+                fs::PathToString(target.path), ec.message())));
         }
         if (removed > 0) {
             tfm::format(std::cerr, "  removed %s (%llu entries)\n",
-                        fs::PathToString(p),
+                        fs::PathToString(target.path),
                         static_cast<unsigned long long>(removed));
         }
     }
 
     // Individual files to remove. dat caches, peer state, mempool, and the
-    // existing debug.log so the post-reset boot starts a fresh log.
+    // existing debug.log so the post-reset boot starts a fresh log. banlist.dat
+    // is the legacy Bitcoin Core 19.x ban file (superseded by banlist.json);
+    // include it so a long-lived datadir does not accumulate stale ban state.
     static const char* const kFilesToWipe[] = {
-        "mempool.dat", "peers.dat", "banlist.json",
+        "mempool.dat", "peers.dat", "banlist.json", "banlist.dat",
         "anchors.dat", "netfulfilled.dat",
         "mncache.dat", "governance.dat", "sporks.dat",
         "hmp_identity.dat", "fee_estimates.dat",
@@ -1865,7 +1918,26 @@ static bool ResetChainstateIfRequested(const ArgsManager& args, const fs::path& 
     tfm::format(std::cerr,
         "-resetchainstate: wipe complete. Daemon will continue startup and begin "
         "a fresh sync from peers.\n");
+    g_resetchainstate_fired = true;
     return true;
+}
+
+/**
+ * Post-StartLogging confirmation that the wipe ran. Recorded into the freshly-
+ * opened debug.log so the wipe is visible on disk even when stderr is gone
+ * (the -daemon case closes stdout/stderr before this point). The flag is
+ * passed only on the command line by construction (see the source-gate above).
+ */
+static void RecordResetChainstate()
+{
+    if (!g_resetchainstate_fired) {
+        return;
+    }
+    LogPrintf("WARNING: -resetchainstate executed at startup; chain-derived state "
+              "was wiped (blocks, chainstate, sapling, evodb, llmq, indexes, peers, "
+              "mempool, banlists). Fresh IBD will follow. -resetchainstate is "
+              "ONE-SHOT: pass on the command line only, never persist in the "
+              "config file (it would wipe on every restart).\n");
 }
 
 /**
@@ -1894,6 +1966,11 @@ static bool ResetChainstateIfRequested(const ArgsManager& args, const fs::path& 
  * Must run after LoadChainstate (so the active tip and the derived-cache
  * subsystems are live) and before ActivatePlanXRollbackReorg / networking
  * (so a contaminated node never relays or extends a divergent chain).
+ *
+ * Note on LLMQ caches (quorumdb/recsigdb/isdb/dkgdb): NOT checked here. They
+ * unwind via BlockDisconnected events through the validation interface and do
+ * not maintain a per-cache best-block cursor of the same shape as sapling and
+ * evodb, so there is no equivalent VerifyBestBlock contract to assert against.
  *
  * Cold path; runs once.
  */
@@ -1943,7 +2020,9 @@ static bool DetectPostRollbackContamination(const NodeContext& node)
         "FATAL: corrupted post-Plan-X-rollback state detected. The following derived "
         "caches disagree with the active chain tip %s (height %d):%s\n"
         "Run kerrigand with -resetchainstate to wipe chain-derived state and rebuild "
-        "from peers (wallets and config are preserved). See policy/planx_rollback.h.",
+        "from peers (wallets and config are preserved); or use -reindex for less "
+        "downtime if you trust the on-disk blocks/ contents. See "
+        "policy/planx_rollback.h.",
         tip_hash.ToString(), tip_height, joined)));
 }
 
@@ -2305,6 +2384,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // Detailed error printed inside StartLogging().
         return false;
     }
+
+    // -resetchainstate confirmation in the new debug.log. Under -daemon the
+    // pre-logging stderr notice is lost when stdout/stderr are closed at fork;
+    // this is the on-disk record that the destructive flag fired this boot.
+    RecordResetChainstate();
 
     LogPrintf("Using at most %i automatic connections (%i file descriptors available)\n", nMaxConnections, nFD);
 

@@ -17,6 +17,7 @@
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <cuckoocache.h>
+#include <deprecation.h>
 #include <flatfile.h>
 #include <hash.h>
 #include <kernel/coinstats.h>
@@ -4084,6 +4085,12 @@ void CChainState::UpdateTip(const CBlockIndex* pindexNew)
         }
     }
     UpdateTipLog(coins_tip, pindexNew, m_params, m_evoDb, __func__, "", warning_messages.original);
+
+    // v1.2.5 operator-side deprecation. Emits a periodic warning approaching
+    // the configured nDeprecationHeight and, at that height, initiates a
+    // clean shutdown. Disabled (no-op) when nDeprecationHeight == 0 (default
+    // off-mainnet and on releases without a planned deprecation cycle).
+    deprecation::CheckDeprecation(pindexNew->nHeight, m_params.GetConsensus());
 }
 
 /** Disconnect m_chain's tip.

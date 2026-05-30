@@ -330,6 +330,7 @@ BITCOIN_CORE_H = \
   dbwrapper.h \
   deploymentinfo.h \
   deploymentstatus.h \
+  deprecation.h \
   evo/assetlocktx.h \
   evo/dmn_types.h \
   evo/cbtx.h \
@@ -769,6 +770,7 @@ libbitcoin_node_a_SOURCES = \
   hmp/seal.cpp \
   hmp/seal_manager.cpp \
   hmp/vrf.cpp \
+  deprecation.cpp \
   script/sigcache.cpp \
   shutdown.cpp \
   spork.cpp \

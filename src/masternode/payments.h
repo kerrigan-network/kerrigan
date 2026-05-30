@@ -30,6 +30,25 @@ namespace Consensus { struct Params; }
  */
 CAmount PlatformShare(const CAmount masternodeReward);
 
+/**
+ * v1.2.5 legacy-devfund/founders sunset gate.
+ *
+ * Returns true when the legacy fallback scripts for devfund/founders should be
+ * consulted at @p nBlockHeight, given the network's configured sunset height
+ * @p nSunsetHeight (Consensus::Params::nLegacyDevfundSunsetHeight). The rule:
+ *   - sunset == 0          -> disabled (legacy always consulted; off-mainnet)
+ *   - nBlockHeight <  sunset -> consult legacy fallback (pre-sunset behaviour)
+ *   - nBlockHeight >= sunset -> do NOT consult legacy fallback; coinbase paying
+ *                               devfund/founders to a legacy address is
+ *                               bad-cb-payee.
+ * Pure helper exposed for unit tests so the boundary is pinned with a small
+ * fixture and no full ChainstateManager spin-up.
+ */
+constexpr bool IsLegacyTreasuryConsulted(int nBlockHeight, int nSunsetHeight) noexcept
+{
+    return nSunsetHeight == 0 || nBlockHeight < nSunsetHeight;
+}
+
 class CMNPaymentsProcessor
 {
 private:

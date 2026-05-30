@@ -184,6 +184,20 @@ CTransaction MakeShieldTx(const std::vector<COutPoint>& prevouts, int64_t valueB
     return CTransaction(mtx);
 }
 
+//! Local overloads so existing tests that don't care about height/reason keep
+//! reading cleanly after v1.2.5 removed the defaults from the production
+//! header. Default nHeight == 0 preserves the pre-gate "no IBD context"
+//! semantics the tests below rely on.
+inline bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx, const CCoinsViewCache& view)
+{
+    return ::PlanXOnlyToRecoveryAllowed(tx, view, /*reason=*/nullptr, /*nHeight=*/0);
+}
+inline bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx, const CCoinsViewCache& view,
+                                       const char** reason)
+{
+    return ::PlanXOnlyToRecoveryAllowed(tx, view, reason, /*nHeight=*/0);
+}
+
 //! RAII helper: arm PLAN X (gate on, set the recovery set) for one test and
 //! reliably reset the process-wide globals afterwards so tests don't leak state.
 struct PlanXArmGuard {
@@ -701,7 +715,7 @@ BOOST_AUTO_TEST_CASE(p4_clean_full_sweep_passes)
 // rule is inert; at/above it the rule enforces as before. Pre-1.2.5 a fresh
 // IBD failed at the first historical block that touched a now-compromised
 // address (slush, h=2036). With the gate in place those historical blocks
-// pass and the constraint binds only from h=54500 onward.
+// pass and the constraint binds only from RECOVERY_V2_ACTIVATION_HEIGHT (55200) onward.
 BOOST_AUTO_TEST_CASE(p5_ibd_height_gate_accepts_below_activation)
 {
     PlanXArmGuard arm;

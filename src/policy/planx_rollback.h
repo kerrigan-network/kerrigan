@@ -200,6 +200,11 @@ constexpr char DEFAULT_RECOVERY_SCRIPT_7B[] =
 // land at the consensus-locked growth-escrow address.
 constexpr char LEGACY_RECOVERY_SCRIPT_V1[] =
     "a9149835c3ef5977c827045edb682d113761856deb5887"; // Set-A P2SH (7gHTsab3...)
+// Kept at 54500 to preserve consensus parity with v1.2.3/v1.2.4. Pushing the
+// gate forward in v1.2.5 would silently accept blocks at heights 54500-NEW_GATE
+// that v1.2.3/v1.2.4 reject, causing a release-boundary chain split. The chain
+// is already past 54500 on every healthy v1.2.3+ node, so no forward "exposure
+// window" exists to widen.
 constexpr int  RECOVERY_V2_ACTIVATION_HEIGHT = 54500;
 
 /**
@@ -537,6 +542,12 @@ bool PlanXTxHasShieldedComponent(const CTransaction& tx);
  * @param view   The UTXO view providing the spent coins' scriptPubKeys.
  * @param[out] reason  On a VALID==false return, set to a short reject reason
  *                     token (may be nullptr if the caller does not need it).
+ * @param nHeight  Height of the block being validated (ConnectBlock) or
+ *                 tip-height + 1 (mempool PreChecks). Below the chainparams
+ *                 nPlanXRecoveryActivationHeight the rule is inert (returns
+ *                 true) so historical pre-activation blocks replay during
+ *                 fresh IBD. 0 disables the height gate (unit-test path only;
+ *                 all production callers thread the real height).
  * @return true if the tx is permitted under the only-to-7b restriction.
  *
  * Caller MUST hold cs_main when @p view is the live chainstate view (it is read
@@ -544,8 +555,8 @@ bool PlanXTxHasShieldedComponent(const CTransaction& tx);
  */
 bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx,
                                 const CCoinsViewCache& view,
-                                const char** reason = nullptr,
-                                int nHeight = 0);
+                                const char** reason,
+                                int nHeight);
 
 /**
  * @brief Build a claim-back marker scriptPubKey for the unlockmasternode RPC.

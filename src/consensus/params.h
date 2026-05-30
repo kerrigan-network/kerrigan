@@ -420,12 +420,26 @@ struct Params {
      * addresses later added to the compromised set still validate cleanly on a
      * fresh IBD. 0 == disabled (rule never fires; default off-mainnet).
      *
-     * On mainnet this matches planx::RECOVERY_V2_ACTIVATION_HEIGHT (54500): the
-     * recovery rule pinned the historical Set-A sweeps at h=54361/54364 and
-     * then handed off to the Set-D destination at 54500, which is the earliest
-     * height that constrains future compromised-coin movement.
+     * On mainnet this matches planx::RECOVERY_V2_ACTIVATION_HEIGHT (54500):
+     * pinned at 54500 since v1.2.3 to preserve cross-release consensus parity.
+     * The pre-activation legacy allowlist keeps the historical Set-A sweeps at
+     * h=54361/54364 valid; at/above 54500 only the Set-D destination is
+     * accepted for compromised-coin spends.
      */
     int nPlanXRecoveryActivationHeight{0};
+
+    /**
+     * Operator-side deprecation height (v1.2.5). The daemon refuses to extend
+     * the chain at or above this height and initiates a clean shutdown;
+     * ~15,000 blocks before, the GUI warning banner is set on every tip update
+     * and the daemon writes a log line every 100 blocks. Forces the network
+     * onto a current release rather than letting
+     * stragglers hold a stale codebase view. This is NOT consensus -- newer
+     * daemons happily mine past this height. v1.2.5 deprecates itself.
+     * 0 == disabled (default off-mainnet; default for any release without an
+     * intended deprecation cycle).
+     */
+    int nDeprecationHeight{0};
 
     /**
      * Legacy devfund + founders sunset height. Below this height, a coinbase

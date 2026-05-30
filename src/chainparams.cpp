@@ -504,6 +504,16 @@ public:
         // are deliberately not sunsetted (governance consolidation path).
         consensus.nLegacyDevfundSunsetHeight = 59000;
 
+        // Operator-side deprecation height (v1.2.5). v1.2.5 deprecates itself
+        // at h=184000 (~6 months at 2-min blocks from the v1.2.5 ship tip).
+        // ~15,000 blocks before the deprecation height, the GUI banner is set
+        // on every tip update and a log line is written every 100 blocks; at
+        // the height itself the daemon refuses to extend the chain and shuts
+        // down cleanly. Forces operators onto the next release rather than
+        // letting a stale codebase view linger. NOT consensus -- newer daemons
+        // mine straight through. See deprecation.h.
+        consensus.nDeprecationHeight = 184000;
+
         // "KRGN" Kerrigan mainnet network magic
         pchMessageStart[0] = 0x4b; // K
         pchMessageStart[1] = 0x52; // R
@@ -605,6 +615,13 @@ public:
                 // hardcoded checkpoint reinforces the checkpoint-pin so a node
                 // cannot be fooled onto a fork that omits the rollback.
                 {planx::DEFAULT_ROLLBACK_HEIGHT, uint256S("0x35bdbd05e21cd0e9321b9406683efe77b52c32ae50dbbf9444bef20d55ce7aee")},
+
+                // Post-recovery canonical anchor (v1.2.5). Pins the post-Plan-X
+                // canonical extension so a fresh IBD cannot be lured onto a
+                // competing fork at the historical contention point (h=54435).
+                // Selected at chain depth >50 blocks from the v1.2.5 ship tip,
+                // safely past the recovery activation height (54500).
+                {54550, uint256S("0x3bf21fa28ec8171a0030c0ea332d0c6cf0bb06f19721f677d07a4f3d46e18a6a")},
             }
         };
 

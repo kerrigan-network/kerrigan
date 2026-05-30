@@ -10,8 +10,10 @@
 
 #include <policy/planx_rollback.h>
 
+#include <chainparams.h>                 // Params()
 #include <coins.h>                       // CCoinsViewCache, Coin
 #include <consensus/amount.h>            // CAmount, COIN, MoneyRange
+#include <consensus/params.h>            // Consensus::Params
 #include <policy/shielded_spend_freeze.h> // ClassifyShieldedDirection
 #include <primitives/transaction.h>      // CTransaction, CTxOut
 #include <script/script.h>               // CScript, IsUnspendable, opcodetype
@@ -123,13 +125,18 @@ bool PlanXTxHasShieldedComponent(const CTransaction& tx)
 bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx,
                                 const CCoinsViewCache& view,
                                 const char** reason,
-                                int nHeight)
+                                int nHeight) // declared in planx_rollback.h; no defaults
 {
     static const CScript legacy_recovery = [](){
         auto b = ParseHex(planx::LEGACY_RECOVERY_SCRIPT_V1);
         return CScript(b.begin(), b.end());
     }();
-    const bool accept_legacy = (nHeight < planx::RECOVERY_V2_ACTIVATION_HEIGHT);
+    // Activation height is per-network state, sourced from chainparams so that
+    // off-mainnet networks (where the field is 0) cannot accidentally enforce
+    // the historical mainnet height. Mainnet pins this to
+    // planx::RECOVERY_V2_ACTIVATION_HEIGHT in chainparams.cpp.
+    const int activation_height = Params().GetConsensus().nPlanXRecoveryActivationHeight;
+    const bool accept_legacy = (nHeight < activation_height);
 
     // (0) IBD height-gate. The recovery rule constrains compromised-coin spends
     //     made AFTER the recovery activation height. Below that height a spend by
@@ -137,8 +144,11 @@ bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx,
     //     IBD would otherwise fail on the first historical block touching such an
     //     address. nHeight == 0 means the caller did not thread a height (the
     //     existing unit tests) -- preserve the pre-gate semantics for them so the
-    //     predicate still exercises end-to-end.
-    if (nHeight > 0 && nHeight < planx::RECOVERY_V2_ACTIVATION_HEIGHT) {
+    //     predicate still exercises end-to-end. activation_height == 0 means
+    //     off-mainnet: the height-gate is disabled here, but the rule may still
+    //     fire from other paths if g_compromised_recovery_set.IsActive() (which
+    //     is empty off-mainnet, so the rule is inert by construction).
+    if (nHeight > 0 && activation_height > 0 && nHeight < activation_height) {
         return true;
     }
 
