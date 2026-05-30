@@ -1898,11 +1898,8 @@ static bool InitPlanXRollback(const ArgsManager& args)
     //   (a) the recovery "7b" script is finalized (not empty / not the sentinel);
     //   (b) every rotated treasury slot (founders/7a, devfund/7b, growth-escrow)
     //       is finalized (not empty / not the sentinel);
-    //   (c) the recovery destination MATCHES the rotated devfund/7b and escrow
-    //       scripts (per spec, escrow + 7b share key set; recovery == that 7b
-    //       script). A drift here means the recovery constant was not re-pointed
-    //       at the rotated treasury -- fail closed rather than recover to a stale
-    //       address;
+    //   (c) recovery == devFundPaymentScript and recovery != growthEscrowScript
+    //       (the latter would put recovered coins under the escrow gate);
     //   (d) the checkpoint-pin anchor hash and the disallowed-block hash are both
     //       finalized (non-null). With the gate on, a null hash would silently
     //       disable that control; we require them present so an activated node
@@ -1936,13 +1933,15 @@ static bool InitPlanXRollback(const ArgsManager& args)
         if (PlanXScriptIsPlaceholder(escrow)) {
             faults.emplace_back("growthEscrowScript is empty/placeholder");
         }
-        // (c) recovery must equal the rotated growth-escrow script. devfund is now a
-        //     separate Set-D multisig and is intentionally distinct from recovery.
-        if (!PlanXScriptIsPlaceholder(recovery) && !PlanXScriptIsPlaceholder(escrow) &&
-            recovery != escrow) {
-            faults.emplace_back("recovery-script (7b) does not match rotated growthEscrowScript");
+        if (!PlanXScriptIsPlaceholder(recovery) && !PlanXScriptIsPlaceholder(devfund) &&
+            recovery != devfund) {
+            faults.emplace_back("recovery-script does not match devFundPaymentScript");
         }
-        if (PlanXRollbackAnchorHash().IsNull() && cons.rollbackAnchorHash.IsNull()) {
+        if (!PlanXScriptIsPlaceholder(recovery) && !PlanXScriptIsPlaceholder(escrow) &&
+            recovery == escrow) {
+            faults.emplace_back("recovery-script equals growthEscrowScript");
+        }
+        if (PlanXRollbackAnchorHash().IsNull() || cons.rollbackAnchorHash.IsNull()) {
             faults.emplace_back("rollback anchor hash (checkpoint pin) is null/unfinalized");
         }
         if (cons.rollbackDisallowedHash.IsNull()) {

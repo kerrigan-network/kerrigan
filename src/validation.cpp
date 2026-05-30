@@ -1104,7 +1104,8 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // short-circuits to allowed). See policy/planx_rollback.h.
     {
         const char* reason = nullptr;
-        if (!PlanXOnlyToRecoveryAllowed(tx, m_view, &reason)) {
+        if (!PlanXOnlyToRecoveryAllowed(tx, m_view, &reason,
+                                        m_active_chainstate.m_chain.Height() + 1)) {
             LogPrintf("PLAN X: rejecting mempool tx %s (compromised-coin spend not paying recovery script)\n",
                       tx.GetHash().ToString());
             return state.Invalid(TxValidationResult::TX_CONSENSUS,
@@ -3504,7 +3505,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
             // policy/planx_rollback.h.
             {
                 const char* reason = nullptr;
-                if (!PlanXOnlyToRecoveryAllowed(tx, view, &reason)) {
+                if (!PlanXOnlyToRecoveryAllowed(tx, view, &reason, pindex->nHeight)) {
                     LogPrintf("ERROR: %s: block %d contains tx %s spending compromised coins to a "
                               "non-recovery destination\n",
                               __func__, pindex->nHeight, tx.GetHash().ToString());

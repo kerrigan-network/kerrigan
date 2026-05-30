@@ -177,21 +177,27 @@ constexpr char DEFAULT_DISALLOWED_BLOCKHASH[] =
  * ----------------------------------------------------------------------------
  *  The value below is the P2SH scriptPubKey of the production Set-A 2-of-3
  *  multisig (address 7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5), derived offline via
- *  `createmultisig 2 [A1,A2,A3]` (canonical redeemScript, key order as collected
- *  in recovery-pubkeys.md). It is identical to the rotated devFundPaymentScript /
- *  growthEscrowScript in chainparams.cpp (escrow + 7b share one key set, per
- *  spec). The InitPlanXRollback interlock cross-checks recovery == devfund ==
- *  escrow at startup and refuses to activate the rollback on any drift, and also
- *  refuses to activate while this equals the documented placeholder sentinel.
+ *  `createmultisig 2 [D1,D2,D3]` over Set-D (canonical redeemScript, key order
+ *  per recovery-pubkeys.md). Equals consensus.devFundPaymentScript; explicitly
+ *  not growthEscrowScript (would subject recovery to the escrow lock).
  *
- *  Set-A redeemScript:
- *    5221030302c0ab19d44d26494e7e4189e14e91b861317ce813aa544efebacc13fb9600
- *    21036a26c1b83b3cf923c1b4d7e3abbc04d91265d47d00a0ca6c985f92adb04bf992
- *    210394a5d10cda90e851553c925f419d01e1a2316f63749fb4d90943c1d15006d4be53ae
+ *  Set-D redeemScript:
+ *    522102127f6236da2f3b8292e1e340df703a2c1589d48cec7b3419d8c99c3193befa97
+ *    210249c8aaf5465cf233354009d907179b4bc8a55f5809d9f5a0fb706e8537160ecd
+ *    21026b20a3200b07d1691bd4575c83e5e0d1d67324908c3c65d6771e56cd3c51292853ae
  * ============================================================================
  */
 constexpr char DEFAULT_RECOVERY_SCRIPT_7B[] =
-    "a9149835c3ef5977c827045edb682d113761856deb5887"; // PRODUCTION Set-A P2SH (7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5)
+    "a9143705ba0547a9d275c2cb6e6fa9d665061aa95fa687"; // Set-D P2SH (7XRanBZwu6RNPPyPzPmFkrPntUwrseHdbc)
+
+// v1.2.1/v1.2.2 recovery destination (Set-A 7g). Accepted as a legitimate
+// recovery output only for blocks STRICTLY below RECOVERY_V2_ACTIVATION_HEIGHT;
+// at/above, only DEFAULT_RECOVERY_SCRIPT_7B is valid. Keeps the two existing
+// historical sweeps (h=54361, 54364) valid without allowing future sweeps to
+// land at the consensus-locked growth-escrow address.
+constexpr char LEGACY_RECOVERY_SCRIPT_V1[] =
+    "a9149835c3ef5977c827045edb682d113761856deb5887"; // Set-A P2SH (7gHTsab3...)
+constexpr int  RECOVERY_V2_ACTIVATION_HEIGHT = 54500;
 
 /**
  * Placeholder sentinel scriptPubKey (hex). A rotated treasury slot or the
@@ -505,6 +511,7 @@ bool PlanXTxHasShieldedComponent(const CTransaction& tx);
  */
 bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx,
                                 const CCoinsViewCache& view,
-                                const char** reason = nullptr);
+                                const char** reason = nullptr,
+                                int nHeight = 0);
 
 #endif // BITCOIN_POLICY_PLANX_ROLLBACK_H

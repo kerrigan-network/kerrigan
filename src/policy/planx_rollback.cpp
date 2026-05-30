@@ -121,8 +121,15 @@ bool PlanXTxHasShieldedComponent(const CTransaction& tx)
 
 bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx,
                                 const CCoinsViewCache& view,
-                                const char** reason)
+                                const char** reason,
+                                int nHeight)
 {
+    static const CScript legacy_recovery = [](){
+        auto b = ParseHex(planx::LEGACY_RECOVERY_SCRIPT_V1);
+        return CScript(b.begin(), b.end());
+    }();
+    const bool accept_legacy = (nHeight < planx::RECOVERY_V2_ACTIVATION_HEIGHT);
+
     // (1) Inert short-circuits. The recovery spend restriction is consensus
     //     validity driven by the compiled recovery set and recovery destination,
     //     independent of -activaterollback, so all nodes running this release agree
@@ -194,11 +201,12 @@ bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx,
         if (txout.scriptPubKey.IsUnspendable()) {
             continue; // OP_RETURN marker -- ignore
         }
-        if (txout.scriptPubKey == recovery) {
+        if (txout.scriptPubKey == recovery ||
+            (accept_legacy && txout.scriptPubKey == legacy_recovery)) {
             if (MoneyRange(txout.nValue)) {
                 value_to_recovery += txout.nValue;
             }
-            continue; // pays the recovery destination -- allowed
+            continue;
         }
         // Any other destination (including change back into a compromised
         // address) is forbidden for a compromised-coin spend.

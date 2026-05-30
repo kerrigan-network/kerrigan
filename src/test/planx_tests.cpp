@@ -397,20 +397,16 @@ BOOST_AUTO_TEST_CASE(interlock_placeholder_detection)
     BOOST_CHECK(sentinel.IsPayToScriptHash());
 }
 
-// The recovery destination MUST equal the rotated Set-A 7b script (the interlock
-// in init.cpp enforces recovery == devFundPaymentScript == growthEscrowScript).
-// Here we lock in that the recovery constant is exactly the PRODUCTION Set-A P2SH
-// scriptPubKey (address 7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5), so a drift between
-// the recovery destination and the rotated treasury is caught at the unit level
-// too.
-BOOST_AUTO_TEST_CASE(recovery_is_production_setA_p2sh)
+// The recovery destination is Set-D devFundPaymentScript; the init.cpp interlock
+// also asserts it is NOT growthEscrowScript so recovered funds never land at the
+// consensus-locked 40% reserve.
+BOOST_AUTO_TEST_CASE(recovery_is_production_setD_p2sh)
 {
     const CScript recovery = PlanXRecoveryScript();
     BOOST_REQUIRE(!recovery.empty());
     BOOST_CHECK(recovery.IsPayToScriptHash());
-    // Exact bytes of the PRODUCTION Set-A P2SH scriptPubKey.
     const std::vector<unsigned char> want =
-        ParseHex("a9149835c3ef5977c827045edb682d113761856deb5887");
+        ParseHex("a9143705ba0547a9d275c2cb6e6fa9d665061aa95fa687");
     const std::vector<unsigned char> got(recovery.begin(), recovery.end());
     BOOST_CHECK(got == want);
 }
