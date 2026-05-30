@@ -14,10 +14,11 @@
 #include <consensus/amount.h>            // CAmount, COIN, MoneyRange
 #include <policy/shielded_spend_freeze.h> // ClassifyShieldedDirection
 #include <primitives/transaction.h>      // CTransaction, CTxOut
-#include <script/script.h>               // CScript, IsUnspendable
-#include <uint256.h>                     // uint256, uint256S
+#include <script/script.h>               // CScript, IsUnspendable, opcodetype
+#include <uint256.h>                     // uint256, uint256S, uint160
 #include <util/strencodings.h>           // ParseHex
 
+#include <cstring>
 #include <string>
 
 // Process-wide instances. Defined once here; declared extern in the header.
@@ -242,4 +243,61 @@ bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx,
         return false;
     }
     return true;
+}
+
+// ===========================================================================
+//  Recovery claim-back marker (unlockmasternode helper, OP_RETURN payload)
+// ===========================================================================
+
+CScript PlanXBuildClaimBackMarker(const uint160& operator_pubkey_hash,
+                                  const std::vector<unsigned char>& nonce)
+{
+    if (nonce.size() != planx::RECOVERY_CLAIM_NONCE_LEN) {
+        return CScript();
+    }
+    std::vector<unsigned char> payload;
+    payload.reserve(planx::RECOVERY_CLAIM_PAYLOAD_LEN);
+    // Magic in little-endian byte order. The constant 0x4b524350 is the host
+    // value of the four ASCII bytes 'K','R','C','P'; serialized LE this lays
+    // those bytes down in transmission order K,R,C,P, which is what an
+    // off-chain parser looking at the raw script bytes will see first.
+    const uint32_t m = planx::RECOVERY_CLAIM_MARKER_MAGIC;
+    payload.push_back(static_cast<unsigned char>(m & 0xff));
+    payload.push_back(static_cast<unsigned char>((m >> 8) & 0xff));
+    payload.push_back(static_cast<unsigned char>((m >> 16) & 0xff));
+    payload.push_back(static_cast<unsigned char>((m >> 24) & 0xff));
+    payload.insert(payload.end(), operator_pubkey_hash.begin(), operator_pubkey_hash.end());
+    payload.insert(payload.end(), nonce.begin(), nonce.end());
+    return CScript() << OP_RETURN << payload;
+}
+
+std::optional<ClaimBackMarker> PlanXParseClaimBackMarker(const CScript& script)
+{
+    CScript::const_iterator it = script.begin();
+    opcodetype opcode;
+    if (it == script.end()) return std::nullopt;
+    if (!script.GetOp(it, opcode)) return std::nullopt;
+    if (opcode != OP_RETURN) return std::nullopt;
+
+    std::vector<unsigned char> payload;
+    if (!script.GetOp(it, opcode, payload)) return std::nullopt;
+    if (payload.size() != planx::RECOVERY_CLAIM_PAYLOAD_LEN) return std::nullopt;
+    // The trailing iterator MUST equal end() -- a script with extra ops after
+    // the marker is not a marker we built and we refuse to mis-classify it.
+    if (it != script.end()) return std::nullopt;
+
+    const uint32_t magic =
+        (static_cast<uint32_t>(payload[0])) |
+        (static_cast<uint32_t>(payload[1]) << 8) |
+        (static_cast<uint32_t>(payload[2]) << 16) |
+        (static_cast<uint32_t>(payload[3]) << 24);
+    if (magic != planx::RECOVERY_CLAIM_MARKER_MAGIC) return std::nullopt;
+
+    ClaimBackMarker out;
+    std::memcpy(out.pubkey_hash.begin(),
+                payload.data() + 4,
+                planx::RECOVERY_CLAIM_PUBKEYHASH_LEN);
+    out.nonce.assign(payload.begin() + 4 + planx::RECOVERY_CLAIM_PUBKEYHASH_LEN,
+                     payload.end());
+    return out;
 }
