@@ -139,15 +139,49 @@ CAmount PlatformShare(const CAmount reward)
 
     // Use index-erasure to prevent a single coinbase output from satisfying
     // two identical required payments (e.g. if MN payout matches a treasury script+amount).
+    // For each expected treasury output, first try an EXACT match (current script);
+    // if that fails, try the legacy variants of the treasury slot the expected output
+    // belongs to. The legacy-script fallback is what makes historical blocks (mined
+    // under prior treasury rotations) validate without forking when the daemon's
+    // current treasury scripts have rotated. Same pattern as legacyEscrowScripts.
     std::vector<CTxOut> remaining(txNew.vout.begin(), txNew.vout.end());
     for (const auto& txout : voutTreasuryPayments) {
         auto it = std::find(remaining.begin(), remaining.end(), txout);
-        if (it == remaining.end()) {
-            LogPrintf("CMNPaymentsProcessor::%s -- ERROR! Missing treasury payment amount=%lld at height %d\n",
-                      __func__, txout.nValue, nBlockHeight);
+        if (it != remaining.end()) {
+            remaining.erase(it);
+            continue;
+        }
+
+        const std::vector<unsigned char> current_spk(txout.scriptPubKey.begin(),
+                                                     txout.scriptPubKey.end());
+        const std::vector<std::vector<unsigned char>>* legacies = nullptr;
+        if (current_spk == m_consensus_params.growthEscrowScript) {
+            legacies = &m_consensus_params.legacyEscrowScripts;
+        } else if (current_spk == m_consensus_params.devFundPaymentScript) {
+            legacies = &m_consensus_params.legacyDevFundScripts;
+        } else if (current_spk == m_consensus_params.foundersPaymentScript) {
+            legacies = &m_consensus_params.legacyFoundersPaymentScripts;
+        }
+        bool matched_legacy = false;
+        if (legacies != nullptr) {
+            for (const auto& legacy_bytes : *legacies) {
+                if (legacy_bytes.empty()) continue;
+                CScript legacy_spk(legacy_bytes.begin(), legacy_bytes.end());
+                CTxOut alt(txout.nValue, legacy_spk);
+                auto it2 = std::find(remaining.begin(), remaining.end(), alt);
+                if (it2 != remaining.end()) {
+                    remaining.erase(it2);
+                    matched_legacy = true;
+                    break;
+                }
+            }
+        }
+        if (!matched_legacy) {
+            LogPrintf("CMNPaymentsProcessor::%s -- ERROR! Missing treasury payment amount=%lld at height %d (tried current + %zu legacy scripts)\n",
+                      __func__, txout.nValue, nBlockHeight,
+                      legacies != nullptr ? legacies->size() : static_cast<size_t>(0));
             return false;
         }
-        remaining.erase(it);
     }
     return true;
 }

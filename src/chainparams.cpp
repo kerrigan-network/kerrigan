@@ -408,6 +408,24 @@ public:
             "210389c01e16affdc212dad4041fdcb541bb16cbc70228b6073243ee8139bb6d1a28"
             "210208fcb17aa95588e3f37da5aa6513ecb8cca193249c67af7997a416993b6bbe8e53ae"));
 
+        // Legacy (superseded) devfund + founders payment scripts. Historical blocks
+        // were mined paying these scripts; without legacy support the treasury
+        // validator would reject every historical block on reconnect (the v1.2.1
+        // "Missing treasury payment ... bad-cb-payee" crashloop). Same legacy-script
+        // pattern as legacyEscrowScripts above.
+        //
+        // legacyDevFundScripts: the pre-rotation devfund (7b) P2SH from the original
+        // v1.0.x/v1.1.x chainparams (a914621bd4ef835272a795b46babe03a1f5559e0b51e87).
+        // Set-A is the current devFundPaymentScript above, not legacy.
+        consensus.legacyDevFundScripts.push_back(
+            ParseHex("a914621bd4ef835272a795b46babe03a1f5559e0b51e87"));
+
+        // legacyFoundersPaymentScripts: the pre-rotation founders (7a) P2SH from the
+        // original v1.0.x/v1.1.x chainparams. Set-B is the current foundersPaymentScript
+        // above; only the OLD 7a is legacy here.
+        consensus.legacyFoundersPaymentScripts.push_back(
+            ParseHex("a914577268b060369798d215b6f278efb2cd72fa773487"));
+
         // Escrow-release unlock floor (incident 2026-05). No escrow
         // release -- current or legacy -- may be mined below this height. This spans
         // the entire PLAN X re-mine window (anchor 54350, old tip ~55011) plus a wide

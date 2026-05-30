@@ -322,6 +322,37 @@ struct Params {
     }
 
     /**
+     * Legacy (superseded) devfund + founders payment scripts. A historical block
+     * paying ANY entry here (at the expected amount) satisfies the treasury
+     * validation, in addition to the current devFundPaymentScript /
+     * foundersPaymentScript. This is the same legacy-script pattern as
+     * legacyEscrowScripts and lets the binary validate blocks mined under prior
+     * treasury rotations without forking. Empty == single-script only (default).
+     */
+    std::vector<std::vector<unsigned char>> legacyDevFundScripts;
+    std::vector<std::vector<unsigned char>> legacyFoundersPaymentScripts;
+
+    bool IsDevFundScript(const std::vector<unsigned char>& spk) const
+    {
+        if (spk.empty()) return false;
+        if (!devFundPaymentScript.empty() && spk == devFundPaymentScript) return true;
+        for (const auto& legacy : legacyDevFundScripts) {
+            if (!legacy.empty() && spk == legacy) return true;
+        }
+        return false;
+    }
+
+    bool IsFoundersPaymentScript(const std::vector<unsigned char>& spk) const
+    {
+        if (spk.empty()) return false;
+        if (!foundersPaymentScript.empty() && spk == foundersPaymentScript) return true;
+        for (const auto& legacy : legacyFoundersPaymentScripts) {
+            if (!legacy.empty() && spk == legacy) return true;
+        }
+        return false;
+    }
+
+    /**
      * Growth escrow sunset height. After this block, the 40% coinbase allocation
      * burns via OP_RETURN instead of entering the escrow. Existing escrow UTXOs
      * become permanently unspendable. Set to 0 to disable (no sunset).
