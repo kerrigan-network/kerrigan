@@ -368,12 +368,13 @@ public:
             "52210359e11029ee22bd0b0f8debdd1afe51bf0c6ee68f761d6828e9025098ec4024df"
             "2103917af420524f31daccde4ae260a3ba74b0e92123ecc6c6a8c1430224b39cf43e"
             "2103799f0c605e359557827d0e9707232469c1468e955fc0f7653b42dd6b9000f3ff53ae");
-        // devfund (7b, 15%) -> Set A (escrow + 7b share signers; == recovery dest).
-        // 7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5
+        // devfund (15%) -> Set D (independent of escrow/recovery, distinct signers'
+        // key set). Separating devfund from the growth-escrow address removes the
+        // perception that one address concentrates 55% of emissions.
         consensus.devFundPaymentScript = BuildP2SHTreasuryScript(
-            "5221030302c0ab19d44d26494e7e4189e14e91b861317ce813aa544efebacc13fb9600"
-            "21036a26c1b83b3cf923c1b4d7e3abbc04d91265d47d00a0ca6c985f92adb04bf992"
-            "210394a5d10cda90e851553c925f419d01e1a2316f63749fb4d90943c1d15006d4be53ae");
+            "522102127f6236da2f3b8292e1e340df703a2c1589d48cec7b3419d8c99c3193befa97"
+            "210249c8aaf5465cf233354009d907179b4bc8a55f5809d9f5a0fb706e8537160ecd"
+            "21026b20a3200b07d1691bd4575c83e5e0d1d67324908c3c65d6771e56cd3c51292853ae");
         // growth escrow (40%) -> Set A (same signers as devfund/7b, per spec).
         // 7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5
         consensus.growthEscrowScript = BuildP2SHTreasuryScript(
@@ -409,20 +410,26 @@ public:
             "210208fcb17aa95588e3f37da5aa6513ecb8cca193249c67af7997a416993b6bbe8e53ae"));
 
         // Legacy (superseded) devfund + founders payment scripts. Historical blocks
-        // were mined paying these scripts; without legacy support the treasury
+        // were mined paying these scripts; without legacy support the new treasury
         // validator would reject every historical block on reconnect (the v1.2.1
-        // "Missing treasury payment ... bad-cb-payee" crashloop). Same legacy-script
-        // pattern as legacyEscrowScripts above.
+        // crashloop). Same legacy-script pattern as legacyEscrowScripts above.
         //
-        // legacyDevFundScripts: the pre-rotation devfund (7b) P2SH from the original
-        // v1.0.x/v1.1.x chainparams (a914621bd4ef835272a795b46babe03a1f5559e0b51e87).
-        // Set-A is the current devFundPaymentScript above, not legacy.
+        // legacyDevFundScripts contains:
+        //   1) Set-A (the v1.2.1 rotated devfund, now superseded in v1.2.2 by Set-D):
+        //      P2SH a9149835c3ef5977c827045edb682d113761856deb5887.
+        //   2) The pre-rotation devfund (7b) P2SH from the original v1.0.x/v1.1.x
+        //      chainparams: a914621bd4ef835272a795b46babe03a1f5559e0b51e87.
+        consensus.legacyDevFundScripts.push_back(BuildP2SHTreasuryScript(
+            "5221030302c0ab19d44d26494e7e4189e14e91b861317ce813aa544efebacc13fb9600"
+            "21036a26c1b83b3cf923c1b4d7e3abbc04d91265d47d00a0ca6c985f92adb04bf992"
+            "210394a5d10cda90e851553c925f419d01e1a2316f63749fb4d90943c1d15006d4be53ae"));
         consensus.legacyDevFundScripts.push_back(
             ParseHex("a914621bd4ef835272a795b46babe03a1f5559e0b51e87"));
 
-        // legacyFoundersPaymentScripts: the pre-rotation founders (7a) P2SH from the
-        // original v1.0.x/v1.1.x chainparams. Set-B is the current foundersPaymentScript
-        // above; only the OLD 7a is legacy here.
+        // legacyFoundersPaymentScripts contains the pre-rotation founders (7a) P2SH
+        // from the original v1.0.x/v1.1.x chainparams. Set-B is the current founders
+        // script (still consensus.foundersPaymentScript above); only the OLD 7a is
+        // legacy here.
         consensus.legacyFoundersPaymentScripts.push_back(
             ParseHex("a914577268b060369798d215b6f278efb2cd72fa773487"));
 

@@ -1936,12 +1936,8 @@ static bool InitPlanXRollback(const ArgsManager& args)
         if (PlanXScriptIsPlaceholder(escrow)) {
             faults.emplace_back("growthEscrowScript is empty/placeholder");
         }
-        // (c) recovery must equal the rotated 7b/escrow Set-A script. Only check
-        //     once we know neither side is a placeholder, to keep the message clear.
-        if (!PlanXScriptIsPlaceholder(recovery) && !PlanXScriptIsPlaceholder(devfund) &&
-            recovery != devfund) {
-            faults.emplace_back("recovery-script (7b) does not match rotated devFundPaymentScript");
-        }
+        // (c) recovery must equal the rotated growth-escrow script. devfund is now a
+        //     separate Set-D multisig and is intentionally distinct from recovery.
         if (!PlanXScriptIsPlaceholder(recovery) && !PlanXScriptIsPlaceholder(escrow) &&
             recovery != escrow) {
             faults.emplace_back("recovery-script (7b) does not match rotated growthEscrowScript");
