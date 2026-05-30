@@ -109,10 +109,18 @@ build_linux() {
     export CXXFLAGS="${CXXFLAGS:-} $remap"
     export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$SRCDIR=/build --remap-path-prefix=$HOME/.cargo=/cargo"
 
+    # BDB (legacy single-file wallet.dat) lives under depends/. Pick it up via
+    # the env vars the autoconf BDB probe expects, so --with-incompatible-bdb
+    # finds it without falling back to the host BDB (which would not exist on a
+    # clean build VM and would silently disable the legacy wallet path).
+    export BDB_LIBS="-L$prefix/lib -ldb_cxx-4.8"
+    export BDB_CFLAGS="-I$prefix/include"
+
     CONFIG_SITE="$prefix/share/config.site" ./configure \
         --prefix="$prefix" \
         --disable-tests --disable-bench \
         --disable-online-rust \
+        --enable-wallet --with-incompatible-bdb --with-sqlite=yes \
         ${configure_host:+--host="$configure_host"}
     make -j"$JOBS"
 
@@ -145,8 +153,24 @@ for name in os.listdir(bindir):
         with open(p, 'wb') as f: f.write(data.replace(src, new + pad))
 " "$SRCDIR" "$outdir/bin"
 
-    ( cd "$RELEASE" && tar -czf "kerrigan-$VERSION-$tag.tar.gz" "kerrigan-$VERSION-$tag/" )
-    info "Produced $RELEASE/kerrigan-$VERSION-$tag.tar.gz"
+    # Deterministic tarball: same source -> same SHA across rebuilds. The
+    # commit-time of the release tag (or, when not on a tagged commit, HEAD)
+    # provides a stable SOURCE_DATE_EPOCH; tar is normalised (sorted entries,
+    # owner=root, fixed mode bits, mtime pinned to SDE) and gzip is run with
+    # -n so no timestamp leaks into the gzip header.
+    local SDE
+    SDE=$(git -C "$SRCDIR" log -1 --format=%ct 2>/dev/null || echo 0)
+    export SOURCE_DATE_EPOCH="$SDE"
+    (
+        cd "$RELEASE"
+        tar --sort=name \
+            --owner=0 --group=0 --numeric-owner \
+            --mode='u+rwX,go+rX,go-w' \
+            --mtime="@$SDE" \
+            -cf - "kerrigan-$VERSION-$tag/" \
+          | gzip -n -9 > "kerrigan-$VERSION-$tag.tar.gz"
+    )
+    info "Produced $RELEASE/kerrigan-$VERSION-$tag.tar.gz (SOURCE_DATE_EPOCH=$SDE)"
 }
 
 # --- Windows build (Docker Ubuntu 24.04 for C++20 mingw) ------------------
@@ -160,10 +184,16 @@ build_windows() {
     info "Windows build inside ubuntu:24.04 container"
     local src="$SRCDIR" rel="$RELEASE" ver="$VERSION"
 
+    # Stable SOURCE_DATE_EPOCH from the current commit, passed into the container
+    # so the in-container build picks up the same value the Linux path uses.
+    local SDE
+    SDE=$(git -C "$SRCDIR" log -1 --format=%ct 2>/dev/null || echo 0)
+
     docker run --rm --network host \
         -v "$src:$src" \
         -v "$rel:$rel" \
         -e SRC="$src" -e RELEASE="$rel" -e VERSION="$ver" -e JOBS="$JOBS" \
+        -e SOURCE_DATE_EPOCH="$SDE" \
         ubuntu:24.04 bash -euxc '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
@@ -180,10 +210,15 @@ build_windows() {
             export CXXFLAGS="${CXXFLAGS:-} $REMAP"
             export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$SRC=/build --remap-path-prefix=$HOME/.cargo=/cargo"
 
+            # BDB (legacy wallet) lives under depends/. Mirror the Linux recipe.
+            export BDB_LIBS="-L$SRC/depends/x86_64-w64-mingw32/lib -ldb_cxx-4.8"
+            export BDB_CFLAGS="-I$SRC/depends/x86_64-w64-mingw32/include"
+
             CONFIG_SITE="$SRC/depends/x86_64-w64-mingw32/share/config.site" ./configure \
                 --prefix=/ \
                 --disable-bench \
                 --disable-online-rust \
+                --enable-wallet --with-incompatible-bdb --with-sqlite=yes \
                 --without-libs
             make -j"$JOBS"
 
@@ -233,14 +268,23 @@ PYEOF
             cp src/qt/kerrigan-qt.exe "$out/"
 
             cd "$RELEASE"
-            zip -r "kerrigan-$VERSION-win64.zip" "kerrigan-$VERSION-win64/"
+            # Deterministic zip: sort entries, force a fixed mtime on every file
+            # (zip lacks a flag for this), strip extra fields. Same SDE the Linux
+            # tarball uses.
+            if [ -n "${SOURCE_DATE_EPOCH:-}" ] && [ "$SOURCE_DATE_EPOCH" != "0" ]; then
+                ts=$(date -u -d "@$SOURCE_DATE_EPOCH" "+%Y%m%d%H%M.%S")
+                find "kerrigan-$VERSION-win64/" -exec touch -h -t "$ts" {} +
+            fi
+            rm -f "kerrigan-$VERSION-win64.zip"
+            (cd "kerrigan-$VERSION-win64" && find . -type f | LC_ALL=C sort | \
+                zip -X -q "$RELEASE/kerrigan-$VERSION-win64.zip" -@)
 
             cd "$SRC"
             make deploy
             test -f "kerrigan-$VERSION-win64-setup.exe" || { echo "missing installer"; exit 1; }
             mv "kerrigan-$VERSION-win64-setup.exe" "$RELEASE/"
         '
-    info "Produced $RELEASE/kerrigan-$VERSION-win64.zip"
+    info "Produced $RELEASE/kerrigan-$VERSION-win64.zip (SOURCE_DATE_EPOCH=$SDE)"
 }
 
 # --- Run -------------------------------------------------------------------

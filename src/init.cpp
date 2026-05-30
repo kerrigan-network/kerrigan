@@ -109,6 +109,7 @@
 #include <messagesigner.h>
 #include <netfulfilledman.h>
 #include <sapling/sapling_init.h>
+#include <sapling/sapling_state.h>
 #include <hmp/brood_lookup.h>
 #include <hmp/commitment.h>
 #include <hmp/identity.h>
@@ -780,6 +781,14 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-addressindex", strprintf("Maintain a full address index, used to query for the balance, txids and unspent outputs for addresses (default: %u)", DEFAULT_ADDRESSINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::INDEXING);
     argsman.AddArg("-reindex", "Rebuild chain state and block index from the blk*.dat files on disk. This will also rebuild active optional indexes.", ArgsManager::ALLOW_ANY, OptionsCategory::INDEXING);
     argsman.AddArg("-reindex-chainstate", "Rebuild chain state from the currently indexed blocks. When in pruning mode or if blocks on disk might be corrupted, use full -reindex instead. Deactivate all optional indexes before running this.", ArgsManager::ALLOW_ANY, OptionsCategory::INDEXING);
+    argsman.AddArg("-resetchainstate",
+                   "DESTRUCTIVE: wipe ALL on-disk chain state (blocks, chainstate, sapling, "
+                   "evodb, llmq, indexes, peer/mempool/governance/spork dat files, debug.log) and "
+                   "then start a fresh IBD from peers. Preserves kerrigan.conf, wallet.dat, all "
+                   "named wallet directories, wallets/, backups/, settings.json. Operator-explicit "
+                   "recovery flag for post-Plan-X-rollback contamination -- see policy/planx_rollback.h. "
+                   "Default off; never auto-enabled.",
+                   ArgsManager::ALLOW_ANY, OptionsCategory::INDEXING);
     argsman.AddArg("-spentindex", strprintf("Maintain a full spent index, used to query the spending txid and input index for an outpoint (default: %u)", DEFAULT_SPENTINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::INDEXING);
     argsman.AddArg("-timestampindex", strprintf("Maintain a timestamp index for block hashes, used to query blocks hashes by a range of timestamps (default: %u)", DEFAULT_TIMESTAMPINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::INDEXING);
     argsman.AddArg("-txindex", strprintf("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)", DEFAULT_TXINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::INDEXING);
@@ -1773,6 +1782,172 @@ static bool InitOutpointBlacklist(const ArgsManager& args)
 }
 
 /**
+ * -resetchainstate: wipe ALL on-disk chain-derived state, then let normal startup
+ * rebuild it from scratch via fresh IBD.
+ *
+ * Operator-explicit, never default. Used to recover from corrupted derived caches
+ * (sapling tree / evodb / llmq / governance / sporks / indexes) left behind by a
+ * v1.2.3+ Plan-X in-process rollback on a node that held pre-rollback derived
+ * state. See policy/planx_rollback.h and the post-rollback contamination detection
+ * helper below.
+ *
+ * REMOVED (chain + network + ephemeral runtime state):
+ *   blocks/, chainstate/, sapling/, evodb/, llmq/, indexes/
+ *   mempool.dat, peers.dat, banlist.json, anchors.dat, netfulfilled.dat
+ *   mncache.dat, governance.dat, sporks.dat, hmp_identity.dat
+ *   debug.log, fee_estimates.dat
+ *
+ * PRESERVED (operator data; never touched):
+ *   kerrigan.conf, wallet.dat, wallets/, <walletname>/ subdirs, backups/,
+ *   settings.json, the PID lockfile and the datadir .lock are intentionally
+ *   left alone (held by the running process).
+ *
+ * Runs once at startup before logging is open so the wipe of debug.log is safe.
+ * Cold path.
+ */
+static bool ResetChainstateIfRequested(const ArgsManager& args, const fs::path& datadir)
+{
+    if (!args.GetBoolArg("-resetchainstate", false)) {
+        return true;
+    }
+
+    // Loud stderr notice: the daemon log is about to be wiped, so without this
+    // line the operator has no on-screen record that the destructive flag fired.
+    tfm::format(std::cerr,
+        "WARNING: -resetchainstate provided; wiping all on-disk chain-derived state in %s\n"
+        "         (kerrigan.conf, wallets, and backups are preserved).\n",
+        fs::PathToString(datadir));
+
+    // Directory trees to remove wholesale. fs::remove_all is std::filesystem's
+    // (no-throw, ec overload); missing paths return 0 with no error set.
+    static const char* const kSubdirsToWipe[] = {
+        "blocks", "chainstate", "sapling", "evodb", "llmq", "indexes",
+    };
+    for (const char* sub : kSubdirsToWipe) {
+        const fs::path p = datadir / sub;
+        std::error_code ec;
+        const auto removed = fs::remove_all(p, ec);
+        if (ec) {
+            return InitError(Untranslated(strprintf(
+                "-resetchainstate: failed to remove %s: %s",
+                fs::PathToString(p), ec.message())));
+        }
+        if (removed > 0) {
+            tfm::format(std::cerr, "  removed %s (%llu entries)\n",
+                        fs::PathToString(p),
+                        static_cast<unsigned long long>(removed));
+        }
+    }
+
+    // Individual files to remove. dat caches, peer state, mempool, and the
+    // existing debug.log so the post-reset boot starts a fresh log.
+    static const char* const kFilesToWipe[] = {
+        "mempool.dat", "peers.dat", "banlist.json",
+        "anchors.dat", "netfulfilled.dat",
+        "mncache.dat", "governance.dat", "sporks.dat",
+        "hmp_identity.dat", "fee_estimates.dat",
+        "debug.log",
+    };
+    for (const char* name : kFilesToWipe) {
+        const fs::path p = datadir / name;
+        std::error_code ec;
+        const bool was_present = fs::remove(p, ec);
+        if (ec) {
+            return InitError(Untranslated(strprintf(
+                "-resetchainstate: failed to remove %s: %s",
+                fs::PathToString(p), ec.message())));
+        }
+        if (was_present) {
+            tfm::format(std::cerr, "  removed %s\n", fs::PathToString(p));
+        }
+    }
+
+    tfm::format(std::cerr,
+        "-resetchainstate: wipe complete. Daemon will continue startup and begin "
+        "a fresh sync from peers.\n");
+    return true;
+}
+
+/**
+ * Detect a post-Plan-X-rollback derived-cache mismatch and refuse to start if
+ * one is found.
+ *
+ * Background: the v1.2.3 Plan-X in-process rollback (ActivatePlanXRollbackReorg)
+ * disconnects blocks via the same path as the invalidateblock RPC, which unwinds
+ * UTXO and triggers UndoBlock on the sapling/evodb tracks. On a node whose
+ * derived caches had already advanced past the disallowed block under a prior
+ * code path, the rollback can leave those caches pointing at a best-block that
+ * no longer exists on the active chain. The node looks healthy locally but
+ * produces blocks that reference anchors (sapling) or MN list snapshots that
+ * clean peers cannot reproduce, and the chain silently splits.
+ *
+ * Conservative detection (no half-revert risk): after LoadChainstate has set the
+ * active tip, ask each derived-cache subsystem whether its stored best-block
+ * matches the active tip. If either disagrees, the cache is contaminated; we
+ * refuse to start and point the operator at -resetchainstate. For NEW Plan-X
+ * activations going forward the same check fires before the reorg runs, so an
+ * activation that would leave the node contaminated is also stopped here.
+ *
+ * Inert when the Plan-X rollback rule itself is inert (no compromised set, off
+ * mainnet) or when the active chain is empty (a fresh -resetchainstate boot).
+ *
+ * Must run after LoadChainstate (so the active tip and the derived-cache
+ * subsystems are live) and before ActivatePlanXRollbackReorg / networking
+ * (so a contaminated node never relays or extends a divergent chain).
+ *
+ * Cold path; runs once.
+ */
+static bool DetectPostRollbackContamination(const NodeContext& node)
+{
+    if (!g_compromised_recovery_set.IsActive()) {
+        return true; // off mainnet / rule inert -> no contamination possible
+    }
+    if (node.chainman == nullptr || node.chain_helper == nullptr || node.evodb == nullptr) {
+        return true; // pre-load state; nothing to check
+    }
+
+    uint256 tip_hash;
+    int tip_height = -1;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* tip = node.chainman->ActiveChain().Tip();
+        if (tip == nullptr) {
+            return true; // empty chain (post-reset / fresh datadir) -> nothing to check
+        }
+        tip_hash = tip->GetBlockHash();
+        tip_height = tip->nHeight;
+    }
+
+    std::vector<std::string> drifts;
+
+    // Sapling state: separate LevelDB at <datadir>/sapling. Stores its own
+    // best-block hash that should equal the active tip exactly.
+    if (node.chain_helper->sapling_state) {
+        if (!node.chain_helper->sapling_state->VerifyBestBlock(tip_hash)) {
+            drifts.emplace_back("sapling commitment tree (sapling/)");
+        }
+    }
+
+    // EvoDB: deterministic MN list, special-tx caches. Same best-block contract.
+    if (!node.evodb->VerifyBestBlock(tip_hash)) {
+        drifts.emplace_back("evo state / deterministic MN list (evodb/)");
+    }
+
+    if (drifts.empty()) {
+        return true;
+    }
+
+    std::string joined;
+    for (const std::string& d : drifts) joined += "\n  - " + d;
+    return InitError(Untranslated(strprintf(
+        "FATAL: corrupted post-Plan-X-rollback state detected. The following derived "
+        "caches disagree with the active chain tip %s (height %d):%s\n"
+        "Run kerrigand with -resetchainstate to wipe chain-derived state and rebuild "
+        "from peers (wallets and config are preserved). See policy/planx_rollback.h.",
+        tip_hash.ToString(), tip_height, joined)));
+}
+
+/**
  * PLAN X -- CONTINGENCY ROLLBACK (incident 2026-05). Seed the compromised recovery
  * set from the compile-time, per-network seed constants, and read the
  * -activaterollback flag (which gates only the in-process reorg, not validity).
@@ -2116,6 +2291,16 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // Detailed error printed inside CreatePidFile().
         return false;
     }
+
+    // -resetchainstate: destructive wipe of chain-derived state. Runs BEFORE
+    // logging is opened so the old debug.log can be removed cleanly; the rest
+    // of startup behaves as if a fresh datadir was provided. Operator-explicit
+    // recovery path for post-Plan-X-rollback contamination -- never default.
+    // See policy/planx_rollback.h and ResetChainstateIfRequested above.
+    if (!ResetChainstateIfRequested(args, gArgs.GetDataDirNet())) {
+        return false; // InitError already reported the cause.
+    }
+
     if (!init::StartLogging(args)) {
         // Detailed error printed inside StartLogging().
         return false;
@@ -2898,6 +3083,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     ChainstateManager& chainman = *Assert(node.chainman);
+
+    // PLAN X: refuse to start if the derived caches (sapling tree, evodb)
+    // disagree with the active chain tip. Catches the v1.2.3 in-process-rollback
+    // contamination class BEFORE we extend the chain or run another reorg on
+    // top of stale state. Operator recovery is -resetchainstate. See
+    // DetectPostRollbackContamination + policy/planx_rollback.h.
+    if (!DetectPostRollbackContamination(node)) {
+        return false; // InitError already reported the cause.
+    }
 
     // PLAN X: force the in-process rollback reorg on an already-synced
     // node BEFORE rebuilding HMP state and BEFORE networking, so all downstream

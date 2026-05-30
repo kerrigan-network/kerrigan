@@ -487,6 +487,23 @@ public:
         // on every other network, where the disallow/descendant pins stay inert.
         consensus.rollbackDisallowedHash = PlanXDisallowedBlockHash();
 
+        // PLAN X recovery rule activation. The only-to-7b restriction applies
+        // only to blocks at/above this height. Mirrors the compile-time
+        // planx::RECOVERY_V2_ACTIVATION_HEIGHT and keeps historical pre-activation
+        // blocks (which contain legitimate spends from later-compromised addresses)
+        // valid on a fresh IBD.
+        consensus.nPlanXRecoveryActivationHeight = planx::RECOVERY_V2_ACTIVATION_HEIGHT; // 54500
+
+        // Legacy devfund + founders sunset (v1.2.5). At/after this height the
+        // legacyDevFundScripts / legacyFoundersPaymentScripts fallbacks are no
+        // longer consulted; a coinbase paying devfund/founders to any legacy
+        // address is rejected as bad-cb-payee. Closes the leakage that let a
+        // pool still using a v1.2.1-rotated treasury script have its blocks
+        // accepted indefinitely. Anchored to ship-time chain progression with
+        // a ~3-day runway above the current tip. Growth-escrow legacy entries
+        // are deliberately not sunsetted (governance consolidation path).
+        consensus.nLegacyDevfundSunsetHeight = 59000;
+
         // "KRGN" Kerrigan mainnet network magic
         pchMessageStart[0] = 0x4b; // K
         pchMessageStart[1] = 0x52; // R

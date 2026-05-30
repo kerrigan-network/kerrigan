@@ -697,4 +697,72 @@ BOOST_AUTO_TEST_CASE(p4_clean_full_sweep_passes)
     BOOST_CHECK(PlanXOnlyToRecoveryAllowed(tx, view));
 }
 
+// v1.2.5 IBD height-gate. Below RECOVERY_V2_ACTIVATION_HEIGHT the recovery
+// rule is inert; at/above it the rule enforces as before. Pre-1.2.5 a fresh
+// IBD failed at the first historical block that touched a now-compromised
+// address (slush, h=2036). With the gate in place those historical blocks
+// pass and the constraint binds only from h=54500 onward.
+BOOST_AUTO_TEST_CASE(p5_ibd_height_gate_accepts_below_activation)
+{
+    PlanXArmGuard arm;
+
+    CCoinsView base;
+    CCoinsViewCache view(&base);
+    const COutPoint op = AddCoinTo(view, TxId(50), 0, CompromisedScript());
+
+    // Same transaction shape that the post-activation tests reject (compromised
+    // input -> clean destination) MUST pass when the block height is below the
+    // gate: a legitimate pre-incident spend.
+    const CTransaction tx = MakeTx({op}, {CleanScript()});
+    const int activation = planx::RECOVERY_V2_ACTIVATION_HEIGHT;
+    const char* reason = nullptr;
+    BOOST_CHECK(PlanXOnlyToRecoveryAllowed(tx, view, &reason, /*nHeight=*/2036));
+    BOOST_CHECK(PlanXOnlyToRecoveryAllowed(tx, view, &reason, /*nHeight=*/activation - 1));
+    BOOST_CHECK(reason == nullptr);
+}
+
+// At/above the activation height the rule binds: the same transaction that
+// passes at activation-1 must be rejected at activation, with the documented
+// reason token. Pins the gate boundary so an off-by-one regression is caught.
+BOOST_AUTO_TEST_CASE(p5_ibd_height_gate_rejects_at_activation)
+{
+    PlanXArmGuard arm;
+
+    CCoinsView base;
+    CCoinsViewCache view(&base);
+    const COutPoint op = AddCoinTo(view, TxId(51), 0, CompromisedScript());
+
+    const CTransaction tx = MakeTx({op}, {CleanScript()});
+    const int activation = planx::RECOVERY_V2_ACTIVATION_HEIGHT;
+    const char* reason = nullptr;
+
+    BOOST_CHECK(!PlanXOnlyToRecoveryAllowed(tx, view, &reason, activation));
+    BOOST_REQUIRE(reason != nullptr);
+    BOOST_CHECK_EQUAL(std::string(reason), "planx-only-to-recovery");
+
+    reason = nullptr;
+    BOOST_CHECK(!PlanXOnlyToRecoveryAllowed(tx, view, &reason, activation + 1));
+    BOOST_REQUIRE(reason != nullptr);
+    BOOST_CHECK_EQUAL(std::string(reason), "planx-only-to-recovery");
+}
+
+// The default (nHeight == 0) call path used by the existing predicate-level
+// unit tests must still enforce -- absence of a height is treated as
+// "no IBD context" and the rule binds. This pins the back-compat semantics
+// the rest of the suite depends on.
+BOOST_AUTO_TEST_CASE(p5_default_height_zero_still_enforces)
+{
+    PlanXArmGuard arm;
+
+    CCoinsView base;
+    CCoinsViewCache view(&base);
+    const COutPoint op = AddCoinTo(view, TxId(52), 0, CompromisedScript());
+
+    const CTransaction tx = MakeTx({op}, {CleanScript()});
+    const char* reason = nullptr;
+    BOOST_CHECK(!PlanXOnlyToRecoveryAllowed(tx, view, &reason)); // default nHeight=0
+    BOOST_REQUIRE(reason != nullptr);
+    BOOST_CHECK_EQUAL(std::string(reason), "planx-only-to-recovery");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

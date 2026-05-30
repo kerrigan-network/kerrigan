@@ -130,6 +130,17 @@ bool PlanXOnlyToRecoveryAllowed(const CTransaction& tx,
     }();
     const bool accept_legacy = (nHeight < planx::RECOVERY_V2_ACTIVATION_HEIGHT);
 
+    // (0) IBD height-gate. The recovery rule constrains compromised-coin spends
+    //     made AFTER the recovery activation height. Below that height a spend by
+    //     the address holder was a legitimate pre-incident movement, and a fresh
+    //     IBD would otherwise fail on the first historical block touching such an
+    //     address. nHeight == 0 means the caller did not thread a height (the
+    //     existing unit tests) -- preserve the pre-gate semantics for them so the
+    //     predicate still exercises end-to-end.
+    if (nHeight > 0 && nHeight < planx::RECOVERY_V2_ACTIVATION_HEIGHT) {
+        return true;
+    }
+
     // (1) Inert short-circuits. The recovery spend restriction is consensus
     //     validity driven by the compiled recovery set and recovery destination,
     //     independent of -activaterollback, so all nodes running this release agree

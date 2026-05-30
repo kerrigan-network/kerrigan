@@ -211,7 +211,10 @@ void mi_options_print(void) mi_attr_noexcept
   const int vermajor = MI_MALLOC_VERSION/100;
   const int verminor = (MI_MALLOC_VERSION%100)/10;
   const int verpatch = (MI_MALLOC_VERSION%10);
-  _mi_message("v%i.%i.%i%s%s (built on %s, %s)\n", vermajor, verminor, verpatch,
+  // __DATE__ / __TIME__ removed to keep the build reproducible: those macros
+  // expand at compile time to the wall-clock moment of the build, which is the
+  // only remaining source of non-determinism in the produced binary.
+  _mi_message("v%i.%i.%i%s%s\n", vermajor, verminor, verpatch,
       #if defined(MI_CMAKE_BUILD_TYPE)
       ", " mi_stringify(MI_CMAKE_BUILD_TYPE)
       #else
@@ -223,7 +226,7 @@ void mi_options_print(void) mi_attr_noexcept
       #else
       ""
       #endif
-      , __DATE__, __TIME__);
+      );
 
   // show options
   for (int i = 0; i < _mi_option_last; i++) {

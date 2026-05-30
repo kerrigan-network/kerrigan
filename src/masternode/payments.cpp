@@ -156,11 +156,27 @@ CAmount PlatformShare(const CAmount reward)
                                                      txout.scriptPubKey.end());
         const std::vector<std::vector<unsigned char>>* legacies = nullptr;
         if (current_spk == m_consensus_params.growthEscrowScript) {
+            // Growth-escrow legacy list is NEVER sunsetted -- a legitimate
+            // consolidation of the OLD growth-escrow may still need to land via
+            // governance long after the devfund/founders rotation is fully
+            // settled. Different security model from devfund/founders.
             legacies = &m_consensus_params.legacyEscrowScripts;
         } else if (current_spk == m_consensus_params.devFundPaymentScript) {
-            legacies = &m_consensus_params.legacyDevFundScripts;
+            // Devfund legacy fallback sunsets at nLegacyDevfundSunsetHeight.
+            // At/after sunset, a coinbase paying devfund to any legacy address
+            // is bad-cb-payee; only the current devFundPaymentScript is valid.
+            const int sunset = m_consensus_params.nLegacyDevfundSunsetHeight;
+            if (sunset == 0 || nBlockHeight < sunset) {
+                legacies = &m_consensus_params.legacyDevFundScripts;
+            }
         } else if (current_spk == m_consensus_params.foundersPaymentScript) {
-            legacies = &m_consensus_params.legacyFoundersPaymentScripts;
+            // Founders legacy fallback is gated by the same sunset for symmetry.
+            // The v1.2.0 founders (Set-B) rotation went cleanly; this is a
+            // hygiene-only sunset, not a leakage fix.
+            const int sunset = m_consensus_params.nLegacyDevfundSunsetHeight;
+            if (sunset == 0 || nBlockHeight < sunset) {
+                legacies = &m_consensus_params.legacyFoundersPaymentScripts;
+            }
         }
         bool matched_legacy = false;
         if (legacies != nullptr) {

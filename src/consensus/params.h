@@ -413,6 +413,34 @@ struct Params {
     uint256 rollbackDisallowedHash;
 
     /**
+     * PLAN X recovery-spend activation height. The only-to-7b consensus rule
+     * (PlanXOnlyToRecoveryAllowed in policy/planx_rollback.h) is enforced only
+     * for blocks at height >= this value. Below this height the rule is inert,
+     * so historical pre-rollback blocks that contain legitimate spends from
+     * addresses later added to the compromised set still validate cleanly on a
+     * fresh IBD. 0 == disabled (rule never fires; default off-mainnet).
+     *
+     * On mainnet this matches planx::RECOVERY_V2_ACTIVATION_HEIGHT (54500): the
+     * recovery rule pinned the historical Set-A sweeps at h=54361/54364 and
+     * then handed off to the Set-D destination at 54500, which is the earliest
+     * height that constrains future compromised-coin movement.
+     */
+    int nPlanXRecoveryActivationHeight{0};
+
+    /**
+     * Legacy devfund + founders sunset height. Below this height, a coinbase
+     * that pays devfund/founders to ANY entry in legacyDevFundScripts /
+     * legacyFoundersPaymentScripts satisfies the treasury check (preserves
+     * historical block validity across the v1.0/1.1 -> v1.2 rotation). At or
+     * above this height, ONLY the current devFundPaymentScript /
+     * foundersPaymentScript are accepted; any block paying a legacy address is
+     * bad-cb-payee. The growth-escrow legacy list is NOT subject to this gate
+     * (a legitimate consolidation may still be needed via governance).
+     * 0 == disabled (legacy fallback always active; default off-mainnet).
+     */
+    int nLegacyDevfundSunsetHeight{0};
+
+    /**
      * nEscrowUnlockHeight (H_unlock): the earliest block height at which an escrow
      * release (a spend of growthEscrowScript or any legacyEscrowScripts entry) may
      * be valid. A block that contains an escrow-release spend at a height STRICTLY
