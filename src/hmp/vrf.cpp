@@ -14,9 +14,10 @@ uint256 ComputeVRFInput(const uint256& blockHash, const uint256& prevSealHash)
     const std::string domain = "HMP-VRF";
     hasher.write(MakeByteSpan(domain));
     hasher << blockHash;
-    // Mix in previous block's seal hash to prevent nonce grinding.
-    // The miner controls blockHash via nonce grinding, but cannot influence
-    // the previous block's seal which was assembled by other participants.
+    // prevSealHash binds the VRF input to the prior block hash. The prior
+    // miner could grind their own PoW to bias the next height's selection,
+    // but at their full PoW cost; the threshold check in IsVRFSelected
+    // further constrains the achievable bias.
     hasher << prevSealHash;
     return hasher.GetHash();
 }
