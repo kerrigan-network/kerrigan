@@ -202,8 +202,12 @@ struct Params {
      *  Pre-fix, ConnectBlock hashed the assembled-seal bytes if the cache was hot
      *  and fell back to hashPrevBlock otherwise; RollforwardBlock always used
      *  hashPrevBlock. Because m_assembledSeals does not survive a daemon restart,
-     *  the two paths could disagree, causing legitimate blocks to be rejected with
-     *  "invalid VRF proof" after restart.
+     *  the two paths could disagree, causing seal shares to be rejected as
+     *  REJECTED_INVALID by AddSealShare after restart. This is share-level, not
+     *  block-level: blocks are never rejected by this path. The operational
+     *  effect is seal weight collapsing toward the neutral 10000 baseline for
+     *  the restart window, demoting HMP to inert and reverting chain ranking
+     *  to raw PoW until the cache repopulates.
      *  0 = never activate (safe default). Set per-network in chainparams.cpp. */
     int nPrevSealHashFixHeight{0};
     int nHMPBroodDemotionDuration{1000}; // blocks to stay demoted after equivocation (~33hr)

@@ -6420,8 +6420,10 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
                         // ConnectBlock used to feed the in-memory assembled-seal cache here
                         // when hot and only fall back to pprev->GetBlockHash() otherwise; the
                         // two paths therefore disagreed across a daemon restart (the cache
-                        // does not survive restart), causing legitimate blocks to be rejected
-                        // as "invalid VRF proof". v1.2.6 harmonizes ConnectBlock against this
+                        // does not survive restart), causing seal shares to be rejected as
+                        // REJECTED_INVALID by AddSealShare after restart. Block validity is
+                        // unaffected; the effect is HMP demoted to neutral seal weight until
+                        // the cache repopulates. v1.2.6 harmonizes ConnectBlock against this
                         // path under nPrevSealHashFixHeight; see CChainState::ConnectBlock
                         // for the gate.
                         uint256 prevSealHashRF = pindex->pprev ? pindex->pprev->GetBlockHash() : uint256();
