@@ -629,6 +629,8 @@ public:
                 // Selected at chain depth >50 blocks from the v1.2.5 ship tip,
                 // safely past the recovery activation height (54500).
                 {54550, uint256S("0x3bf21fa28ec8171a0030c0ea332d0c6cf0bb06f19721f677d07a4f3d46e18a6a")},
+                // v1.2.6 canonical anchor (pre-prevSealHash-fix activation).
+                {55232, uint256S("0x3da428bd1b2b6e93045f7a19a1745ce9ce5c9494fb39da9ee12a466583d49dc5")},
             }
         };
 
