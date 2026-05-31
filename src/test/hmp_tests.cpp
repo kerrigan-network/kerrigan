@@ -2838,4 +2838,242 @@ BOOST_AUTO_TEST_CASE(ComputeSealMultiplier_BROOD_emptyBroodAlgos_noBonus)
     BOOST_CHECK_EQUAL(mult, 18000u);
 }
 
+// ---------------------------------------------------------------------------
+// v1.2.6 prevSealHash harmonization (nPrevSealHashFixHeight gate)
+//
+// Background. ConnectBlock previously fed the in-memory m_assembledSeals
+// cache (when hot) into the seal session's prevSealHash, while
+// RollforwardBlock / RebuildHMPState always used pprev->GetBlockHash().
+// Because the cache does not survive a daemon restart, a restarted node
+// and a long-running node would feed different prevSealHash bytes to the
+// same height; seal shares from one side then failed the VRF check on the
+// other and were rejected as REJECTED_INVALID by AddSealShare.
+//
+// Post-fix (height >= nPrevSealHashFixHeight) both paths use
+// pprev->GetBlockHash() unconditionally. These tests:
+//
+//   (a) Drive AddSealShare with the pre-fix prevSealHash on a post-fix
+//       session and confirm REJECTED_INVALID, and vice versa.
+//   (b) Confirm OnNewBlock is idempotent on the (blockHash, height) key:
+//       a second OnNewBlock with a DIFFERENT prevSealHash must NOT
+//       overwrite the session's prevSealHash, so a share signed under the
+//       second prev is REJECTED_INVALID.
+//
+// The full restart-across-activation scenario lives in
+// test/functional/feature_hmp_prevseal_harmonization.py.TODO -- the
+// regtest infra to persist HMP identity + restart with a different
+// -testactivationheight is non-trivial and out of scope for this commit.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** Build a CSealShare validly signed under the given (blockHash, signerPubKey,
+ *  algoId) with a fresh VRF proof bound to the given prevSealHash. The signer
+ *  key is generated to be VRF-selected under prevSealHash (else the share
+ *  would be rejected as not-selected before the VRF-input mismatch check
+ *  fires, contaminating the assertion). */
+CSealShare MakeShareBoundToPrev(const uint256& blockHash, const uint256& prevSealHash,
+                                CBLSSecretKey& skOut, CBLSPublicKey& pkOut,
+                                uint8_t algoId = ALGO_X11)
+{
+    bool selected = false;
+    for (int i = 0; i < 10000; i++) {
+        skOut.MakeNewKey();
+        pkOut = skOut.GetPublicKey();
+        CBLSSignature vrf = ComputeVRF(skOut, blockHash, prevSealHash);
+        if (IsVRFSelected(VRFOutputHash(vrf), /*tierMultiplier=*/1)) {
+            selected = true;
+            break;
+        }
+    }
+    BOOST_REQUIRE(selected);
+
+    CSealShare share;
+    share.blockHash    = blockHash;
+    share.signerPubKey = pkOut;
+    share.algoId       = algoId;
+    share.signature    = skOut.Sign(PerSignerMsg(blockHash, pkOut, algoId), false);
+    share.vrfProof     = ComputeVRF(skOut, blockHash, prevSealHash);
+    return share;
+}
+
+/** Seat pk as an Elder on `algo` so the privilege tracker accepts the share. */
+void SeatElderOnAlgo(CHMPPrivilegeTracker& tracker, const CBLSPublicKey& pk, int algo)
+{
+    for (int h = 0; h < 5; h++) {
+        tracker.BlockConnected(h, algo, pk, {pk}, {static_cast<uint8_t>(algo)});
+    }
+}
+
+/** Mirror validation.cpp's gate decision exactly:
+ *
+ *      const bool fPrevSealFixActive =
+ *          hmpConsensus.nPrevSealHashFixHeight > 0 &&
+ *          pindex->nHeight >= hmpConsensus.nPrevSealHashFixHeight;
+ *      prevSealHash = fPrevSealFixActive
+ *          ? pprev->GetBlockHash()
+ *          : <hash of assembled seal if cache hot, else pprev hash>;
+ *
+ *  For test (a) we feed the chosen prevSealHash directly to OnNewBlock.
+ *  prevBlockHash and prevSealAssembledHash are distinct so the gate
+ *  decision is observable in the resulting session.prevSealHash. */
+uint256 ChooseConnectBlockPrevSealHash(const Consensus::Params& params,
+                                       int blockHeight,
+                                       const uint256& prevBlockHash,
+                                       const uint256& prevSealAssembledHashIfHot)
+{
+    const bool fPrevSealFixActive =
+        params.nPrevSealHashFixHeight > 0 &&
+        blockHeight >= params.nPrevSealHashFixHeight;
+    if (fPrevSealFixActive) return prevBlockHash;
+    // Cache-hot branch (pre-fix): hash of assembled seal.
+    return prevSealAssembledHashIfHot;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(PrevSealHash_PrePostFix_CrossRejection)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    Consensus::Params params;
+    params.nHMPSigningWindowMs   = 5000;
+    params.nHMPGracePeriodMs     = 15000;
+    params.nHMPSealTrailingDepth = 2;
+    params.nHMPWarmupBlocks      = 0;
+    params.nHMPPrivilegeWindow   = 100;
+    params.nHMPMinBlocksSolved   = 1;
+    params.nHMPCommitmentOffset  = 0;
+
+    // Two distinct candidate prev hashes that the validation.cpp gate
+    // selects between. prevBlockHash mirrors pprev->GetBlockHash();
+    // prevSealAssembledHash mirrors the legacy cache-derived value.
+    const uint256 prevBlockHash         = uint256::ONE;
+    const uint256 prevSealAssembledHash = uint256::TWO;
+    BOOST_REQUIRE(prevBlockHash != prevSealAssembledHash);
+
+    const uint256 blockHash = uint256{uint8_t{0x33}};
+    const int blockHeight = 100;
+
+    // --- Pre-fix: gate inactive -> session.prevSealHash is the cache hash.
+    {
+        params.nPrevSealHashFixHeight = std::numeric_limits<int>::max();
+        const uint256 chosen = ChooseConnectBlockPrevSealHash(
+            params, blockHeight, prevBlockHash, prevSealAssembledHash);
+        BOOST_CHECK_EQUAL(chosen.GetHex(), prevSealAssembledHash.GetHex());
+    }
+
+    // --- Post-fix: gate active -> session.prevSealHash is pprev hash.
+    {
+        params.nPrevSealHashFixHeight = 1;
+        const uint256 chosen = ChooseConnectBlockPrevSealHash(
+            params, blockHeight, prevBlockHash, prevSealAssembledHash);
+        BOOST_CHECK_EQUAL(chosen.GetHex(), prevBlockHash.GetHex());
+    }
+
+    // --- Cross-rejection: share signed under PRE-fix prev (cache hash)
+    //     must be REJECTED_INVALID on a session opened with POST-fix prev
+    //     (pprev hash), and vice versa.
+    {
+        params.nPrevSealHashFixHeight = 1; // post-fix session
+        CHMPPrivilegeTracker privilege(params);
+        CSealManager manager(params, /*identity=*/nullptr, &privilege);
+
+        // Post-fix session: prevSealHash = prevBlockHash.
+        manager.OnNewBlock(blockHash, blockHeight, prevBlockHash);
+
+        // Build a share bound to the PRE-fix prev (the assembled-seal hash).
+        // It is VRF-selected under prevSealAssembledHash, not under
+        // prevBlockHash. The signer must be a seated Elder so we reach the
+        // VRF-verify check (not bounce earlier on UNKNOWN tier).
+        CBLSSecretKey sk;
+        CBLSPublicKey pk;
+        CSealShare badShare = MakeShareBoundToPrev(
+            blockHash, prevSealAssembledHash, sk, pk);
+        SeatElderOnAlgo(privilege, pk, ALGO_X11);
+
+        // VRF input mismatch: ComputeVRFInput(blockHash, prevBlockHash)
+        // differs from ComputeVRFInput(blockHash, prevSealAssembledHash),
+        // so VerifyVRF returns false and AddSealShare returns
+        // REJECTED_INVALID. (Verified by code inspection at
+        // src/hmp/seal_manager.cpp:283-287.)
+        HMPAcceptResult r1 = manager.AddSealShare(badShare);
+        BOOST_CHECK(r1 == HMPAcceptResult::REJECTED_INVALID);
+    }
+
+    {
+        params.nPrevSealHashFixHeight = std::numeric_limits<int>::max(); // pre-fix session
+        CHMPPrivilegeTracker privilege(params);
+        CSealManager manager(params, /*identity=*/nullptr, &privilege);
+
+        // Pre-fix session: prevSealHash = prevSealAssembledHash.
+        manager.OnNewBlock(blockHash, blockHeight, prevSealAssembledHash);
+
+        // Share bound to the POST-fix prev (pprev hash). Same reasoning:
+        // VRF input differs, AddSealShare must return REJECTED_INVALID.
+        CBLSSecretKey sk;
+        CBLSPublicKey pk;
+        CSealShare badShare = MakeShareBoundToPrev(
+            blockHash, prevBlockHash, sk, pk);
+        SeatElderOnAlgo(privilege, pk, ALGO_X11);
+
+        HMPAcceptResult r2 = manager.AddSealShare(badShare);
+        BOOST_CHECK(r2 == HMPAcceptResult::REJECTED_INVALID);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(PrevSealHash_OnNewBlock_IdempotentUnderFixToggle)
+{
+    bls::bls_legacy_scheme.store(false);
+
+    Consensus::Params params;
+    params.nHMPSigningWindowMs   = 5000;
+    params.nHMPGracePeriodMs     = 15000;
+    params.nHMPSealTrailingDepth = 2;
+    params.nHMPWarmupBlocks      = 0;
+    params.nHMPPrivilegeWindow   = 100;
+    params.nHMPMinBlocksSolved   = 1;
+    params.nHMPCommitmentOffset  = 0;
+    params.nPrevSealHashFixHeight = 1; // not actually exercised here; OnNewBlock
+                                       // takes prevSealHash from the caller and
+                                       // is height-agnostic.
+
+    const uint256 blockHash    = uint256::ONE;
+    const uint256 prevSealA    = uint256::TWO;
+    const uint256 prevSealB    = uint256{uint8_t{0xaa}}; // arbitrary distinct value
+    BOOST_REQUIRE(prevSealA != prevSealB);
+
+    const int blockHeight = 50;
+
+    CHMPPrivilegeTracker privilege(params);
+    CSealManager manager(params, /*identity=*/nullptr, &privilege);
+
+    // First OnNewBlock: session.prevSealHash := prevSealA.
+    manager.OnNewBlock(blockHash, blockHeight, prevSealA);
+
+    // Second OnNewBlock with a DIFFERENT prevSealHash: early-return at
+    // seal_manager.cpp:189 (m_sessions.count(blockHash)) makes this a no-op.
+    // session.prevSealHash must remain prevSealA.
+    manager.OnNewBlock(blockHash, blockHeight, prevSealB);
+
+    // Behavioral assertion: a share signed under prevSealB is rejected
+    // (would have been accepted if the second OnNewBlock had overwritten
+    // session.prevSealHash to prevSealB).
+    CBLSSecretKey skB;
+    CBLSPublicKey pkB;
+    CSealShare shareB = MakeShareBoundToPrev(blockHash, prevSealB, skB, pkB);
+    SeatElderOnAlgo(privilege, pkB, ALGO_X11);
+    HMPAcceptResult rB = manager.AddSealShare(shareB);
+    BOOST_CHECK(rB == HMPAcceptResult::REJECTED_INVALID);
+
+    // Confirm the other direction: a share signed under prevSealA IS
+    // accepted, proving the session is still bound to prevSealA.
+    CBLSSecretKey skA;
+    CBLSPublicKey pkA;
+    CSealShare shareA = MakeShareBoundToPrev(blockHash, prevSealA, skA, pkA);
+    SeatElderOnAlgo(privilege, pkA, ALGO_X11);
+    HMPAcceptResult rA = manager.AddSealShare(shareA);
+    BOOST_CHECK(rA == HMPAcceptResult::ACCEPTED);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

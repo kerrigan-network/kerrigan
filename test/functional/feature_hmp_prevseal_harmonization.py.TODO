@@ -1,0 +1,106 @@
+TODO: feature_hmp_prevseal_harmonization.py
+
+Functional regtest scenario for the v1.2.6 prevSealHash harmonization
+(nPrevSealHashFixHeight gate at src/chainparams.cpp:1462 and the gated
+branch at src/validation.cpp:3325-3339).
+
+The unit-level coverage already shipped in src/test/hmp_tests.cpp:
+
+  PrevSealHash_PrePostFix_CrossRejection
+      Drives AddSealShare with shares signed under pre-fix and post-fix
+      prevSealHash values and confirms cross-rejection as REJECTED_INVALID
+      via the VerifyVRF path at seal_manager.cpp:283-287.
+
+  PrevSealHash_OnNewBlock_IdempotentUnderFixToggle
+      Confirms OnNewBlock at seal_manager.cpp:185 is idempotent on
+      blockHash: a second call with a different prevSealHash does not
+      overwrite session.prevSealHash.
+
+This functional scenario adds end-to-end coverage across a daemon
+restart, exercising the real ConnectBlock path (validation.cpp:3304-3344)
+rather than calling OnNewBlock directly. It is deferred because the
+regtest infrastructure to (a) persist HMP identity across a restart,
+(b) replay the restart with a different -testactivationheight value, and
+(c) deterministically reach HMP Stage 3 with at least two signing
+identities on a controllable algo, is non-trivial and out of scope for
+the v1.2.6 hardening cycle.
+
+Scenario sketch (3 nodes, all on regtest):
+
+  1. Start node 0 with:
+         -testactivationheight=hmp_prevseal_fix@42
+         -spork25=1  (HMP enabled)
+         -hmpstage3@1
+     Start nodes 1 and 2 with identical args, all peered.
+
+  2. Mine to height 36. All three nodes should converge with HMP active
+     and seal collection running.
+
+  3. At height 37 (pre-activation), a seal session opens on each node.
+     Node 0's session.prevSealHash uses the cache-derived value when
+     the assembled-seal cache is hot; nodes 1 and 2 may use the same
+     or the pprev hash depending on cache state.
+
+     Stop node 0 (m_assembledSeals cache destroyed). Restart with the
+     same args.
+
+     On restart, node 0's ConnectBlock at height 37 cannot use the
+     cache (empty) and falls back to pprev hash. Node 0 broadcasts a
+     seal share signed under the pprev-hash prevSealHash.
+
+     Assertion: nodes 1 and 2 reject the share with REJECTED_INVALID
+     (their sessions are still bound to the cache-derived prev). Verify
+     via the HMP: log lines.
+
+  4. Mine through to height 42 (activation). Repeat step 3 at height 47:
+     stop node 0, restart, observe a seal-share broadcast.
+
+     Assertion: nodes 1 and 2 ACCEPT the share. Both sides now derive
+     prevSealHash from pprev->GetBlockHash() unconditionally; restart
+     state no longer matters.
+
+Skeleton structure (Bitcoin/Dash functional-test framework):
+
+  from test_framework.test_framework import BitcoinTestFramework
+  from test_framework.util import assert_equal
+
+  class HMPPrevSealHarmonization(BitcoinTestFramework):
+      def set_test_params(self):
+          self.num_nodes = 3
+          self.setup_clean_chain = True
+          common = [
+              "-testactivationheight=hmp@1",
+              "-testactivationheight=hmp_stage3@1",
+              "-testactivationheight=hmp_prevseal_fix@42",
+              "-spork25=1",
+          ]
+          self.extra_args = [common, common, common]
+
+      def run_test(self):
+          self.connect_nodes(0, 1); self.connect_nodes(1, 2)
+          # ... seat HMP identities, mine to 36, restart node 0 at 37,
+          # observe share rejection; mine to 42, restart at 47, observe
+          # share acceptance.
+
+  if __name__ == "__main__":
+      HMPPrevSealHarmonization().main()
+
+Open infra questions to resolve before implementing:
+
+  - Does the existing functional framework persist src/hmp/identity.dat
+    across stop/start? (Spot-check: yes for -datadir reuse, but verify
+    HMP key is keyed off datadir not a fresh ephemeral path.)
+
+  - Is there an RPC to enumerate seal-session prevSealHash values? If
+    not, the assertion has to be done via debug-log scraping for
+    "rejecting share with invalid VRF proof" vs "accepted share".
+
+  - Do we need to gate this test on the HMP build flag, or is HMP always
+    built in regtest? (Check src/Makefile.am.)
+
+  - generate*toaddress on regtest: which algo does it default to? The
+    test needs at least one algo where two signers can both be Elders
+    by height 37 (warmup permitting).
+
+Once these are answered, this file should be replaced with the actual
+Python test and the .TODO suffix removed.
