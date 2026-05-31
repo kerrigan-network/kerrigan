@@ -264,6 +264,13 @@ public:
         // tag time and updates it HERE, in freeze_seed::DEFAULT_FREEZE_ACTIVATION_HEIGHT,
         // and in the CMainParams checkpoint below -- all three in lockstep.
         consensus.nHMPSealAlgoFixHeight = 55000;
+        // v1.2.6 prevSealHash harmonization. Aligns the ConnectBlock VRF input
+        // with RollforwardBlock / RebuildHMPState (block.hashPrevBlock), so a
+        // node that restarted and a node that did not produce identical VRF
+        // proofs at the same height. Activation set ~150 blocks above the
+        // expected v1.2.6 deploy tip (~55239 + ~33min) to give operators time
+        // to upgrade.
+        consensus.nPrevSealHashFixHeight = 55400;
         consensus.MinBIP9WarningHeight = 0;
         // Per-algo genesis powLimits -- permissive targets for chain bootstrapping.
         // These are intentionally easy so the first miner on each algo can produce blocks.
@@ -699,6 +706,9 @@ public:
         // for the v1.2.0 cycle; pin to INT_MAX as a safe default and revisit when
         // testnet is revived (set this to a real height before bringing testnet up).
         consensus.nHMPSealAlgoFixHeight = std::numeric_limits<int>::max();
+        // v1.2.6 prevSealHash harmonization: always active on testnet so
+        // every revived chain exercises the harmonized path from genesis.
+        consensus.nPrevSealHashFixHeight = 1;
         consensus.MinBIP9WarningHeight = 0;
         // Testnet powLimit: ~uint256(0) >> 1, very easy for CPU mining all algos.
         // Equihash BLAKE2b PoW hash varies per solution; with ~2^254 target, ~30% of
@@ -910,6 +920,8 @@ public:
         // v1.2.0 HMP seal-algo + Elder threshold fork: active from genesis on
         // devnet so ephemeral chains exercise the post-fork code path by default.
         consensus.nHMPSealAlgoFixHeight = 1;
+        // v1.2.6 prevSealHash harmonization: always active on devnet.
+        consensus.nPrevSealHashFixHeight = 1;
         consensus.MinBIP9WarningHeight = 2 + 2016; // withdrawals activation height + miner confirmation window
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on devnet; all algos use global powLimit
@@ -1183,6 +1195,10 @@ public:
         // regtest. Override per-test via -testactivationheight=hmp_seal_algo@N
         // (see MaybeUpdateHeights in this file) for A/B coverage of the gate.
         consensus.nHMPSealAlgoFixHeight = 1;
+        // v1.2.6 prevSealHash harmonization: always active on regtest.
+        // Override per-test via -testactivationheight=hmp_prevseal_fix@N
+        // (see MaybeUpdateHeights in this file) for A/B coverage of the gate.
+        consensus.nPrevSealHashFixHeight = 1;
         consensus.MinBIP9WarningHeight = 0;
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on regtest; all algos use global powLimit
@@ -1440,6 +1456,11 @@ static void MaybeUpdateHeights(const ArgsManager& args, Consensus::Params& conse
             // v1.2.0 HMP seal-algo + Elder threshold fork. Lets regtest A/B
             // tests mine pre-fork and post-fork blocks in the same run.
             consensus.nHMPSealAlgoFixHeight = int{height};
+        } else if (name == "hmp_prevseal_fix") {
+            // v1.2.6 prevSealHash harmonization. Lets regtest A/B tests mine
+            // pre-fix (cache-derived prevSealHash) and post-fix (pprev hash)
+            // blocks in the same run.
+            consensus.nPrevSealHashFixHeight = int{height};
         } else if (name == "withdrawals") {
             consensus.WithdrawalsHeight = int{height};
         } else {

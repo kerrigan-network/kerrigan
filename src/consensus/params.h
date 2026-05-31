@@ -193,6 +193,19 @@ struct Params {
      *  0 = never activate (safe default). Set per-network in chainparams.cpp.
      *  See doc/release-notes-v1.2.0.md for the full rationale. */
     int nHMPSealAlgoFixHeight{0};
+    /** v1.2.6 hard-fork activation height for the prevSealHash harmonization.
+     *  When height >= nPrevSealHashFixHeight (and the field is > 0), ConnectBlock
+     *  stops feeding the in-memory m_assembledSeals cache into the seal session's
+     *  prevSealHash. Both ConnectBlock and RollforwardBlock instead pass
+     *  block.hashPrevBlock unconditionally, so the VRF input is identical on a
+     *  fresh-restart node and a long-running node at the same height.
+     *  Pre-fix, ConnectBlock hashed the assembled-seal bytes if the cache was hot
+     *  and fell back to hashPrevBlock otherwise; RollforwardBlock always used
+     *  hashPrevBlock. Because m_assembledSeals does not survive a daemon restart,
+     *  the two paths could disagree, causing legitimate blocks to be rejected with
+     *  "invalid VRF proof" after restart.
+     *  0 = never activate (safe default). Set per-network in chainparams.cpp. */
+    int nPrevSealHashFixHeight{0};
     int nHMPBroodDemotionDuration{1000}; // blocks to stay demoted after equivocation (~33hr)
     int nHMPBroodChainWeightBonus{300};  // bps bonus per BROOD signer's algo in seal multiplier
     static constexpr int MAX_COMMITMENTS_PER_BLOCK = 16;

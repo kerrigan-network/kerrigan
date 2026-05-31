@@ -3305,17 +3305,37 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                     if (!fJustCheck && g_seal_manager) {
                         uint256 blockHash = pindex->GetBlockHash();
 
-                        // Compute anti-grinding VRF entropy: use previous block's seal hash
-                        // if available, otherwise fall back to previous block hash.
+                        // Compute anti-grinding VRF entropy = previous block's
+                        // anchor as seen by every node at this height.
+                        //
+                        // v1.2.6 harmonization (gated on nPrevSealHashFixHeight):
+                        // pre-fix, ConnectBlock hashed the in-memory assembled
+                        // seal (m_assembledSeals cache) when hot and fell back to
+                        // pprev->GetBlockHash() otherwise. RollforwardBlock and
+                        // RebuildHMPState always used pprev->GetBlockHash(). The
+                        // assembled-seal cache does not survive a daemon restart,
+                        // so the live and post-restart paths could feed different
+                        // prevSealHash bytes to the same height and reject each
+                        // other's VRF proofs as "invalid VRF proof". Post-fix,
+                        // every path uses pprev->GetBlockHash() unconditionally,
+                        // matching RollforwardBlock / RebuildHMPState and making
+                        // the VRF input restart-independent.
                         uint256 prevSealHash;
                         if (pindex->pprev) {
-                            auto prevSeal = g_seal_manager->GetSeal(pindex->pprev->GetBlockHash());
-                            if (prevSeal) {
-                                CHashWriter hw(SER_GETHASH, 0);
-                                hw << *prevSeal;
-                                prevSealHash = hw.GetHash();
-                            } else {
+                            const bool fPrevSealFixActive =
+                                hmpConsensus.nPrevSealHashFixHeight > 0 &&
+                                pindex->nHeight >= hmpConsensus.nPrevSealHashFixHeight;
+                            if (fPrevSealFixActive) {
                                 prevSealHash = pindex->pprev->GetBlockHash();
+                            } else {
+                                auto prevSeal = g_seal_manager->GetSeal(pindex->pprev->GetBlockHash());
+                                if (prevSeal) {
+                                    CHashWriter hw(SER_GETHASH, 0);
+                                    hw << *prevSeal;
+                                    prevSealHash = hw.GetHash();
+                                } else {
+                                    prevSealHash = pindex->pprev->GetBlockHash();
+                                }
                             }
                         }
 
@@ -6396,9 +6416,14 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
                     // Rebuild seal-manager session state.
                     // Only restores sessions, does NOT sign/broadcast (crash recovery, not live tip).
                     if (nHMPStage >= 3 && g_seal_manager) {
-                        // NOTE: RollforwardBlock uses block hash as VRF input instead of seal hash
-                        // (ConnectBlock hashes the assembled seal). This is acceptable because
-                        // seal manager sessions are rebuilt from scratch on restart.
+                        // Use pprev->GetBlockHash() as the VRF input prevSealHash.
+                        // ConnectBlock used to feed the in-memory assembled-seal cache here
+                        // when hot and only fall back to pprev->GetBlockHash() otherwise; the
+                        // two paths therefore disagreed across a daemon restart (the cache
+                        // does not survive restart), causing legitimate blocks to be rejected
+                        // as "invalid VRF proof". v1.2.6 harmonizes ConnectBlock against this
+                        // path under nPrevSealHashFixHeight; see CChainState::ConnectBlock
+                        // for the gate.
                         uint256 prevSealHashRF = pindex->pprev ? pindex->pprev->GetBlockHash() : uint256();
                         g_seal_manager->OnNewBlock(pindex->GetBlockHash(), pindex->nHeight, prevSealHashRF);
                     }
