@@ -40,12 +40,11 @@
 // init.cpp are covered by the compile/syntax check + the predicate-level tests
 // here, not by an end-to-end reorg. See O-recovery-release-impl.md.
 
-#include <policy/planx_rollback.h>
+#include <policy/planx_rollback.h>       // ShieldedDirection + ClassifyShieldedDirection now live here
 
 #include <coins.h>
 #include <consensus/amount.h>           // CAmount, COIN
 #include <evo/specialtx.h>              // SetTxPayload (build a Sapling shield tx)
-#include <policy/shielded_spend_freeze.h> // ClassifyShieldedDirection (shielded-spend detection)
 #include <primitives/transaction.h>
 #include <sapling/sapling_tx_payload.h> // SaplingTxPayload (shield tx)
 #include <script/script.h>

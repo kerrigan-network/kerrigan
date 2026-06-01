@@ -14,13 +14,15 @@
 #include <coins.h>                       // CCoinsViewCache, Coin
 #include <consensus/amount.h>            // CAmount, COIN, MoneyRange
 #include <consensus/params.h>            // Consensus::Params
-#include <policy/shielded_spend_freeze.h> // ClassifyShieldedDirection
-#include <primitives/transaction.h>      // CTransaction, CTxOut
+#include <evo/specialtx.h>               // GetTxPayload<> (classifier)
+#include <primitives/transaction.h>      // CTransaction, CTxOut, TRANSACTION_SAPLING
+#include <sapling/sapling_tx_payload.h>  // SaplingTxPayload (classifier)
 #include <script/script.h>               // CScript, IsUnspendable, opcodetype
 #include <uint256.h>                     // uint256, uint256S, uint160
 #include <util/strencodings.h>           // ParseHex
 
 #include <cstring>
+#include <optional>
 #include <string>
 
 // Process-wide instances. Defined once here; declared extern in the header.
@@ -102,6 +104,42 @@ bool PlanXIsDisallowedBlockHash(const uint256& hash)
         return false; // placeholder not finalized -> inert
     }
     return hash == disallowed;
+}
+
+ShieldedDirection ClassifyShieldedDirection(const CTransaction& tx)
+{
+    ShieldedDirection out; // default: pure-transparent (is_sapling == false)
+
+    // Only special-version Sapling transactions carry a shielded payload. A
+    // non-Sapling tx (transparent payments, masternode special txs, etc.) has no
+    // shielded spends by construction.
+    if (!tx.IsSpecialTxVersion() || tx.nType != TRANSACTION_SAPLING) {
+        return out;
+    }
+
+    // Deserialize the shielded payload using the SAME canonical helper the rest of
+    // consensus uses (consensus/tx_verify.cpp, sapling/sapling_state.cpp), so this
+    // classification is bit-for-bit consistent with how the payload is parsed
+    // everywhere else. We call the single-argument (raw-bytes) overload directly on
+    // vExtraPayload: we have already verified nType == TRANSACTION_SAPLING above, so
+    // the type-checking tx-overload would be redundant (and a std::vector argument
+    // would in fact bind to the wrong overload). Returns nullopt on a malformed
+    // payload rather than throwing.
+    const std::optional<SaplingTxPayload> payload =
+        GetTxPayload<SaplingTxPayload>(tx.vExtraPayload);
+    if (!payload) {
+        // Malformed payload: decline to classify. The normal Sapling validation
+        // path rejects an unparseable payload ("bad-sapling-payload"); we do not
+        // second-guess it here, and we do not treat "unparseable" as "frozen"
+        // (that would diverge from the parse-failure handling elsewhere).
+        return out;
+    }
+
+    out.is_sapling = true;
+    out.spends = payload->GetSpendsCount();
+    out.outputs = payload->GetOutputsCount();
+    out.value_balance = payload->valueBalance;
+    return out;
 }
 
 bool PlanXTxHasShieldedComponent(const CTransaction& tx)

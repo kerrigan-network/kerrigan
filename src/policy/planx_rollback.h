@@ -482,16 +482,58 @@ bool PlanXScriptIsPlaceholder(const CScript& script);
 bool PlanXIsDisallowedBlockHash(const uint256& hash);
 
 /**
+ * Result of classifying a transaction's relationship to the Sapling shielded
+ * pool.
+ *
+ * All fields are derived purely from the transaction's own bytes (its nType and
+ * deserialized Sapling payload). Default-constructed value (all zero/false)
+ * describes a pure-transparent transaction.
+ */
+struct ShieldedDirection {
+    /** True iff the tx is nType == TRANSACTION_SAPLING with a well-formed payload. */
+    bool is_sapling{false};
+    /** Number of shielded spends (notes leaving the pool -- the OUT direction). */
+    std::size_t spends{0};
+    /** Number of shielded outputs (notes entering the pool -- the IN direction). */
+    std::size_t outputs{0};
+    /** Net value balance: > 0 = value leaves pool (z->t); < 0 = value enters (t->z). */
+    CAmount value_balance{0};
+
+    /** OUT direction: the tx spends shielded notes (the airtight exit predicate). */
+    bool SpendsShielded() const { return spends > 0; }
+
+    /** Strict z->t: spends shielded notes AND net value leaves the pool. */
+    bool UnshieldsValue() const { return spends > 0 && value_balance > 0; }
+};
+
+/**
+ * @brief Classify @p tx with respect to the Sapling shielded pool.
+ *
+ * Pure function. For a non-Sapling tx, returns a default-constructed result
+ * (is_sapling == false, everything else zero). For a Sapling tx whose payload
+ * fails to deserialize, returns is_sapling == false as well (a malformed payload
+ * is rejected elsewhere by the normal Sapling validation; this function declines
+ * to classify it rather than guess). For a well-formed Sapling tx, fills in the
+ * spend/output counts and value balance from SaplingTxPayload.
+ *
+ * Lives here (not under a separate freeze header) because its only production
+ * caller is PlanXTxHasShieldedComponent below and its only test caller is the
+ * planx test suite. Pure; thread-safe (no shared state); O(1) plus one payload
+ * parse.
+ */
+ShieldedDirection ClassifyShieldedDirection(const CTransaction& tx);
+
+/**
  * @brief Does @p tx carry ANY Sapling shielded component?
  *
- * Reuses the canonical Sapling-payload classifier
- * (policy/shielded_spend_freeze.h::ClassifyShieldedDirection), so this is
- * bit-for-bit consistent with how the rest of consensus parses the payload. A tx
- * "has a shielded component" iff it is a well-formed TRANSACTION_SAPLING tx with
- * any shielded spend OR any shielded output OR a non-zero valueBalance (i.e. it
- * moves value across the transparent<->shielded boundary, or churns notes inside
- * the pool). A pure-transparent tx (and a Sapling tx with an unparseable payload,
- * which is rejected elsewhere) returns false.
+ * Reuses the canonical Sapling-payload classifier above
+ * (ClassifyShieldedDirection), so this is bit-for-bit consistent with how the
+ * rest of consensus parses the payload. A tx "has a shielded component" iff it
+ * is a well-formed TRANSACTION_SAPLING tx with any shielded spend OR any
+ * shielded output OR a non-zero valueBalance (i.e. it moves value across the
+ * transparent<->shielded boundary, or churns notes inside the pool). A
+ * pure-transparent tx (and a Sapling tx with an unparseable payload, which is
+ * rejected elsewhere) returns false.
  *
  * This is the predicate that closes the t->z shield bypass: a compromised-coin
  * spend that shields value into the Sapling pool has an empty (or marker-only)

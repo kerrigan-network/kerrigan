@@ -82,61 +82,13 @@
 #ifndef BITCOIN_POLICY_SHIELDED_SPEND_FREEZE_H
 #define BITCOIN_POLICY_SHIELDED_SPEND_FREEZE_H
 
-#include <consensus/amount.h> // CAmount
-
-#include <cstddef>
-#include <cstdint>
-
 class CTransaction;
-
-/**
- * Result of classifying a transaction's relationship to the shielded pool.
- *
- * All fields are derived purely from the transaction's own bytes (its nType and
- * deserialized Sapling payload). Default-constructed value (all zero/false)
- * describes a pure-transparent transaction.
- */
-struct ShieldedDirection {
-    /** True iff the tx is nType == TRANSACTION_SAPLING with a well-formed payload. */
-    bool is_sapling{false};
-    /** Number of shielded spends (notes leaving the pool -- the OUT direction). */
-    std::size_t spends{0};
-    /** Number of shielded outputs (notes entering the pool -- the IN direction). */
-    std::size_t outputs{0};
-    /** Net value balance: > 0 = value leaves pool (z->t); < 0 = value enters (t->z). */
-    CAmount value_balance{0};
-
-    /** OUT direction: the tx spends shielded notes (the airtight exit predicate). */
-    bool SpendsShielded() const { return spends > 0; }
-
-    /** Strict z->t: spends shielded notes AND net value leaves the pool. */
-    bool UnshieldsValue() const { return spends > 0 && value_balance > 0; }
-};
-
-/**
- * @brief Classify @p tx with respect to the Sapling shielded pool.
- *
- * Pure function. For a non-Sapling tx, returns a default-constructed result
- * (is_sapling == false, everything else zero). For a Sapling tx whose payload
- * fails to deserialize, returns is_sapling == false as well (a malformed payload
- * is rejected elsewhere by the normal Sapling validation; this function declines
- * to classify it rather than guess). For a well-formed Sapling tx, fills in the
- * spend/output counts and value balance from SaplingTxPayload.
- *
- * @param tx  The transaction to classify (caller retains ownership).
- * @return    Classification (see ShieldedDirection). Never throws.
- *
- * @note Thread-safe: yes (no shared state).
- * @note Complexity: O(1) in the number of inputs/outputs; one payload parse.
- */
-ShieldedDirection ClassifyShieldedDirection(const CTransaction& tx);
 
 /**
  * @brief The freeze predicate: should this tx be frozen as a shielded spend?
  *
- * Convenience wrapper over ClassifyShieldedDirection: true iff the tx spends
- * shielded notes (the OUT direction). This is the predicate the relay and
- * consensus call sites use. Pure; never throws.
+ * True iff the tx spends shielded notes (the OUT direction). This is the
+ * predicate the relay and consensus call sites use. Pure; never throws.
  */
 bool IsFrozenShieldedSpend(const CTransaction& tx);
 
