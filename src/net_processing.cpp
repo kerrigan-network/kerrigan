@@ -5520,7 +5520,32 @@ void PeerManagerImpl::ProcessMessage(
                         });
                     }
                 } else if (result == HMPAcceptResult::REJECTED_INVALID) {
-                    Misbehaving(pfrom.GetId(), 10, "sealshare-invalid");
+                    // v1.2.6 transition window: cross-version prevSealHash
+                    // mismatch is expected as v1.2.5 nodes upgrade past
+                    // nPrevSealHashFixHeight. Downgrade the misbehavior to
+                    // a benign drop inside a window around the activation
+                    // so unupgraded peers are not banned during the rollout.
+                    // Outside the window, persistent bad-share senders are
+                    // real bugs and full misbehavior resumes.
+                    const Consensus::Params& consensus = m_chainman.GetParams().GetConsensus();
+                    int tip_height;
+                    {
+                        LOCK(cs_main);
+                        tip_height = m_chainman.ActiveChain().Height();
+                    }
+                    const int fix_height = consensus.nPrevSealHashFixHeight;
+                    constexpr int kTransitionWindowBefore = 1000; // ~3 days
+                    constexpr int kTransitionWindowAfter = 5000;  // ~16 days
+                    const bool in_transition_window =
+                        fix_height > 0 &&
+                        tip_height >= fix_height - kTransitionWindowBefore &&
+                        tip_height < fix_height + kTransitionWindowAfter;
+                    if (!in_transition_window) {
+                        Misbehaving(pfrom.GetId(), 10, "sealshare-invalid");
+                    } else {
+                        LogPrint(BCLog::HMP, "HMP: REJECTED_INVALID share in v1.2.6 transition window (tip=%d, fix=%d); not banning peer=%d\n",
+                                 tip_height, fix_height, pfrom.GetId());
+                    }
                 }
             }
             return;
