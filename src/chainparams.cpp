@@ -264,22 +264,29 @@ public:
         // tag time and updates it HERE, in freeze_seed::DEFAULT_FREEZE_ACTIVATION_HEIGHT,
         // and in the CMainParams checkpoint below -- all three in lockstep.
         consensus.nHMPSealAlgoFixHeight = 55000;
-        // v1.3.0 prevSealHash harmonization. Aligns the ConnectBlock VRF input
+        // v1.2.6 prevSealHash harmonization. Aligns the ConnectBlock VRF input
         // with RollforwardBlock / RebuildHMPState (block.hashPrevBlock), so a
         // node that restarted and a node that did not produce identical VRF
-        // proofs at the same height. Originally drafted for v1.2.6 with
-        // activation at 55400; rebased here to a single v1.3.0 activation
-        // cliff at h=100000 bundled with the hybrid HMP fork-choice gate.
-        // The cliff gives operators ~12 weeks of post-ship runway and lets
-        // them plan against one mainnet height instead of two.
+        // proofs at the same height.
         //
-        // Cross-version compatibility window: between v1.3.0 ship and h=100000,
-        // v1.2.5 nodes and v1.3.0 nodes coexist on the network. v1.2.5 is
-        // deprecated at h=184000, so the entire pre-activation runway sits
-        // inside the v1.2.5 supported window. Under symmetric scoring no
-        // observed head disagreement is expected; see release notes for the
-        // accepted-risk narrative.
-        consensus.nPrevSealHashFixHeight = 100000;
+        // Originally drafted for v1.2.6 at h=55400, then rebased to v1.3.0 at
+        // h=100000 to bundle with the hybrid HMP fork-choice gate. The v1.3.0
+        // cliff is too far out for the live network: pool operators (Miningdutch,
+        // kerriganpool) are actively losing seal-share aggregation across
+        // cross-algo reorgs. After each reorg lands, HMP nodes silently drop
+        // legitimate Elder shares because the in-memory prevSealHash cache has
+        // not yet repopulated, collapsing HMP weighting on the new tip and
+        // making the chain more susceptible to the next reorg.
+        //
+        // v1.2.6 narrows scope back to just the prevSealHash fix and moves
+        // activation forward to h=57000. Mainnet tip at ship time is around
+        // h=55750, so 57000 is roughly 1250 blocks (~5 days at current cadence)
+        // of post-ship runway -- enough for pool operators to upgrade and see
+        // relief within a week.
+        //
+        // The hybrid HMP fork-choice architecture remains the v1.3.0 target at
+        // a later activation height in a separate release.
+        consensus.nPrevSealHashFixHeight = 57000;
         consensus.MinBIP9WarningHeight = 0;
         // Per-algo genesis powLimits -- permissive targets for chain bootstrapping.
         // These are intentionally easy so the first miner on each algo can produce blocks.
