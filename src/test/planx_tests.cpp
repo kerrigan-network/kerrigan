@@ -714,7 +714,7 @@ BOOST_AUTO_TEST_CASE(p4_clean_full_sweep_passes)
 // rule is inert; at/above it the rule enforces as before. Pre-1.2.5 a fresh
 // IBD failed at the first historical block that touched a now-compromised
 // address (slush, h=2036). With the gate in place those historical blocks
-// pass and the constraint binds only from RECOVERY_V2_ACTIVATION_HEIGHT (55200) onward.
+// pass and the constraint binds only from RECOVERY_V2_ACTIVATION_HEIGHT (54500) onward.
 BOOST_AUTO_TEST_CASE(p5_ibd_height_gate_accepts_below_activation)
 {
     PlanXArmGuard arm;

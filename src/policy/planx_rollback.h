@@ -178,11 +178,13 @@ constexpr char DEFAULT_DISALLOWED_BLOCKHASH[] =
  * ============================================================================
  *  PRODUCTION KEYSET (recovery rotation, incident 2026-05)
  * ----------------------------------------------------------------------------
- *  The value below is the P2SH scriptPubKey of the production Set-A 2-of-3
- *  multisig (address 7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5), derived offline via
- *  `createmultisig 2 [D1,D2,D3]` over Set-D (canonical redeemScript, key order
- *  per recovery-pubkeys.md). Equals consensus.devFundPaymentScript; explicitly
- *  not growthEscrowScript (would subject recovery to the escrow lock).
+ *  The value below is the P2SH scriptPubKey of the production Set-D 2-of-3
+ *  multisig (address 7XRanBZwu6RNPPyPzPmFkrPntUwrseHdbc, hash160 3705ba...),
+ *  derived offline via `createmultisig 2 [D1,D2,D3]` over Set-D (canonical
+ *  redeemScript, key order per recovery-pubkeys.md). Equals
+ *  consensus.devFundPaymentScript; explicitly NOT growthEscrowScript (the
+ *  Set-A 7g script a9149835c3ef...87), which would subject recovery to the
+ *  escrow lock.
  *
  *  Set-D redeemScript:
  *    522102127f6236da2f3b8292e1e340df703a2c1589d48cec7b3419d8c99c3193befa97
@@ -304,16 +306,21 @@ constexpr const char* SEED_COMPROMISED_OUTPOINTS[] = {
  * sets are likewise compromised. At startup InitPlanXRollback decodes each to its
  * scriptPubKey and seeds g_compromised_recovery_set (matched via ContainsScript),
  * unconditionally, since the spend restriction is consensus validity. A spend that
- * touches any of these is valid ONLY if it sweeps fully-transparently to the Set-A
- * "7b" recovery script (only-to-7b). Every input of those 4 txs is the affected
- * operator's own coin, so there is no innocent-party input in this set.
+ * touches any of these is valid ONLY if it sweeps fully-transparently to the Set-D
+ * recovery script (only-to-7b -- the post-v1.2.3 destination is the Set-D devfund
+ * P2SH 7XRanBZwu6RNPPyPzPmFkrPntUwrseHdbc, a9143705ba...87). Every input of those
+ * 4 txs is the affected operator's own coin, so there is no innocent-party input
+ * in this set.
  *
  * Most entries are P2PKH ('K'-prefix) wallet addresses; the last two are the OLD
  * (pre-rotation) treasury P2SH ('7'-prefix) addresses whose 2-of-3 key sets are
- * also compromised. The Set-A / 7b RECOVERY destination
- * (7gHTsab3dGLuJCQFDwfxkycX7Bdipnz7V5, P2SH a9149835c3ef...87) is the rotated FRESH
+ * also compromised. The Set-D RECOVERY destination
+ * (7XRanBZwu6RNPPyPzPmFkrPntUwrseHdbc, P2SH a9143705ba...87) is the rotated FRESH
  * script and is NOT a member of this set (verified at finalization; the
- * InitPlanXRollback interlock fails closed if it ever were).
+ * InitPlanXRollback interlock fails closed if it ever were). The Set-A
+ * destination 7gHTsab3... / a9149835c3ef...87 is the LEGACY recovery target used
+ * by v1.2.1/v1.2.2 sweeps below RECOVERY_V2_ACTIVATION_HEIGHT; it is consensus-
+ * locked as growthEscrowScript and is NOT the current recovery destination.
  */
 constexpr const char* SEED_COMPROMISED_ADDRESSES[] = {
     "K7qS3cmteTYfCTeefwCoTCAtJ7hb3zFFdt", "K8CEQAKusgVhXrvNj1mE1rp1nbEHguoumT",
@@ -347,7 +354,7 @@ constexpr const char* SEED_COMPROMISED_ADDRESSES[] = {
     // scripts) and the "PRIOR (COMPROMISED) VALUES" comment block in chainparams:
     //   OLD founders (7a) 7aP2bhZGE6mT6Ae7DhPAbWz54gZahCqHP8 -> P2SH a914577268b060369798d215b6f278efb2cd72fa773487
     //   OLD devfund  (7b) 7bMQKKigBdndVPqitNQuzUXPMVcTqjWHP5 -> P2SH a914621bd4ef835272a795b46babe03a1f5559e0b51e87
-    // Neither equals the rotated Set-A/7b recovery destination (a9149835c3ef...87),
+    // Neither equals the rotated Set-D recovery destination (a9143705ba...87),
     // so the InitPlanXRollback self-lock interlock still passes.
     "7aP2bhZGE6mT6Ae7DhPAbWz54gZahCqHP8", // OLD founders (7a) 2-of-3 P2SH
     "7bMQKKigBdndVPqitNQuzUXPMVcTqjWHP5", // OLD devfund  (7b) 2-of-3 P2SH
