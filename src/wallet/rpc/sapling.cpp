@@ -134,9 +134,31 @@ RPCHelpMan z_getnewaddress()
                 throw JSONRPCError(RPC_WALLET_ERROR, "Failed to generate Sapling address");
             }
 
+            // Persist the new address record AND the advanced diversifier index
+            // atomically. If either write -- or the commit -- fails, abort the
+            // BDB transaction and surface an error rather than returning an
+            // address the wallet has not durably recorded. The in-memory
+            // counter has already advanced inside GenerateNewAddress, but the
+            // address itself is rederivable from (defaultIvk, diversifier
+            // index), so a failed-write situation is recoverable on a future
+            // rescan; what we MUST avoid is the partial-write window where
+            // exactly one of the two records hits disk.
             WalletBatch batch(pwallet->GetDatabase());
-            km.WriteAddressToDB(batch, *addr);
-            km.WriteDiversifierIndexToDB(batch);
+            if (!batch.TxnBegin()) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to begin wallet DB transaction for new Sapling address");
+            }
+            if (!km.WriteAddressToDB(batch, *addr)) {
+                batch.TxnAbort();
+                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to persist Sapling address");
+            }
+            if (!km.WriteDiversifierIndexToDB(batch)) {
+                batch.TxnAbort();
+                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to persist Sapling diversifier index");
+            }
+            if (!batch.TxnCommit()) {
+                batch.TxnAbort();
+                throw JSONRPCError(RPC_WALLET_ERROR, "Failed to commit Sapling address persistence");
+            }
 
             return EncodeSaplingAddress(*addr);
         },

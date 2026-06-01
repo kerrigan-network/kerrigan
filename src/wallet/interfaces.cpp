@@ -538,9 +538,29 @@ public:
         if (!addr) {
             throw std::runtime_error("Failed to generate Sapling address");
         }
+        // Persist the new address record AND the advanced diversifier index
+        // atomically. Mirrors the z_getnewaddress RPC site (rpc/sapling.cpp):
+        // a partial-write would either leak a never-persisted address or
+        // re-use the same diversifier on the next call. The in-memory counter
+        // has already advanced; on a hard write failure we throw, the caller
+        // does NOT see an address, and a future rescan rederives the address
+        // from (defaultIvk, diversifier index).
         WalletBatch batch(m_wallet->GetDatabase());
-        km.WriteAddressToDB(batch, *addr);
-        km.WriteDiversifierIndexToDB(batch);
+        if (!batch.TxnBegin()) {
+            throw std::runtime_error("Failed to begin wallet DB transaction for new Sapling address");
+        }
+        if (!km.WriteAddressToDB(batch, *addr)) {
+            batch.TxnAbort();
+            throw std::runtime_error("Failed to persist Sapling address");
+        }
+        if (!km.WriteDiversifierIndexToDB(batch)) {
+            batch.TxnAbort();
+            throw std::runtime_error("Failed to persist Sapling diversifier index");
+        }
+        if (!batch.TxnCommit()) {
+            batch.TxnAbort();
+            throw std::runtime_error("Failed to commit Sapling address persistence");
+        }
         return EncodeSaplingAddress(*addr);
     }
     std::vector<std::string> listSaplingAddresses() override
