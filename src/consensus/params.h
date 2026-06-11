@@ -210,6 +210,32 @@ struct Params {
      *  to raw PoW until the cache repopulates.
      *  0 = never activate (safe default). Set per-network in chainparams.cpp. */
     int nPrevSealHashFixHeight{0};
+
+    /** Hard-fork activation height for deterministic seal weighting.
+     *  When height >= nHMPDeterministicSealHeight (and the field is > 0),
+     *  ConnectBlock computes nSealWeight from HMP state that is canonical for
+     *  the block's parent rather than from the live incremental trackers. The
+     *  privilege/commitment trackers mutate incrementally on connect/disconnect,
+     *  and the disconnect path is not the inverse of connect (front-evicted
+     *  window entries are not restored), so the same block reached via different
+     *  reorg histories could be assigned a different nSealWeight, diverging the
+     *  persisted nChainSealWork between nodes. Post-activation, ConnectBlock
+     *  rebuilds the trackers from disk to the parent when they are not already
+     *  anchored there, and credits the privilege window from the raw on-chain
+     *  seal signers so the incremental and rebuilt states agree bit-for-bit.
+     *  nSealWeight then depends only on the chain up to the block, not on the
+     *  order blocks were connected. Like the other HMP fixes this is consensus
+     *  and gated; convergence is guaranteed for fork points at or above the
+     *  activation height.
+     *  0 = never activate (safe default). Set per-network in chainparams.cpp. */
+    int nHMPDeterministicSealHeight{0};
+
+    /** Whether deterministic seal weighting is active at a given height. */
+    bool IsDeterministicSealActive(int height) const
+    {
+        return nHMPDeterministicSealHeight > 0 && height >= nHMPDeterministicSealHeight;
+    }
+
     int nHMPBroodDemotionDuration{1000}; // blocks to stay demoted after equivocation (~33hr)
     int nHMPBroodChainWeightBonus{300};  // bps bonus per BROOD signer's algo in seal multiplier
     static constexpr int MAX_COMMITMENTS_PER_BLOCK = 16;

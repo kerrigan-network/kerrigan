@@ -5929,17 +5929,19 @@ bool CChainState::LoadChainTip()
     return true;
 }
 
-void CChainState::RebuildHMPState()
+void CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
 {
     AssertLockHeld(cs_main);
 
-    const CBlockIndex* tip = m_chain.Tip();
-    if (!tip) return;
+    // Rebuild to an explicit target when given (the parent of a block being
+    // connected after a reorg), otherwise to the active tip.
+    const CBlockIndex* target = pindexTarget ? pindexTarget : m_chain.Tip();
+    if (!target) return;
 
     const auto& consensus = m_params.GetConsensus();
 
-    // Only rebuild if HMP is active at the current tip
-    if (!DeploymentActiveAt(*tip, consensus, Consensus::DEPLOYMENT_HMP)) {
+    // Only rebuild if HMP is active at the target
+    if (!DeploymentActiveAt(*target, consensus, Consensus::DEPLOYMENT_HMP)) {
         return;
     }
 
@@ -5950,8 +5952,8 @@ void CChainState::RebuildHMPState()
         static_cast<int>(consensus.nHMPCommitmentOffset) * 2
     });
 
-    // Find the start height: max(HMP activation height, tip - maxLookback, 0)
-    int startHeight = std::max(0, tip->nHeight - maxLookback);
+    // Find the start height: max(HMP activation height, target - maxLookback, 0)
+    int startHeight = std::max(0, target->nHeight - maxLookback);
 
     // Don't replay before HMP activation
     if (consensus.HMPHeight > startHeight) {
@@ -5962,11 +5964,11 @@ void CChainState::RebuildHMPState()
     if (g_hmp_privilege) g_hmp_privilege->Clear();
 
     LogPrintf("HMP: rebuilding tracker state from height %d to %d (%d blocks)...\n",
-              startHeight, tip->nHeight, tip->nHeight - startHeight + 1);
+              startHeight, target->nHeight, target->nHeight - startHeight + 1);
 
     int nRebuilt = 0;
-    for (int height = startHeight; height <= tip->nHeight; height++) {
-        const CBlockIndex* pindex = m_chain[height];
+    for (int height = startHeight; height <= target->nHeight; height++) {
+        const CBlockIndex* pindex = target->GetAncestor(height);
         if (!pindex) continue;
 
         int nHMPStage = GetHMPStage(height, consensus);

@@ -777,10 +777,13 @@ public:
     /** Update the chain tip based on database information, i.e. CoinsTip()'s best block. */
     bool LoadChainTip() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
-    /** Rebuild in-memory HMP commitment/privilege tracker state from the active chain.
-     *  Must be called after LoadChainTip() so m_chain is populated. Replays the last
-     *  N blocks (up to the HMP lookback window) through the tracker update logic. */
-    void RebuildHMPState() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Rebuild in-memory HMP commitment/privilege tracker state by replaying the
+     *  last N blocks (up to the HMP lookback window) through the tracker update logic.
+     *  pindexTarget selects the block the rebuilt state should reflect; nullptr means
+     *  the active tip (the startup case, which requires m_chain populated via
+     *  LoadChainTip()). A non-null target walks that block's own ancestry, so the
+     *  result is independent of the active chain during a reorg. */
+    void RebuildHMPState(const CBlockIndex* pindexTarget = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Dictates whether we need to flush the cache to disk or not.
     //!

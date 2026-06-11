@@ -287,6 +287,9 @@ public:
         // The hybrid HMP fork-choice architecture remains the v1.3.0 target at
         // a later activation height in a separate release.
         consensus.nPrevSealHashFixHeight = 57000;
+        // Deterministic seal weighting: not yet scheduled on mainnet. Set to a
+        // future height once the fix has soaked on testnet.
+        consensus.nHMPDeterministicSealHeight = 0;
         consensus.MinBIP9WarningHeight = 0;
         // Per-algo genesis powLimits -- permissive targets for chain bootstrapping.
         // These are intentionally easy so the first miner on each algo can produce blocks.
@@ -728,6 +731,9 @@ public:
         // v1.2.6 prevSealHash harmonization: always active on testnet so
         // every revived chain exercises the harmonized path from genesis.
         consensus.nPrevSealHashFixHeight = 1;
+        // Deterministic seal weighting: off until scheduled (set a height
+        // before reviving testnet); regtest tests enable it via -testactivationheight.
+        consensus.nHMPDeterministicSealHeight = 0;
         consensus.MinBIP9WarningHeight = 0;
         // Testnet powLimit: ~uint256(0) >> 1, very easy for CPU mining all algos.
         // Equihash BLAKE2b PoW hash varies per solution; with ~2^254 target, ~30% of
@@ -941,6 +947,9 @@ public:
         consensus.nHMPSealAlgoFixHeight = 1;
         // v1.2.6 prevSealHash harmonization: always active on devnet.
         consensus.nPrevSealHashFixHeight = 1;
+        // Deterministic seal weighting: off until scheduled (enabled in tests
+        // via -testactivationheight).
+        consensus.nHMPDeterministicSealHeight = 0;
         consensus.MinBIP9WarningHeight = 2 + 2016; // withdrawals activation height + miner confirmation window
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on devnet; all algos use global powLimit
@@ -1218,6 +1227,9 @@ public:
         // Override per-test via -testactivationheight=hmp_prevseal_fix@N
         // (see MaybeUpdateHeights in this file) for A/B coverage of the gate.
         consensus.nPrevSealHashFixHeight = 1;
+        // Deterministic seal weighting: off by default; tests enable it via
+        // -testactivationheight=hmp_deterministic_seal@N.
+        consensus.nHMPDeterministicSealHeight = 0;
         consensus.MinBIP9WarningHeight = 0;
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on regtest; all algos use global powLimit
@@ -1480,6 +1492,11 @@ static void MaybeUpdateHeights(const ArgsManager& args, Consensus::Params& conse
             // pre-fix (cache-derived prevSealHash) and post-fix (pprev hash)
             // blocks in the same run.
             consensus.nPrevSealHashFixHeight = int{height};
+        } else if (name == "hmp_deterministic_seal") {
+            // Deterministic seal weighting. Lets regtest tests mine pre-fix
+            // (live-tracker weight) and post-fix (rebuilt-to-parent weight)
+            // blocks in the same run.
+            consensus.nHMPDeterministicSealHeight = int{height};
         } else if (name == "withdrawals") {
             consensus.WithdrawalsHeight = int{height};
         } else {
