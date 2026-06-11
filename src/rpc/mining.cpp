@@ -81,7 +81,6 @@ static int ParseAlgoParam(const UniValue& param, const std::string& defaultAlgo 
  * For KawPoW, set the template's nHeight from the previous block (needed for
  * epoch context by miners). Call with pindexPrev taken under the same lock as
  * the nBits update so nBits and nHeight are consistent with the same tip.
- * No-op for other algorithms.
  */
 static void SetKawPowHeight(CBlock& block, const CBlockIndex* pindexPrev, int algo)
 {
