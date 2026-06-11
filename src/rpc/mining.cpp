@@ -78,6 +78,19 @@ static int ParseAlgoParam(const UniValue& param, const std::string& defaultAlgo 
 }
 
 /**
+ * For KawPoW, set the template's nHeight from the previous block (needed for
+ * epoch context by miners). Call with pindexPrev taken under the same lock as
+ * the nBits update so nBits and nHeight are consistent with the same tip.
+ * No-op for other algorithms.
+ */
+static void SetKawPowHeight(CBlock& block, const CBlockIndex* pindexPrev, int algo)
+{
+    if (algo == ALGO_KAWPOW) {
+        block.nHeight = pindexPrev->nHeight + 1;
+    }
+}
+
+/**
  * Return average network hashes per second based on the last 'lookup' blocks,
  * or from the last difficulty change if 'lookup' is nonpositive.
  * If 'height' is nonnegative, compute the estimate at the time when a given block was found.
@@ -326,11 +339,7 @@ static UniValue generateBlocks(ChainstateManager& chainman, const NodeContext& n
             LOCK(cs_main);
             const CBlockIndex* pindexPrev = chainman.ActiveChain().Tip();
             pblock->nBits = GetNextWorkRequired(pindexPrev, pblock, Params().GetConsensus(), algo);
-            // For KawPoW, set nHeight (needed for epoch context) under the
-            // same lock so nBits and nHeight are consistent with the same tip.
-            if (algo == ALGO_KAWPOW) {
-                pblock->nHeight = pindexPrev->nHeight + 1;
-            }
+            SetKawPowHeight(*pblock, pindexPrev, algo);
         }
 
         uint256 block_hash;
@@ -564,9 +573,7 @@ static RPCHelpMan generateblock()
         LOCK(cs_main);
         const CBlockIndex* pindexPrev = chainman.ActiveChain().Tip();
         block.nBits = GetNextWorkRequired(pindexPrev, &block, Params().GetConsensus(), algo);
-        if (algo == ALGO_KAWPOW) {
-            block.nHeight = pindexPrev->nHeight + 1;
-        }
+        SetKawPowHeight(block, pindexPrev, algo);
     }
 
     // 1 coinbase + could have a few quorum commitments
@@ -1137,11 +1144,7 @@ static RPCHelpMan getblocktemplate()
     // Set the requested mining algorithm and recompute per-algo difficulty
     pblock->SetAlgo(algo);
     pblock->nBits = GetNextWorkRequired(pindexPrev, pblock, consensusParams, algo);
-
-    // For KawPoW, set nHeight (needed for epoch context by miners)
-    if (algo == ALGO_KAWPOW) {
-        pblock->nHeight = pindexPrev->nHeight + 1;
-    }
+    SetKawPowHeight(*pblock, pindexPrev, algo);
 
     // Update nTime
     UpdateTime(pblock, consensusParams, pindexPrev);
