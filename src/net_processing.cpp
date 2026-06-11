@@ -863,6 +863,22 @@ private:
     std::map<CNetAddr, int64_t> m_hmp_ip_sealasm GUARDED_BY(m_hmp_rate_mutex);
     std::map<CNetAddr, int64_t> m_hmp_ip_pubkeycommit GUARDED_BY(m_hmp_rate_mutex);
     static constexpr int64_t HMP_IP_AGGREGATE_COOLDOWN = 200'000; // 200ms between same msg type from same IP
+    static constexpr size_t HMP_IP_MAX_ENTRIES = 5000; // hard cap so IP rotation cannot grow the maps between prunes
+
+    int64_t& HMPIpEntry(std::map<CNetAddr, int64_t>& m, const CNetAddr& addr, int64_t nNow) EXCLUSIVE_LOCKS_REQUIRED(m_hmp_rate_mutex) {
+        if (m.count(addr) == 0 && m.size() >= HMP_IP_MAX_ENTRIES) {
+            // entries older than the cooldown no longer rate-limit anything
+            for (auto it = m.begin(); it != m.end(); ) {
+                if (nNow - it->second > HMP_IP_AGGREGATE_COOLDOWN) it = m.erase(it);
+                else ++it;
+            }
+            if (m.size() >= HMP_IP_MAX_ENTRIES) {
+                m.erase(std::min_element(m.begin(), m.end(),
+                    [](const auto& a, const auto& b) { return a.second < b.second; }));
+            }
+        }
+        return m[addr];
+    }
 
     /** The height of the best chain */
     std::atomic<int> m_best_height{-1};
@@ -5514,7 +5530,7 @@ void PeerManagerImpl::ProcessMessage(
                 {
                     LOCK(m_hmp_rate_mutex);
                     int64_t nNow = GetTime<std::chrono::microseconds>().count();
-                    auto& ipLast = m_hmp_ip_sealshare[pfrom.addr];
+                    auto& ipLast = HMPIpEntry(m_hmp_ip_sealshare, pfrom.addr, nNow);
                     if (nNow - ipLast < HMP_IP_AGGREGATE_COOLDOWN) return;
                     auto it = m_sealshare_last_request.find(pfrom.GetId());
                     if (it != m_sealshare_last_request.end() && nNow - it->second < 1000000) return;
@@ -5592,7 +5608,7 @@ void PeerManagerImpl::ProcessMessage(
                 {
                     LOCK(m_hmp_rate_mutex);
                     int64_t nNow = GetTime<std::chrono::microseconds>().count();
-                    auto& ipLast = m_hmp_ip_sealasm[pfrom.addr];
+                    auto& ipLast = HMPIpEntry(m_hmp_ip_sealasm, pfrom.addr, nNow);
                     if (nNow - ipLast < HMP_IP_AGGREGATE_COOLDOWN) return;
                     auto it = m_sealasm_last_request.find(pfrom.GetId());
                     if (it != m_sealasm_last_request.end() && nNow - it->second < 2000000) return;
@@ -5643,7 +5659,7 @@ void PeerManagerImpl::ProcessMessage(
                 {
                     LOCK(m_hmp_rate_mutex);
                     int64_t nNow = GetTime<std::chrono::microseconds>().count();
-                    auto& ipLast = m_hmp_ip_pubkeycommit[pfrom.addr];
+                    auto& ipLast = HMPIpEntry(m_hmp_ip_pubkeycommit, pfrom.addr, nNow);
                     if (nNow - ipLast < HMP_IP_AGGREGATE_COOLDOWN) return;
                     auto it = m_pubkeycommit_last_request.find(pfrom.GetId());
                     if (it != m_pubkeycommit_last_request.end() && nNow - it->second < 5000000) return;
