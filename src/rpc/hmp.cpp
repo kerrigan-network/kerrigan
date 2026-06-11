@@ -194,6 +194,7 @@ static RPCHelpMan getsealstatus()
                 {RPCResult::Type::NUM, "height", "block height"},
                 {RPCResult::Type::NUM, "seal_weight", "seal quality in basis points (10000 = no seal, >10000 = sealed)"},
                 {RPCResult::Type::BOOL, "has_seal", "whether this block has a seal bonus (seal_weight > 10000)"},
+                {RPCResult::Type::STR, "chain_seal_work", "cumulative seal-weighted work to this block (hex), the fork-choice key"},
                 {RPCResult::Type::STR, "miner_identity", "miner's HMP pubkey from CCbTx, or \"none\""},
             }
         },
@@ -219,6 +220,7 @@ static RPCHelpMan getsealstatus()
             result.pushKV("height", pindex->nHeight);
             result.pushKV("seal_weight", pindex->nSealWeight);
             result.pushKV("has_seal", pindex->nSealWeight > 10000);
+            result.pushKV("chain_seal_work", pindex->nChainSealWork.GetHex());
             result.pushKV("miner_identity", pindex->hmpMinerPubKey.IsValid() ? pindex->hmpMinerPubKey.ToString() : "none");
 
             return result;

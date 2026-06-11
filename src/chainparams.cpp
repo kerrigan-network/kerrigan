@@ -1509,6 +1509,22 @@ void CRegTestParams::UpdateActivationParametersFromArgs(const ArgsManager& args)
 {
     MaybeUpdateHeights(args, consensus);
 
+    if (args.IsArgSet("-hmpsigningwindowms")) {
+        int64_t ms = args.GetIntArg("-hmpsigningwindowms", consensus.nHMPSigningWindowMs);
+        if (ms < 1 || ms > 60000) {
+            throw std::runtime_error("-hmpsigningwindowms must be in [1, 60000]");
+        }
+        consensus.nHMPSigningWindowMs = static_cast<int>(ms);
+    }
+
+    if (args.IsArgSet("-hmpprivilegewindow")) {
+        int64_t w = args.GetIntArg("-hmpprivilegewindow", consensus.nHMPPrivilegeWindow);
+        if (w < 1 || w > 100000) {
+            throw std::runtime_error("-hmpprivilegewindow must be in [1, 100000]");
+        }
+        consensus.nHMPPrivilegeWindow = static_cast<int>(w);
+    }
+
     if (!args.IsArgSet("-vbparams")) return;
 
     for (const std::string& strDeployment : args.GetArgs("-vbparams")) {
@@ -1840,6 +1856,8 @@ void SetupChainParamsOptions(ArgsManager& argsman)
 
     argsman.AddArg("-budgetparams=<masternode>:<budget>:<superblock>", "Override masternode, budget and superblock start heights (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-dip3params=<activation>:<enforcement>", "Override DIP3 activation and enforcement heights (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-hmpsigningwindowms=<n>", "Override the HMP seal signing window in milliseconds, so functional tests assemble seals without the 5s wait (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-hmpprivilegewindow=<n>", "Override the HMP privilege sliding-window size in blocks, so tests can reach window eviction in fewer blocks (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-highsubsidyblocks=<n>", "The number of blocks with a higher than normal subsidy to mine at the start of a chain. Block after that height will have fixed subsidy base. (default: 0, devnet-only)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-highsubsidyfactor=<n>", "The factor to multiply the normal block subsidy by while in the highsubsidyblocks window of a chain (default: 1, devnet-only)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-llmqchainlocks=<quorum name>", "Override the default LLMQ type used for ChainLocks. Allows using ChainLocks with smaller LLMQs. (default: llmq_devnet, devnet-only)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);

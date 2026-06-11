@@ -91,7 +91,10 @@ void CSealManager::WorkerThread()
         }
 
         if (!m_shutdown) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            // Poll at most every 500ms, but never slower than half the signing
+            // window so a short (test-configured) window still assembles promptly.
+            int tickMs = std::min(500, std::max(1, m_signingWindowMs / 2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(tickMs));
         }
     }
     LogPrintf("HMP: seal manager worker thread stopped\n");
