@@ -117,6 +117,13 @@ public:
     {
         READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot);
         int algo = obj.GetAlgo();
+        if (algo == ALGO_INVALID) {
+            // An undefined algo nibble would otherwise deserialize with the X11
+            // layout and misalign the rest of a batched headers message. The
+            // accept path already rejects unknown algos (bad-algo), so no real
+            // header reaches this; this stops malformed P2P bytes at the wire.
+            throw std::ios_base::failure("CBlockHeader: unknown algo encoding in nVersion");
+        }
         if (IsEquihash(algo)) {
             READWRITE(obj.hashReserved, obj.nTime, obj.nBits, obj.nNonce256);
             READWRITE(LIMITED_VECTOR(obj.nSolution, 1400));
