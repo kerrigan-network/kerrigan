@@ -68,6 +68,20 @@ pub fn frontier_serialize(tree: &SaplingFrontier) -> Vec<u8> {
     buf
 }
 
+/// Reject tree states that `read_commitment_tree` accepts but the tree crate
+/// panics on later.
+///
+/// The read path only bounds the parents vector, so bytes encoding a right
+/// leaf without a left leaf decode fine and then hit the `unreachable!()`
+/// inside `CommitmentTree::size`. Corrupt LevelDB or wallet bytes have to
+/// surface as `Err` here, not as a panic in a later root/size/position call.
+fn validate_tree(tree: &CommitmentTree<Node, SAPLING_TREE_DEPTH>) -> Result<(), String> {
+    if tree.left().is_none() && tree.right().is_some() {
+        return Err("right leaf present without left leaf".to_string());
+    }
+    Ok(())
+}
+
 /// Deserialize a frontier from bytes.
 pub fn frontier_deserialize(data: &[u8]) -> Result<Box<SaplingFrontier>, String> {
     if data.is_empty() {
@@ -75,6 +89,7 @@ pub fn frontier_deserialize(data: &[u8]) -> Result<Box<SaplingFrontier>, String>
     }
     let inner: CommitmentTree<Node, SAPLING_TREE_DEPTH> =
         read_commitment_tree(&data[..]).map_err(|e| format!("Failed to deserialize frontier: {}", e))?;
+    validate_tree(&inner).map_err(|e| format!("Invalid frontier: {}", e))?;
     Ok(Box::new(SaplingFrontier { inner }))
 }
 
@@ -175,5 +190,16 @@ pub fn witness_serialize(wit: &SaplingWitness) -> Vec<u8> {
 pub fn witness_deserialize(data: &[u8]) -> Result<Box<SaplingWitness>, String> {
     let inner: IncrementalWitness<Node, SAPLING_TREE_DEPTH> = read_incremental_witness(&data[..])
         .map_err(|e| format!("Failed to deserialize witness: {}", e))?;
+    validate_tree(inner.tree()).map_err(|e| format!("Invalid witness: {}", e))?;
+    if let Some(cursor) = inner.cursor() {
+        validate_tree(cursor).map_err(|e| format!("Invalid witness cursor: {}", e))?;
+    }
+    // `from_parts` admits a witness whose tree component is empty as long as
+    // some other part is populated, but `witnessed_position` underflows on
+    // such a state. A real zcashd-encoded witness always holds the witnessed
+    // leaf in the tree.
+    if inner.tree().is_empty() {
+        return Err("Invalid witness: tree has no witnessed leaf".to_string());
+    }
     Ok(Box::new(SaplingWitness { inner }))
 }

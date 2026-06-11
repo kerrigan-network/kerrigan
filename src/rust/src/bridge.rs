@@ -482,26 +482,31 @@ fn witness_append(wit: &mut SaplingWitness, cmu: &[u8; 32]) -> Result<(), String
         .unwrap_or_else(|e| Err(panic_to_string(e)))
 }
 
-fn witness_root(wit: &SaplingWitness) -> [u8; 32] {
+// Returns `Err` on panic instead of aborting. Unlike frontier_root, a witness
+// deserialized from corrupt wallet bytes can still reach a panicking state in
+// the tree crate (zero-depth cursor), and the only production caller
+// (SaplingKeyManager) already catches and marks the witness stale for rebuild.
+fn witness_root(wit: &SaplingWitness) -> Result<[u8; 32], String> {
     match catch_unwind(AssertUnwindSafe(|| witness_root_impl(wit))) {
-        Ok(v) => v,
+        Ok(v) => Ok(v),
         Err(e) => {
-            // #401: A zeroed witness root would cause silent consensus divergence.
-            // Abort immediately so the problem is visible and cannot corrupt state.
-            eprintln!("FATAL: {} -- aborting to prevent consensus divergence", panic_to_string(e));
-            std::process::abort();
+            let msg = panic_to_string(e);
+            eprintln!("ERROR: witness_root FFI panic: {}", msg);
+            Err(format!("witness_root panic: {}", msg))
         }
     }
 }
 
-fn witness_position(wit: &SaplingWitness) -> u64 {
+// Returns `Err` on panic instead of aborting, same reasoning as witness_root.
+// The caller wraps witness creation in try/catch and skips the note rather
+// than taking the node down.
+fn witness_position(wit: &SaplingWitness) -> Result<u64, String> {
     match catch_unwind(AssertUnwindSafe(|| witness_position_impl(wit))) {
-        Ok(v) => v,
+        Ok(v) => Ok(v),
         Err(e) => {
-            // #401: Returning 0 on panic would silently corrupt witness position tracking.
-            // Abort immediately so the problem is visible.
-            eprintln!("FATAL: {} -- aborting to prevent consensus divergence", panic_to_string(e));
-            std::process::abort();
+            let msg = panic_to_string(e);
+            eprintln!("ERROR: witness_position FFI panic: {}", msg);
+            Err(format!("witness_position panic: {}", msg))
         }
     }
 }
@@ -963,10 +968,13 @@ pub(crate) mod ffi {
         fn witness_append(wit: &mut SaplingWitness, cmu: &[u8; 32]) -> Result<()>;
 
         /// Get the Merkle root from the witness.
-        fn witness_root(wit: &SaplingWitness) -> [u8; 32];
+        /// Returns `Err` if computing the root panics in the underlying tree
+        /// crate (corrupt wallet bytes); callers mark the witness stale.
+        fn witness_root(wit: &SaplingWitness) -> Result<[u8; 32]>;
 
         /// Get the position of the witnessed leaf.
-        fn witness_position(wit: &SaplingWitness) -> u64;
+        /// Returns `Err` on panic, matching witness_root.
+        fn witness_position(wit: &SaplingWitness) -> Result<u64>;
 
         /// Get the 1065-byte Merkle path for the Sapling prover.
         fn witness_path(wit: &SaplingWitness) -> Result<[u8; 1065]>;
