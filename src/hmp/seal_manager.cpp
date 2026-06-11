@@ -312,10 +312,12 @@ HMPAcceptResult CSealManager::AddSealShare(const CSealShare& share)
             return HMPAcceptResult::REJECTED_INVALID;
         }
     } else if (m_mandatoryProofHeight > 0 && sessionBlockHeight >= m_mandatoryProofHeight) {
+        // Missing mandatory proof is a protocol violation like a malformed
+        // one: INVALID, not BENIGN.
         LogPrintf("HMP: rejecting share with empty zkProof at height %d (mandatory after %d) from %s\n",
                   sessionBlockHeight, m_mandatoryProofHeight,
                   share.signerPubKey.ToString().substr(0, 16));
-        return HMPAcceptResult::REJECTED_BENIGN;
+        return HMPAcceptResult::REJECTED_INVALID;
     }
 
     // Re-acquire lock, re-validate, insert
@@ -400,9 +402,9 @@ std::optional<CSealShare> CSealManager::SignBlock(const uint256& blockHash, int 
         LOCK(cs);
 
         // Equivocation detection: refuse to sign a different block at a height
-        // we've already signed. Look up height (and prevSealHash, while we're
-        // here) from active sessions, falling back to the height-to-hash
-        // reverse index so equivocation checks survive session cleanup.
+        // we've already signed. Look up height and prevSealHash from active
+        // sessions, falling back to the height-to-hash reverse index so
+        // equivocation checks survive session cleanup.
         int height = -1;
         for (const auto& [hash, session] : m_sessions) {
             if (hash == blockHash) {

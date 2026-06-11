@@ -1652,6 +1652,56 @@ BOOST_AUTO_TEST_CASE(seal_share_empty_zk_accepted)
     BOOST_CHECK(HMPAccepted(manager.AddSealShare(share)));
 }
 
+BOOST_AUTO_TEST_CASE(seal_share_empty_zk_mandatory_rejected)
+{
+    // AddSealShare() should reject empty zkProofs at/after nHMPMandatoryProofHeight,
+    // and classify the omission as REJECTED_INVALID like a malformed proof
+    bls::bls_legacy_scheme.store(false);
+
+    Consensus::Params params;
+    params.nHMPSigningWindowMs = 5000;
+    params.nHMPGracePeriodMs = 15000;
+    params.nHMPSealTrailingDepth = 2;
+    params.nHMPWarmupBlocks = 0;
+    params.nHMPPrivilegeWindow = 100;
+    params.nHMPMinBlocksSolved = 1;
+    params.nHMPCommitmentOffset = 0;
+    params.nHMPMandatoryProofHeight = 5; // session height 10 is past this
+
+    CHMPPrivilegeTracker privilege(params);
+
+    uint256 blockHash = uint256::ONE;
+
+    CBLSSecretKey sk;
+    CBLSPublicKey pk;
+    CBLSSignature vrfProof;
+    MakeVRFSelectedKey(blockHash, sk, pk, vrfProof);
+
+    for (int i = 0; i < 5; i++) {
+        privilege.BlockConnected(i, ALGO_X11, pk, {});
+    }
+
+    CSealManager manager(params, nullptr, &privilege);
+    manager.OnNewBlock(blockHash, 10, TEST_PREV_SEAL_HASH);
+
+    CSealShare share;
+    share.blockHash = blockHash;
+    share.signerPubKey = pk;
+    share.signature = sk.Sign(PerSignerMsg(blockHash, pk), false);
+    share.algoId = ALGO_X11;
+    share.vrfProof = vrfProof;
+    // zkProof is empty but mandatory at height 10
+
+    BOOST_CHECK(manager.AddSealShare(share) == HMPAcceptResult::REJECTED_INVALID);
+
+    // Below the mandatory height the same share is fine
+    params.nHMPMandatoryProofHeight = 11;
+    CSealManager lenient(params, nullptr, &privilege);
+    lenient.OnNewBlock(blockHash, 10, TEST_PREV_SEAL_HASH);
+
+    BOOST_CHECK(lenient.AddSealShare(share) == HMPAcceptResult::ACCEPTED);
+}
+
 BOOST_AUTO_TEST_CASE(seal_share_broadcast_assembled)
 {
     // TryAssemble succeeds and the assembled seal is stored
