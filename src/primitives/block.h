@@ -8,6 +8,7 @@
 #ifndef KERRIGAN_PRIMITIVES_BLOCK_H
 #define KERRIGAN_PRIMITIVES_BLOCK_H
 
+#include <crypto/ethash/include/ethash/hash_types.hpp>
 #include <list>
 #include <primitives/transaction.h>
 #include <serialize.h>
@@ -58,6 +59,25 @@ inline int GetVersionForAlgo(int algo)
         case ALGO_EQUIHASH_192: return BLOCK_VERSION_EQUIHASH_192;
         default: throw std::invalid_argument("GetVersionForAlgo: unknown algo");
     }
+}
+
+/** Convert little-endian uint256 (begin()=LSB) to big-endian ethash::hash256 (bytes[0]=MSB). */
+inline ethash::hash256 UintToEthash256(const uint256& in)
+{
+    ethash::hash256 out;
+    static_assert(sizeof(out.bytes) == sizeof(uint256));
+    for (int i = 0; i < 32; ++i)
+        out.bytes[i] = *(in.begin() + 31 - i);
+    return out;
+}
+
+/** Convert big-endian ethash::hash256 to little-endian uint256. */
+inline uint256 EthashToUint256(const ethash::hash256& in)
+{
+    uint256 out;
+    for (int i = 0; i < 32; ++i)
+        *(out.begin() + i) = in.bytes[31 - i];
+    return out;
 }
 
 /** Nodes collect new transactions into a block, hash them into a hash tree,

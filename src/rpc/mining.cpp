@@ -229,23 +229,14 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
             const ethash::epoch_context_full& ctx = ethash::get_global_epoch_context_full(epoch_number);
 
             // ProgPoW seed hash: sha256d of 80-byte header (RVN standard). (#801)
-            ethash::hash256 header_h;
             CHashWriter hw(SER_GETHASH, PROTOCOL_VERSION);
             hw << block.nVersion << block.hashPrevBlock << block.hashMerkleRoot
                << block.nTime << block.nBits << block.nNonce;
-            uint256 hdrHash = hw.GetHash();
-            // ethash is big-endian, uint256 is little-endian; reverse bytes
-            for (int i = 0; i < 32; ++i)
-                header_h.bytes[i] = *(hdrHash.begin() + 31 - i);
+            ethash::hash256 header_h = UintToEthash256(hw.GetHash());
 
             arith_uint256 bnTarget;
             bnTarget.SetCompact(block.nBits);
-            ethash::hash256 boundary;
-            uint256 boundaryU256 = ArithToUint256(bnTarget);
-            // ethash uses big-endian (bytes[0]=MSB), uint256 is little-endian (begin()=LSB)
-            // Reverse bytes so the boundary comparison in progpow::search is correct
-            for (int i = 0; i < 32; ++i)
-                boundary.bytes[i] = *(boundaryU256.begin() + 31 - i);
+            ethash::hash256 boundary = UintToEthash256(ArithToUint256(bnTarget));
 
             uint64_t start_nonce = 0;
             while (max_tries > 0 && !ShutdownRequested()) {
@@ -254,9 +245,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
                 max_tries -= iterations;
                 if (sr.solution_found) {
                     block.nNonce64 = sr.nonce;
-                    // Reverse bytes: ethash big-endian to uint256 little-endian
-                    for (int i = 0; i < 32; ++i)
-                        *(block.mix_hash.begin() + i) = sr.mix_hash.bytes[31 - i];
+                    block.mix_hash = EthashToUint256(sr.mix_hash);
                     break;
                 }
                 start_nonce += iterations;
@@ -1323,11 +1312,7 @@ static RPCHelpMan getblocktemplate()
         int height = pindexPrev->nHeight + 1;
         auto epoch = ethash::get_epoch_number(height);
         auto seed = ethash::calculate_epoch_seed(epoch);
-        uint256 seedU256;
-        // ethash is big-endian, uint256 is little-endian; reverse bytes
-        for (int i = 0; i < 32; ++i)
-            *(seedU256.begin() + i) = seed.bytes[31 - i];
-        result.pushKV("seedhash", seedU256.GetHex());
+        result.pushKV("seedhash", EthashToUint256(seed).GetHex());
     }
 
     UniValue masternodeObj(UniValue::VARR);

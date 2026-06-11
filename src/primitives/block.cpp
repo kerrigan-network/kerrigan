@@ -104,29 +104,17 @@ uint256 CBlockHeader::GetPoWAlgoHash(const Consensus::Params& params) const
             // KawPoW PoW hash: cheap Keccak-only final hash from (height, header_hash, mix_hash, nonce64).
             // No epoch context needed; hash_no_verify just recomputes the final Keccak.
             //
-            // Byte order: ethash::hash256 is big-endian (bytes[0]=MSB), uint256 is little-endian
-            // (begin()=LSB). We must reverse bytes at every conversion boundary.
             // ProgPoW seed hash: sha256d of the 80-byte header (RVN standard).
             // GetHash() returns X11 which no KawPoW miner uses. (#804, #801)
-            ethash::hash256 header_h;
-            static_assert(sizeof(header_h.bytes) == sizeof(uint256));
             CHashWriter hw(SER_GETHASH, PROTOCOL_VERSION);
             hw << nVersion << hashPrevBlock << hashMerkleRoot << nTime << nBits << nNonce;
-            uint256 hdrHash = hw.GetHash();
-            for (int i = 0; i < 32; ++i)
-                header_h.bytes[i] = *(hdrHash.begin() + 31 - i);
-
-            ethash::hash256 mix_h;
-            for (int i = 0; i < 32; ++i)
-                mix_h.bytes[i] = *(mix_hash.begin() + 31 - i);
+            ethash::hash256 header_h = UintToEthash256(hw.GetHash());
+            ethash::hash256 mix_h = UintToEthash256(mix_hash);
 
             ethash::hash256 result = progpow::hash_no_verify(
                 static_cast<int>(nHeight), header_h, mix_h, nNonce64);
 
-            uint256 ret;
-            for (int i = 0; i < 32; ++i)
-                *(ret.begin() + i) = result.bytes[31 - i];
-            return ret;
+            return EthashToUint256(result);
         }
         case ALGO_EQUIHASH_200:
         case ALGO_EQUIHASH_192:

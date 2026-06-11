@@ -5092,13 +5092,14 @@ void CChainState::ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pi
     }
 }
 
+/** DoS guard: reject absurd nHeight before allocating epoch context.
+ *  Epoch context grows ~8 MB per epoch; epoch 2048 is ~60 years of blocks.
+ *  An attacker-controlled nHeight could trigger a multi-GB calloc. */
+static constexpr uint32_t MAX_REASONABLE_EPOCH = 2048;
+
 /** Check KawPoW solution validity (full DAG-based verification). */
 static bool CheckKawPowSolution(const CBlockHeader& block, BlockValidationState& state)
 {
-    // DoS guard: reject absurd nHeight before allocating epoch context.
-    // Epoch context grows ~8 MB per epoch; epoch 2048 is ~60 years of blocks.
-    // An attacker-controlled nHeight could trigger a multi-GB calloc.
-    static constexpr uint32_t MAX_REASONABLE_EPOCH = 2048;
     int epoch_number = ethash::get_epoch_number(static_cast<int>(block.nHeight));
     if (epoch_number < 0 || static_cast<uint32_t>(epoch_number) > MAX_REASONABLE_EPOCH) {
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "kawpow-epoch-too-large",
@@ -5107,30 +5108,19 @@ static bool CheckKawPowSolution(const CBlockHeader& block, BlockValidationState&
 
     const ethash::epoch_context& ctx = ethash::get_global_epoch_context(epoch_number);
 
-    // Byte order: ethash::hash256 is big-endian (bytes[0]=MSB), uint256 is
-    // little-endian (begin()=LSB). Reverse bytes at every conversion boundary.
     // ProgPoW seed hash: sha256d of the 80-byte header (RVN standard).
     // block.GetHash() returns X11 which no KawPoW miner uses.
-    ethash::hash256 header_h;
     CHashWriter hw(SER_GETHASH, PROTOCOL_VERSION);
     hw << block.nVersion << block.hashPrevBlock << block.hashMerkleRoot
        << block.nTime << block.nBits << block.nNonce;
-    uint256 hdrHash = hw.GetHash();
-    for (int i = 0; i < 32; ++i)
-        header_h.bytes[i] = *(hdrHash.begin() + 31 - i);
-
-    ethash::hash256 mix_h;
-    for (int i = 0; i < 32; ++i)
-        mix_h.bytes[i] = *(block.mix_hash.begin() + 31 - i);
+    ethash::hash256 header_h = UintToEthash256(hw.GetHash());
+    ethash::hash256 mix_h = UintToEthash256(block.mix_hash);
 
     // Compute the boundary from nBits
     arith_uint256 bnTarget;
     bool fNegative, fOverflow;
     bnTarget.SetCompact(block.nBits, &fNegative, &fOverflow);
-    ethash::hash256 boundary;
-    uint256 boundaryU256 = ArithToUint256(bnTarget);
-    for (int i = 0; i < 32; ++i)
-        boundary.bytes[i] = *(boundaryU256.begin() + 31 - i);
+    ethash::hash256 boundary = UintToEthash256(ArithToUint256(bnTarget));
 
     if (!progpow::verify(ctx, static_cast<int>(block.nHeight), header_h, mix_h, block.nNonce64, boundary))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-kawpow", "KawPoW solution verification failed");
@@ -5167,7 +5157,6 @@ static bool CheckBlockHeader(const CBlockHeader& block, const uint256& hash, Blo
             // Context-free path only checks epoch bounds. Full
             // progpow::verify deferred to ContextualCheckBlockHeader where
             // nHeight is confirmed against the chain.
-            static constexpr uint32_t MAX_REASONABLE_EPOCH = 2048;
             int epoch_number = ethash::get_epoch_number(static_cast<int>(block.nHeight));
             if (epoch_number < 0 || static_cast<uint32_t>(epoch_number) > MAX_REASONABLE_EPOCH) {
                 return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "kawpow-epoch-too-large",
