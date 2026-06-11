@@ -3198,7 +3198,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // new blocks so that commitment/privilege trackers are populated.
     if (g_hmp_privilege || g_hmp_commitments) {
         LOCK(::cs_main);
-        chainman.ActiveChainstate().RebuildHMPState();
+        if (!chainman.ActiveChainstate().RebuildHMPState()) {
+            return InitError(_("Unable to rebuild HMP seal state from disk. This node is over-pruned or has a corrupt block for deterministic seal weighting; reindex or run without pruning."));
+        }
     }
 
     if (g_seal_manager) {

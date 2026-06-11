@@ -3077,7 +3077,9 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         if (!fJustCheck && pindex->pprev &&
             hmpConsensus.IsDeterministicSealActive(pindex->nHeight)) {
             if (m_hmp_state_anchor != pindex->pprev->GetBlockHash()) {
-                RebuildHMPState(pindex->pprev);
+                if (!RebuildHMPState(pindex->pprev)) {
+                    return AbortNode(state, "Failed to rebuild HMP seal state from disk (over-pruned or corrupt node)");
+                }
             }
         }
 
@@ -3204,6 +3206,14 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                                 }
                             }
                         }
+                    } else if (hmpConsensus.IsDeterministicSealActive(pindex->nHeight) &&
+                               !cbTx.vSealSigners.empty()) {
+                        // Deterministic seal weighting credits vSealSigners into the
+                        // privilege window. The BLS aggregate is only checked when a
+                        // seal is present (above), so a non-empty signer list without
+                        // one would accrue participation for keys that never signed.
+                        // Reject it rather than credit unverified pubkeys.
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-seal-signers-no-seal");
                     }
 
                     // Strip uncommitted + unprivileged signers from seal.
@@ -3766,8 +3776,11 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                                             deferredHMP.privSignerAlgos);
         }
         // The trackers now reflect this block; record it so the next connect can
-        // tell an in-order extension from a post-reorg jump.
-        m_hmp_state_anchor = pindex->GetBlockHash();
+        // tell an in-order extension from a post-reorg jump. VerifyDB (fVerifyOnly)
+        // reconnects without mutating the trackers, so it must not move the anchor.
+        if (!fVerifyOnly) {
+            m_hmp_state_anchor = pindex->GetBlockHash();
+        }
     }
 
     if (fJustCheck)
@@ -5958,20 +5971,26 @@ bool CChainState::LoadChainTip()
     return true;
 }
 
-void CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
+bool CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
 {
     AssertLockHeld(cs_main);
 
     // Rebuild to an explicit target when given (the parent of a block being
     // connected after a reorg), otherwise to the active tip.
     const CBlockIndex* target = pindexTarget ? pindexTarget : m_chain.Tip();
-    if (!target) return;
+    if (!target) return true;
 
     const auto& consensus = m_params.GetConsensus();
 
+    // Post-activation the rebuilt window is consensus-canonical, so a block we
+    // cannot read (over-pruned or corrupt) must halt the node, not silently
+    // produce a short window. Pre-activation the rebuild is best-effort and a
+    // read failure is tolerated as before.
+    const bool fStrict = consensus.IsDeterministicSealActive(target->nHeight);
+
     // Only rebuild if HMP is active at the target
     if (!DeploymentActiveAt(*target, consensus, Consensus::DEPLOYMENT_HMP)) {
-        return;
+        return true;
     }
 
     // Determine how far back to replay: the maximum of all HMP lookback windows
@@ -6008,6 +6027,12 @@ void CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
         // Read the block from disk
         CBlock block;
         if (!ReadBlockFromDisk(block, pindex, consensus)) {
+            if (fStrict) {
+                LogPrintf("HMP: ERROR: cannot read block %d from disk during a "
+                          "consensus rebuild (over-pruned or corrupt); halting to "
+                          "avoid seal-weight divergence\n", height);
+                return false;
+            }
             LogPrintf("HMP: WARNING: failed to read block %d from disk during rebuild\n", height);
             continue;
         }
@@ -6080,6 +6105,7 @@ void CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
 
     // The trackers now reflect the rebuild target.
     m_hmp_state_anchor = target->GetBlockHash();
+    return true;
 }
 
 CVerifyDB::CVerifyDB()

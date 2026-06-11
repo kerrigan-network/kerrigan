@@ -788,8 +788,11 @@ public:
      *  pindexTarget selects the block the rebuilt state should reflect; nullptr means
      *  the active tip (the startup case, which requires m_chain populated via
      *  LoadChainTip()). A non-null target walks that block's own ancestry, so the
-     *  result is independent of the active chain during a reorg. */
-    void RebuildHMPState(const CBlockIndex* pindexTarget = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+     *  result is independent of the active chain during a reorg.
+     *  Returns false only when the target is past the deterministic-seal
+     *  activation and a block in the lookback cannot be read from disk; the
+     *  caller must then halt rather than run on a divergent window. */
+    bool RebuildHMPState(const CBlockIndex* pindexTarget = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Dictates whether we need to flush the cache to disk or not.
     //!

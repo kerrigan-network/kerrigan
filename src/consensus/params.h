@@ -225,8 +225,13 @@ struct Params {
      *  seal signers so the incremental and rebuilt states agree bit-for-bit.
      *  nSealWeight then depends only on the chain up to the block, not on the
      *  order blocks were connected. Like the other HMP fixes this is consensus
-     *  and gated; convergence is guaranteed for fork points at or above the
-     *  activation height.
+     *  and gated. Convergence holds once the rebuild lookback
+     *  (nHMPDominanceCatchMaxLookback + nHMPPrivilegeWindow) lies entirely above
+     *  the activation height; while the window straddles activation a rebuilt
+     *  node still credits pre-activation heights from the filtered set, so
+     *  schedule the activation at least that many blocks into Stage 4 and treat
+     *  the straddle span as a soak window. Participating nodes must run
+     *  unpruned (a rebuild that cannot read a block in the lookback halts).
      *  0 = never activate (safe default). Set per-network in chainparams.cpp. */
     int nHMPDeterministicSealHeight{0};
 
