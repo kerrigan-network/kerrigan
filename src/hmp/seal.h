@@ -19,6 +19,9 @@ inline constexpr std::string_view HMP_SEAL_DOMAIN_TAG{"KRGN-HMP-SEAL-V1"};
 /** Maximum signers per assembled seal (DoS protection). */
 inline constexpr size_t MAX_SEAL_SIGNERS{200};
 
+/** Exact size of a serialized Groth16 participation proof (hmp_params.h CreateProof/VerifyProof). */
+inline constexpr size_t HMP_GROTH16_PROOF_SIZE{192};
+
 /**
  * CSealShare -- individual signature share from one daemon for Hivemind sealing.
  *
@@ -46,7 +49,7 @@ public:
     SERIALIZE_METHODS(CSealShare, obj)
     {
         READWRITE(obj.blockHash, obj.signerPubKey, obj.signature, obj.algoId, obj.nTimestamp,
-                  obj.vrfProof, LIMITED_VECTOR(obj.zkProof, 256), obj.commitment);
+                  obj.vrfProof, LIMITED_VECTOR(obj.zkProof, HMP_GROTH16_PROOF_SIZE), obj.commitment);
     }
 
     uint256 GetHash() const;

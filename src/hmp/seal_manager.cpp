@@ -296,7 +296,7 @@ HMPAcceptResult CSealManager::AddSealShare(const CSealShare& share)
 
     // Empty zkProof accepted until nHMPMandatoryProofHeight
     if (!share.zkProof.empty()) {
-        if (share.zkProof.size() != 192) {
+        if (share.zkProof.size() != HMP_GROTH16_PROOF_SIZE) {
             LogPrintf("HMP: rejecting share with malformed zkProof (size=%zu) from %s\n",
                       share.zkProof.size(), share.signerPubKey.ToString().substr(0, 16));
             return HMPAcceptResult::REJECTED_INVALID;
