@@ -59,9 +59,15 @@ const CBlockIndex* GetLastBlockIndexForAlgo(const CBlockIndex* pindex, const Con
 // Hivemind per-algo DAA (DigiByte-derived). See #382 for time-warp analysis.
 unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo, int gapThresholdOverride)
 {
+    const int nNextHeight = pindexLast->nHeight + 1; // height of the block being mined
+    const bool fDaaRetargetFix = params.IsDaaRetargetFixActive(nNextHeight);
+
     const int nAveragingInterval = 10;
     const int64_t nMaxAdjustDown = 16; // percent
-    const int64_t nMaxAdjustUp = 8;    // percent
+    // Pre-fix the ease cap (+8%) is tighter than the tighten cap (-16%), so under
+    // rising/switching hashrate difficulty rides low and blocks run fast. The fix
+    // makes the clamp symmetric at +-16%.
+    const int64_t nMaxAdjustUp = fDaaRetargetFix ? 16 : 8; // percent
 
     // Per-algo target spacing = overall target * NUM_ALGOS
     const int64_t nAlgoTargetSpacing = params.nPowTargetSpacing * NUM_ALGOS;
@@ -75,8 +81,6 @@ unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& pa
     for (int i = 0; pindexFirst && i < NUM_ALGOS * nAveragingInterval; i++) {
         pindexFirst = pindexFirst->pprev;
     }
-
-    const int nNextHeight = pindexLast->nHeight + 1; // height of the block being mined
 
     const CBlockIndex* pindexPrevAlgo = GetLastBlockIndexForAlgo(pindexLast, params, algo);
     if (pindexPrevAlgo == nullptr || pindexFirst == nullptr) {
@@ -101,7 +105,25 @@ unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& pa
             : NUM_ALGOS * nAveragingInterval * 6;  // 240 blocks pre-activation
     int algoGap = pindexLast->nHeight - pindexPrevAlgo->nHeight;
     if (algoGap >= nGapThreshold) {
-        return EffectivePowLimitForAlgo(params, algo, nNextHeight);
+        const unsigned int nResetLimit = EffectivePowLimitForAlgo(params, algo, nNextHeight);
+        if (!fDaaRetargetFix) {
+            return nResetLimit;
+        }
+        // Bounded reset: ease the last difficulty by 4x per missed round (one
+        // round = NUM_ALGOS blocks the stalled algo did not produce) rather than
+        // jumping straight to the floor, so a long stall does not seed an
+        // instant-block burst when the algo resumes. Capped at the floor, so it
+        // can never ease further than the legacy reset.
+        arith_uint256 bnEased;
+        bnEased.SetCompact(pindexPrevAlgo->nBits);
+        arith_uint256 bnLimit;
+        bnLimit.SetCompact(nResetLimit);
+        const int nSteps = 1 + (algoGap - nGapThreshold) / NUM_ALGOS;
+        for (int i = 0; i < nSteps && bnEased < bnLimit; i++) {
+            bnEased <<= 2; // 4x easier per step
+        }
+        if (bnEased > bnLimit) bnEased = bnLimit;
+        return bnEased.GetCompact();
     }
 
     // Use medians to prevent time-warp attacks

@@ -241,6 +241,26 @@ struct Params {
         return nHMPDeterministicSealHeight > 0 && height >= nHMPDeterministicSealHeight;
     }
 
+    /** Hard-fork activation height for the DAA retarget symmetry fix.
+     *  The Hivemind retarget clamps difficulty falls to -13.8% but rises to
+     *  only +8.7% per interval (nMaxAdjustDown=16 vs nMaxAdjustUp=8). Under
+     *  profit-switching hashrate the tighten clamp binds far more often than
+     *  the ease clamp, so difficulty rides below equilibrium and blocks run
+     *  ~15% fast (mainnet measured ~102s vs 120s). The stale-algo gap reset
+     *  also jumps straight to the hardware floor, seeding instant-block bursts.
+     *  When height >= nDaaRetargetFixHeight (and the field is > 0) the retarget
+     *  uses a symmetric +-16% clamp and eases a stalled algo by 4x per missed
+     *  averaging window (capped at the floor) instead of resetting to it.
+     *  Consensus: every node must switch at the same height.
+     *  0 = never activate (safe default). Set per-network in chainparams.cpp. */
+    int nDaaRetargetFixHeight{0};
+
+    /** Whether the DAA retarget symmetry fix is active at a given height. */
+    bool IsDaaRetargetFixActive(int height) const
+    {
+        return nDaaRetargetFixHeight > 0 && height >= nDaaRetargetFixHeight;
+    }
+
     int nHMPBroodDemotionDuration{1000}; // blocks to stay demoted after equivocation (~33hr)
     int nHMPBroodChainWeightBonus{300};  // bps bonus per BROOD signer's algo in seal multiplier
     static constexpr int MAX_COMMITMENTS_PER_BLOCK = 16;

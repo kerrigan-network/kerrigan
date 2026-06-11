@@ -387,6 +387,95 @@ BOOST_AUTO_TEST_CASE(gap_threshold_activation)
     BOOST_CHECK_EQUAL(postThreshold, NUM_ALGOS * 10 /* nAveragingInterval */);
 }
 
+/* DAA retarget fix: post-activation the stale-algo reset eases by a bounded
+ * factor instead of jumping straight to the hardware floor. */
+BOOST_AUTO_TEST_CASE(daa_retarget_fix_bounded_gap_reset)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    // Drop the floor height so the gap threshold is 40 at low test heights.
+    consensus.nDiffFloorHeight = 1;
+
+    // Build 60 blocks. A single KawPoW block sits at height 10 with a difficulty
+    // far harder than the floor; nothing after it is KawPoW, so mining KawPoW at
+    // height 60 sees a gap of 49 (>= 40) and takes the reset path.
+    const int numBlocks = 60;
+    std::vector<CBlockIndex> blocks(numBlocks);
+    const arith_uint256 floorTarget = UintToArith256(consensus.powLimitFloorAlgo[ALGO_KAWPOW]);
+    arith_uint256 hardTarget = floorTarget;
+    hardTarget >>= 8; // 256x harder than floor
+    const unsigned int hardBits = hardTarget.GetCompact();
+    for (int i = 0; i < numBlocks; i++) {
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+        blocks[i].nHeight = i;
+        blocks[i].nTime = 1700000000 + i * consensus.nPowTargetSpacing;
+        // Only height 10 is KawPoW; the rest rotate among the other three algos.
+        int algo = (i == 10) ? ALGO_KAWPOW
+                             : (i % 3 == 0 ? ALGO_X11 : (i % 3 == 1 ? ALGO_EQUIHASH_200 : ALGO_EQUIHASH_192));
+        blocks[i].nBits = (i == 10) ? hardBits : UintToArith256(consensus.powLimitAlgo[algo]).GetCompact();
+        blocks[i].nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(algo);
+    }
+
+    CBlockHeader hdr;
+    hdr.nTime = blocks.back().nTime + consensus.nPowTargetSpacing;
+
+    // Pre-fix: reset jumps to the floor.
+    consensus.nDaaRetargetFixHeight = 0;
+    arith_uint256 pre;
+    pre.SetCompact(GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW));
+    BOOST_CHECK_EQUAL(pre.GetCompact(), floorTarget.GetCompact());
+
+    // Post-fix: reset eases the last KawPoW difficulty by a bounded factor, so it
+    // stays harder than the floor.
+    consensus.nDaaRetargetFixHeight = 1;
+    arith_uint256 post;
+    post.SetCompact(GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW));
+    BOOST_CHECK(post < floorTarget);
+    BOOST_CHECK(post > hardTarget); // but easier than the stale value
+}
+
+/* DAA retarget fix: post-activation the retarget clamp is symmetric (+-16%), so
+ * a fast chain is allowed to tighten more than the pre-fix +8% cap. */
+BOOST_AUTO_TEST_CASE(daa_retarget_fix_symmetric_clamp)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDiffFloorHeight = 1;
+
+    // 60 KawPoW blocks 60s apart: 40 blocks span 2400s vs the 4800s window
+    // target, so the chain is fast and the tighten clamp binds. Start harder than
+    // the floor so the result is not floor-pinned.
+    const int numBlocks = 60;
+    std::vector<CBlockIndex> blocks(numBlocks);
+    const arith_uint256 floorTarget = UintToArith256(consensus.powLimitFloorAlgo[ALGO_KAWPOW]);
+    arith_uint256 startTarget = floorTarget;
+    startTarget >>= 8;
+    const unsigned int startBits = startTarget.GetCompact();
+    for (int i = 0; i < numBlocks; i++) {
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+        blocks[i].nHeight = i;
+        blocks[i].nTime = 1700000000 + i * 60; // fast: 60s spacing
+        blocks[i].nBits = startBits;
+        blocks[i].nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(ALGO_KAWPOW);
+    }
+
+    CBlockHeader hdr;
+    hdr.nTime = blocks.back().nTime + 60;
+
+    consensus.nDaaRetargetFixHeight = 0;
+    arith_uint256 pre;
+    pre.SetCompact(GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW));
+
+    consensus.nDaaRetargetFixHeight = 1;
+    arith_uint256 post;
+    post.SetCompact(GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW));
+
+    // The symmetric clamp lets the fast chain tighten further (smaller target),
+    // and neither result is pinned at the floor.
+    BOOST_CHECK(post < pre);
+    BOOST_CHECK(post < floorTarget);
+}
+
 /* Testnet/regtest should have uniform per-algo limits (no floors) */
 BOOST_AUTO_TEST_CASE(testnet_no_per_algo_floors)
 {

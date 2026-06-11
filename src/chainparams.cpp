@@ -290,6 +290,9 @@ public:
         // Deterministic seal weighting: not yet scheduled on mainnet. Set to a
         // future height once the fix has soaked on testnet.
         consensus.nHMPDeterministicSealHeight = 0;
+        // DAA retarget symmetry fix: not yet scheduled. Set to a future height
+        // to bring block time back toward 120s.
+        consensus.nDaaRetargetFixHeight = 0;
         consensus.MinBIP9WarningHeight = 0;
         // Per-algo genesis powLimits -- permissive targets for chain bootstrapping.
         // These are intentionally easy so the first miner on each algo can produce blocks.
@@ -734,6 +737,8 @@ public:
         // Deterministic seal weighting: off until scheduled (set a height
         // before reviving testnet); regtest tests enable it via -testactivationheight.
         consensus.nHMPDeterministicSealHeight = 0;
+        // DAA retarget symmetry fix: off until scheduled.
+        consensus.nDaaRetargetFixHeight = 0;
         consensus.MinBIP9WarningHeight = 0;
         // Testnet powLimit: ~uint256(0) >> 1, very easy for CPU mining all algos.
         // Equihash BLAKE2b PoW hash varies per solution; with ~2^254 target, ~30% of
@@ -950,6 +955,7 @@ public:
         // Deterministic seal weighting: off until scheduled (enabled in tests
         // via -testactivationheight).
         consensus.nHMPDeterministicSealHeight = 0;
+        consensus.nDaaRetargetFixHeight = 0;
         consensus.MinBIP9WarningHeight = 2 + 2016; // withdrawals activation height + miner confirmation window
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on devnet; all algos use global powLimit
@@ -1230,6 +1236,9 @@ public:
         // Deterministic seal weighting: off by default; tests enable it via
         // -testactivationheight=hmp_deterministic_seal@N.
         consensus.nHMPDeterministicSealHeight = 0;
+        // DAA retarget symmetry fix: off by default; tests enable it via
+        // -testactivationheight=daa_retarget_fix@N.
+        consensus.nDaaRetargetFixHeight = 0;
         consensus.MinBIP9WarningHeight = 0;
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on regtest; all algos use global powLimit
@@ -1497,6 +1506,11 @@ static void MaybeUpdateHeights(const ArgsManager& args, Consensus::Params& conse
             // (live-tracker weight) and post-fix (rebuilt-to-parent weight)
             // blocks in the same run.
             consensus.nHMPDeterministicSealHeight = int{height};
+        } else if (name == "daa_retarget_fix") {
+            // DAA retarget symmetry fix. Lets regtest tests mine pre-fix
+            // (asymmetric clamp, floor-jump reset) and post-fix (symmetric
+            // clamp, bounded reset) blocks in the same run.
+            consensus.nDaaRetargetFixHeight = int{height};
         } else if (name == "withdrawals") {
             consensus.WithdrawalsHeight = int{height};
         } else {
@@ -1871,7 +1885,7 @@ void SetupChainParamsOptions(ArgsManager& argsman)
     argsman.AddArg("-llmqtestplatformparams=<size>:<threshold>", "Override the default LLMQ size for the LLMQ_TEST_PLATFORM quorum (default: 3:2, regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-minimumdifficultyblocks=<n>", "The number of blocks that can be mined with the minimum difficulty at the start of a chain (default: 0, devnet-only)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-powtargetspacing=<n>", "Override the default PowTargetSpacing value in seconds (default: 120s, devnet-only)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (bip147, bip34, dersig, cltv, csv, brr, dip0001, dip0008, dip0024, v19, v20, mn_rr, sapling, hmp, hmp_seal_algo, withdrawals). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (bip147, bip34, dersig, cltv, csv, brr, dip0001, dip0008, dip0024, v19, v20, mn_rr, sapling, hmp, hmp_seal_algo, hmp_prevseal_fix, hmp_deterministic_seal, daa_retarget_fix, withdrawals). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-vbparams=<deployment>:<start>:<end>(:min_activation_height(:<window>:<threshold/thresholdstart>(:<thresholdmin>:<falloffcoeff>:<mnactivation>)))",
                  "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only). "
                  "Specifying window, threshold/thresholdstart, thresholdmin, falloffcoeff and mnactivation is optional.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
