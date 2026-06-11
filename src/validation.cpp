@@ -3069,6 +3069,18 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         const auto& hmpConsensus = m_params.GetConsensus();
         int nHMPStage = GetHMPStage(pindex->nHeight, hmpConsensus);
 
+        // Deterministic seal weighting: ensure the trackers reflect the parent
+        // before any per-block weight decision reads them. After a reorg the live
+        // trackers carry forward an asymmetric window (front-evicted entries are
+        // not restored on disconnect), so rebuild to the parent when not already
+        // anchored there. One rebuild per reorg; the forward path stays incremental.
+        if (!fJustCheck && pindex->pprev &&
+            hmpConsensus.IsDeterministicSealActive(pindex->nHeight)) {
+            if (m_hmp_state_anchor != pindex->pprev->GetBlockHash()) {
+                RebuildHMPState(pindex->pprev);
+            }
+        }
+
         if (nHMPStage == 1) {
             // Stage 1: neutral seal weight, pure PoW chain selection
             pindex->nSealWeight = 10000;
@@ -3200,17 +3212,27 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                                       pindex->nHeight, hmpConsensus.nHMPSealTrailingDepth,
                                       pindex, "ConnectBlock");
 
-                    // Defer privilege tracker mutation with FILTERED seal signers.
-                    // Must be after commitment stripping and privilege validation so that
-                    // uncommitted/unprivileged signers don't accumulate seal_participations.
+                    // Defer privilege tracker mutation until all consensus checks pass.
                     // Pass signer algos so participation is recorded per signer's algo.
                     if (!fJustCheck && g_hmp_privilege) {
                         deferredHMP.fDoPrivilege = true;
                         deferredHMP.nPrivHeight = pindex->nHeight;
                         deferredHMP.nPrivAlgo = pindex->GetAlgo();
                         deferredHMP.privMinerIdentity = cbTx.minerIdentity;
-                        deferredHMP.privSigners = sealSignerPubKeys;
-                        deferredHMP.privSignerAlgos = sealSignerAlgos;
+                        if (hmpConsensus.IsDeterministicSealActive(pindex->nHeight)) {
+                            // Credit the window from the raw on-chain signers so the
+                            // accrued counts are a non-recursive fold over block data:
+                            // the rebuilt state then matches the incremental state
+                            // bit-for-bit. The seal being weighed here still uses the
+                            // filtered set below.
+                            deferredHMP.privSigners = cbTx.vSealSigners;
+                            deferredHMP.privSignerAlgos = cbTx.vSealSignerAlgos;
+                        } else {
+                            // Legacy: credit the filtered set, so uncommitted/unprivileged
+                            // signers don't accumulate seal_participations.
+                            deferredHMP.privSigners = sealSignerPubKeys;
+                            deferredHMP.privSignerAlgos = sealSignerAlgos;
+                        }
                     }
 
                     // Skip nSealWeight recomputation during VerifyDB; persisted value
@@ -3743,6 +3765,9 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                                             deferredHMP.privSigners,
                                             deferredHMP.privSignerAlgos);
         }
+        // The trackers now reflect this block; record it so the next connect can
+        // tell an in-order extension from a post-reorg jump.
+        m_hmp_state_anchor = pindex->GetBlockHash();
     }
 
     if (fJustCheck)
@@ -4161,6 +4186,10 @@ bool CChainState::DisconnectTip(BlockValidationState& state, DisconnectedBlockTr
         if (g_seal_manager) {
             g_seal_manager->BlockDisconnected(pindexDelete->GetBlockHash(), pindexDelete->nHeight);
         }
+        // BlockDisconnected leaves the trackers in an asymmetric state (evicted
+        // window entries are not restored), so invalidate the anchor. The next
+        // deterministic-seal connect rebuilds to its parent from disk.
+        m_hmp_state_anchor.SetNull();
 
         bool flushed = view.Flush();
         assert(flushed);
@@ -6008,12 +6037,18 @@ void CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
                                           pindex, "RebuildHMPState");
                     }
 
-                    // Update privilege tracker
+                    // Update privilege tracker. Credit the same signer set that
+                    // ConnectBlock defers at this height: raw on-chain signers
+                    // post-activation, filtered set before it, so the rebuilt and
+                    // incremental states agree.
                     if (g_hmp_privilege) {
                         if (nHMPStage < 3) {
                             std::vector<CBLSPublicKey> noSigners;
                             g_hmp_privilege->BlockConnected(height, pindex->GetAlgo(),
                                 cbTxOpt->minerIdentity, noSigners);
+                        } else if (consensus.IsDeterministicSealActive(height)) {
+                            g_hmp_privilege->BlockConnected(height, pindex->GetAlgo(),
+                                cbTxOpt->minerIdentity, cbTxOpt->vSealSigners, cbTxOpt->vSealSignerAlgos);
                         } else {
                             g_hmp_privilege->BlockConnected(height, pindex->GetAlgo(),
                                 cbTxOpt->minerIdentity, filteredSigners, filteredAlgos);
@@ -6042,6 +6077,9 @@ void CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
     }
 
     LogPrintf("HMP: tracker state rebuilt from %d blocks\n", nRebuilt);
+
+    // The trackers now reflect the rebuild target.
+    m_hmp_state_anchor = target->GetBlockHash();
 }
 
 CVerifyDB::CVerifyDB()
@@ -6392,12 +6430,16 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
 
                     // (d) Stage gating: at Stage 2, pass empty signers instead of actual
                     // signers to avoid double-counting when Stage 3+ calls with real signers.
-                    // Pass signer algos so participation is recorded per signer's algo.
+                    // Credit the same set ConnectBlock defers at this height: raw on-chain
+                    // signers post-activation, filtered set before it.
                     if (g_hmp_privilege) {
                         if (nHMPStage < 3) {
                             std::vector<CBLSPublicKey> noSigners;
                             g_hmp_privilege->BlockConnected(pindex->nHeight, pindex->GetAlgo(),
                                 cbTxOpt->minerIdentity, noSigners);
+                        } else if (hmpConsensus.IsDeterministicSealActive(pindex->nHeight)) {
+                            g_hmp_privilege->BlockConnected(pindex->nHeight, pindex->GetAlgo(),
+                                cbTxOpt->minerIdentity, cbTxOpt->vSealSigners, cbTxOpt->vSealSignerAlgos);
                         } else {
                             g_hmp_privilege->BlockConnected(pindex->nHeight, pindex->GetAlgo(),
                                 cbTxOpt->minerIdentity, filteredSigners, filteredAlgos);

@@ -1,0 +1,46 @@
+TODO: feature_hmp_deterministic_seal.py
+
+Functional regtest scenario for deterministic seal weighting
+(nHMPDeterministicSealHeight gate at src/chainparams.cpp, the anchor +
+rebuild branch at the top of the HMP block in src/validation.cpp
+ConnectBlock, and the raw-signer crediting in ConnectBlock,
+RebuildHMPState, and RollforwardBlock).
+
+The unit-level coverage already shipped in src/test/hmp_tests.cpp:
+
+  DeterministicSeal_GateBoundary
+      Confirms IsDeterministicSealActive(height) is off when the height
+      is 0, on at and above a scheduled height, and independent of the
+      nHMPSealAlgoFixHeight / nPrevSealHashFixHeight gates.
+
+This functional scenario adds the end-to-end coverage the unit tests
+cannot: that the SAME block is assigned the SAME nSealWeight (and so the
+chain the SAME nChainSealWork) whether a node reached it by extending the
+tip or by reorganizing onto it. That is the divergence the fix closes,
+and it only manifests when seal weight is non-neutral, which needs more
+than one privileged signer.
+
+It is deferred because the regtest infrastructure to (a) stand up at
+least two HMP identities that reach Stage 3 Elder status on a
+controllable algo, (b) produce assembled seals with those signers, and
+(c) drive a deterministic reorg across the activation height, is the same
+multi-signer harness still missing for the prevSealHash scenario
+(feature_hmp_prevseal_harmonization.py.TODO).
+
+Scenario sketch (2 signers + 1 observer, all on regtest, gate enabled via
+-testactivationheight=hmp_deterministic_seal@<N>):
+
+  1. Start all nodes with the gate at height N, well inside Stage 4.
+  2. Mine past N with both signers privileged, so blocks carry assembled
+     seals whose weight depends on a privilege/commitment record sitting
+     at a threshold boundary in the entry at tip - nHMPPrivilegeWindow.
+  3. On the observer, record nSealWeight and nChainSealWork at some block
+     B reached by straight extension.
+  4. Invalidate a block below B on the observer, mine a competing same
+     height block, then reconsider so the observer reorganizes back onto
+     B (depth >= 1).
+  5. Assert getsealstatus(B) and the block-index nChainSealWork at B are
+     identical to step 3. Pre-fix they differ because the reorged
+     observer weighs B against a window short by the reorg depth.
+  6. Repeat with the gate set above the chain tip and assert the values
+     DO differ, proving the gate, not an unrelated change, is responsible.

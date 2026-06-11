@@ -566,6 +566,12 @@ public:
     //! @see CChain, CBlockIndex.
     CChain m_chain;
 
+    //! Block hash the in-memory HMP trackers (g_hmp_privilege, g_hmp_commitments)
+    //! currently reflect. Used by deterministic seal weighting to tell an in-order
+    //! extension (anchor == parent, keep the incremental state) from a post-reorg
+    //! jump (rebuild the trackers to the parent). Null forces a rebuild.
+    uint256 m_hmp_state_anchor GUARDED_BY(::cs_main){};
+
     /**
      * The blockhash which is the base of the snapshot this chainstate was created from.
      *
