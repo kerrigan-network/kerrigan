@@ -1427,7 +1427,12 @@ void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid)
     if (!state->hashLastUnknownBlock.IsNull()) {
         const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(state->hashLastUnknownBlock);
         if (pindex && pindex->nChainWork > 0) {
-            if (state->pindexBestKnownBlock == nullptr || pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
+            // Track the peer's best block by nChainSealWork: fork choice ranks chains
+            // by seal-weighted work, and every consumer of pindexBestKnownBlock
+            // (FindNextBlocksToDownload, ConsiderEviction, header sync protection)
+            // compares against nChainSealWork. Tracking by raw nChainWork here would
+            // let those consumers see a stale "best" under cross-algo seal weighting.
+            if (state->pindexBestKnownBlock == nullptr || pindex->nChainSealWork >= state->pindexBestKnownBlock->nChainSealWork) {
                 state->pindexBestKnownBlock = pindex;
             }
             state->hashLastUnknownBlock.SetNull();
@@ -1444,8 +1449,9 @@ void PeerManagerImpl::UpdateBlockAvailability(NodeId nodeid, const uint256 &hash
 
     const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
     if (pindex && pindex->nChainWork > 0) {
-        // An actually better block was announced.
-        if (state->pindexBestKnownBlock == nullptr || pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
+        // An actually better block was announced (seal-weighted, matching fork choice
+        // and all readers of pindexBestKnownBlock; see ProcessBlockAvailability).
+        if (state->pindexBestKnownBlock == nullptr || pindex->nChainSealWork >= state->pindexBestKnownBlock->nChainSealWork) {
             state->pindexBestKnownBlock = pindex;
         }
     } else {
@@ -1466,6 +1472,10 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // Make sure pindexBestKnownBlock is up to date, we'll need it.
     ProcessBlockAvailability(peer.m_id);
 
+    // Two deliberately different metrics: "is this peer's chain interesting" uses
+    // nChainSealWork (matches fork choice), while the nMinimumChainWork floor stays
+    // raw PoW -- it is an anti-DoS constant from chainparams expressed in unweighted
+    // work, and seal weighting (0.1x-2.0x) must not let a low-PoW chain clear it.
     if (state->pindexBestKnownBlock == nullptr || state->pindexBestKnownBlock->nChainSealWork < m_chainman.ActiveChain().Tip()->nChainSealWork || state->pindexBestKnownBlock->nChainWork < nMinimumChainWork) {
         // This peer has nothing interesting.
         return;
@@ -3149,7 +3159,10 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     LOCK(cs_main);
     CNodeState *nodestate = State(pfrom.GetId());
 
-    if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) && m_chainman.ActiveChain().Tip()->nChainWork <= last_header.nChainWork) {
+    // Direct-fetch when the announced chain could become our tip under seal-weighted
+    // fork choice (headers-only entries carry a neutral 1.0x seal weight, refined at
+    // ConnectBlock, so this comparison is always defined).
+    if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) && m_chainman.ActiveChain().Tip()->nChainSealWork <= last_header.nChainSealWork) {
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
         // Calculate all the blocks we'd need to switch to last_header, up to a limit.
@@ -3223,7 +3236,10 @@ void PeerManagerImpl::UpdatePeerStateForReceivedHeaders(CNode& pfrom,
     // because it is set in UpdateBlockAvailability. Some nullptr checks
     // are still present, however, as belt-and-suspenders.
 
-    if (received_new_header && last_header.nChainWork > m_chainman.ActiveChain().Tip()->nChainWork) {
+    // Seal-weighted comparison: m_last_block_announcement feeds eviction protection,
+    // which ranks peers by nChainSealWork (ConsiderEviction); the announcement
+    // criterion must use the same metric.
+    if (received_new_header && last_header.nChainSealWork > m_chainman.ActiveChain().Tip()->nChainSealWork) {
         nodestate->m_last_block_announcement = GetTime();
     }
 
@@ -4782,9 +4798,9 @@ void PeerManagerImpl::ProcessMessage(
 
         CNodeState *nodestate = State(pfrom.GetId());
 
-        // If this was a new header with more work than our tip, update the
-        // peer's last block announcement time
-        if (received_new_header && pindex->nChainWork > m_chainman.ActiveChain().Tip()->nChainWork) {
+        // If this was a new header with more (seal-weighted) work than our tip,
+        // update the peer's last block announcement time
+        if (received_new_header && pindex->nChainSealWork > m_chainman.ActiveChain().Tip()->nChainSealWork) {
             nodestate->m_last_block_announcement = GetTime();
         }
 
@@ -4794,7 +4810,7 @@ void PeerManagerImpl::ProcessMessage(
         if (pindex->nStatus & BLOCK_HAVE_DATA) // Nothing to do here
             return;
 
-        if (pindex->nChainWork <= m_chainman.ActiveChain().Tip()->nChainWork || // We know something better
+        if (pindex->nChainSealWork <= m_chainman.ActiveChain().Tip()->nChainSealWork || // We know something better (seal-weighted)
                 pindex->nTx != 0) { // We had this block at some point, but pruned it
             if (fAlreadyInFlight) {
                 // We requested this block for some reason, but our mempool will probably be useless
