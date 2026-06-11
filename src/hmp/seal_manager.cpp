@@ -400,13 +400,14 @@ std::optional<CSealShare> CSealManager::SignBlock(const uint256& blockHash, int 
         LOCK(cs);
 
         // Equivocation detection: refuse to sign a different block at a height
-        // we've already signed. Look up height from active sessions, falling back
-        // to the height-to-hash reverse index so equivocation checks survive
-        // session cleanup.
+        // we've already signed. Look up height (and prevSealHash, while we're
+        // here) from active sessions, falling back to the height-to-hash
+        // reverse index so equivocation checks survive session cleanup.
         int height = -1;
         for (const auto& [hash, session] : m_sessions) {
             if (hash == blockHash) {
                 height = session.blockHeight;
+                prevSealHash = session.prevSealHash;
                 break;
             }
         }
@@ -445,15 +446,6 @@ std::optional<CSealShare> CSealManager::SignBlock(const uint256& blockHash, int 
         // gets pruned after 100 blocks.
         if (height >= 0) {
             m_signedBlocks[height] = blockHash;
-        }
-
-        // Also capture prevSealHash while holding the lock: avoids a second
-        // lock window and eliminates the session-eviction race entirely.
-        for (const auto& [hash, session] : m_sessions) {
-            if (hash == blockHash) {
-                prevSealHash = session.prevSealHash;
-                break;
-            }
         }
     }
 
