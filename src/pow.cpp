@@ -120,6 +120,13 @@ unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& pa
         bnLimit.SetCompact(nResetLimit);
         const int nSteps = 1 + (algoGap - nGapThreshold) / NUM_ALGOS;
         for (int i = 0; i < nSteps && bnEased < bnLimit; i++) {
+            // If another 4x would reach or pass the floor, settle at the floor.
+            // This also stops bnEased <<= 2 from wrapping past 256 bits when the
+            // floor target is itself near 2^254 (which would emit nBits 0).
+            if (bnEased > (bnLimit >> 2)) {
+                bnEased = bnLimit;
+                break;
+            }
             bnEased <<= 2; // 4x easier per step
         }
         if (bnEased > bnLimit) bnEased = bnLimit;

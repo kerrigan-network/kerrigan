@@ -1236,8 +1236,10 @@ public:
         // Deterministic seal weighting: off by default; tests enable it via
         // -testactivationheight=hmp_deterministic_seal@N.
         consensus.nHMPDeterministicSealHeight = 0;
-        // DAA retarget symmetry fix: off by default; tests enable it via
-        // -testactivationheight=daa_retarget_fix@N.
+        // DAA retarget symmetry fix: off by default. Regtest sets
+        // fPowNoRetargeting, so Hivemind never runs here; the gated retarget is
+        // covered by pow_tests in-process. The -testactivationheight override
+        // exists for parity but does not exercise retargeting on regtest.
         consensus.nDaaRetargetFixHeight = 0;
         consensus.MinBIP9WarningHeight = 0;
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1

@@ -476,6 +476,48 @@ BOOST_AUTO_TEST_CASE(daa_retarget_fix_symmetric_clamp)
     BOOST_CHECK(post < floorTarget);
 }
 
+/* DAA retarget fix: the bounded gap reset must settle at the floor without the
+ * 4x shift wrapping past 256 bits when the floor target is itself near 2^254. */
+BOOST_AUTO_TEST_CASE(daa_retarget_fix_reset_no_overflow)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDiffFloorHeight = 1;
+    consensus.nDaaRetargetFixHeight = 1;
+
+    // Floor near 2^255 and a stale difficulty just below it: a single un-guarded
+    // <<2 here would wrap to a tiny (or zero) target.
+    arith_uint256 hugeFloor = (arith_uint256(1) << 255) - 1;
+    consensus.powLimitFloorAlgo[ALGO_KAWPOW] = ArithToUint256(hugeFloor);
+    arith_uint256 staleTarget = arith_uint256(1) << 254; // < floor, > floor>>2
+    const unsigned int staleBits = staleTarget.GetCompact();
+
+    const int numBlocks = 60;
+    std::vector<CBlockIndex> blocks(numBlocks);
+    for (int i = 0; i < numBlocks; i++) {
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+        blocks[i].nHeight = i;
+        blocks[i].nTime = 1700000000 + i * consensus.nPowTargetSpacing;
+        int algo = (i == 10) ? ALGO_KAWPOW
+                             : (i % 3 == 0 ? ALGO_X11 : (i % 3 == 1 ? ALGO_EQUIHASH_200 : ALGO_EQUIHASH_192));
+        blocks[i].nBits = (i == 10) ? staleBits : UintToArith256(consensus.powLimitAlgo[algo]).GetCompact();
+        blocks[i].nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(algo);
+    }
+
+    CBlockHeader hdr;
+    hdr.nTime = blocks.back().nTime + consensus.nPowTargetSpacing;
+
+    arith_uint256 reset;
+    reset.SetCompact(GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW));
+
+    // Settles at the floor, never zero and never harder than the stale value.
+    arith_uint256 floorTarget;
+    floorTarget.SetCompact(UintToArith256(consensus.powLimitFloorAlgo[ALGO_KAWPOW]).GetCompact());
+    BOOST_CHECK(reset > arith_uint256(0));
+    BOOST_CHECK(reset <= floorTarget);
+    BOOST_CHECK(reset > staleTarget);
+}
+
 /* Testnet/regtest should have uniform per-algo limits (no floors) */
 BOOST_AUTO_TEST_CASE(testnet_no_per_algo_floors)
 {
