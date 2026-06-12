@@ -62,9 +62,11 @@
 #include <evo/specialtxman.h>
 #include <flat-database.h>
 #include <governance/governance.h>
+#include <hmp/identity.h>
 #include <llmq/context.h>
 #include <llmq/signing.h>
 #include <masternode/meta.h>
+#include <masternode/payments.h>
 #include <masternode/sync.h>
 #include <netfulfilledman.h>
 #include <spork.h>
@@ -287,6 +289,13 @@ ChainTestingSetup::ChainTestingSetup(const std::string& chainName, const std::ve
 
     m_node.clhandler = std::make_unique<chainlock::ChainlockHandler>(*m_node.chainlocks, *m_node.chainman, *m_node.mempool, *m_node.mn_sync);
 
+    // HMP miner identity, normally created during init. The miner embeds it
+    // in CbTx and validation requires it at HMP Stage 3+.
+    g_hmp_identity = std::make_unique<CHMPIdentity>();
+    if (!g_hmp_identity->Init(m_path_root)) {
+        g_hmp_identity.reset();
+    }
+
     // Start script-checking threads. Set g_parallel_script_checks to true so they are used.
     constexpr int script_check_threads = 2;
     StartScriptCheckWorkerThreads(script_check_threads);
@@ -295,6 +304,7 @@ ChainTestingSetup::ChainTestingSetup(const std::string& chainName, const std::ve
 
 ChainTestingSetup::~ChainTestingSetup()
 {
+    g_hmp_identity.reset();
     m_node.scheduler->stop();
     StopScriptCheckWorkerThreads();
     GetMainSignals().FlushBackgroundCallbacks();
@@ -415,7 +425,7 @@ TestChain100Setup::TestChain100Setup(const std::string& chain_name, const std::v
 TestChainSetup::TestChainSetup(int num_blocks, const std::string& chain_name, const std::vector<const char*>& extra_args)
     : TestingSetup{chain_name, extra_args}
 {
-    SetMockTime(1598887952);
+    SetMockTime(Params().GenesisBlock().GetBlockTime());
     constexpr std::array<unsigned char, 32> vchKey = {
         {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}};
     coinbaseKey.Set(vchKey.begin(), vchKey.end(), true);
@@ -434,11 +444,11 @@ TestChainSetup::TestChainSetup(int num_blocks, const std::string& chain_name, co
     CCheckpointData checkpoints{
         {
             /*TestChainDATSetup=*/
-            {   98, uint256S("0x150e127929d578d8129b77a6cb7e2e343a1379aa3feaaa9cce59e0a645756a81") },
+            {   98, uint256S("0x7700c5def4d188b32e120ece25851140c19d0342c98a120d14e3561a09151a8a") },
             /*TestChain100Setup=*/
-            {  100, uint256S("0x6ffb83129c19ebdf1ae3771be6a67fe34b35f4c956326b9ba152fac1649f65ae") },
+            {  100, uint256S("0x7363d8550143604e00d829714f6a88a4ccc75e8fe875074e0b0d57a7e3159e1f") },
             /*TestChainDIP3BeforeActivationSetup=*/
-            {  430, uint256S("0x0bcefaa33fec56cd84d05d0e76cd6a78badcc20f627d91903646de6a07930a14") },
+            {  430, uint256S("0x36e03ab51a31f431e04985a834ea31c264feff51f9b00490be9631a8875a8d95") },
             /*TestChainBRRBeforeActivationSetup=*/
             {  497, uint256S("0x0857a9b5db51835b1c828f019f4c664b5fe6c28ac44a6d868436930f832d31e5") },
             /*TestChainV19BeforeActivationSetup=*/
@@ -511,6 +521,39 @@ CBlock TestChainSetup::CreateBlock(
     block.vtx.insert(block.vtx.end(), llmqCommitments.begin(), llmqCommitments.end());
     for (const CMutableTransaction& tx : txns) {
         block.vtx.push_back(MakeTransactionRef(tx));
+    }
+
+    // The template coinbase was assembled with an empty mempool, so its
+    // treasury outputs assume zero fees. The injected txns may pay fees,
+    // which the treasury outputs are derived from, so rebuild the coinbase
+    // payments with the actual fee total.
+    if (!txns.empty()) {
+        LOCK(::cs_main);
+        const CBlockIndex* tip = chainstate.m_chain.Tip();
+        CCoinsViewCache view(&chainstate.CoinsTip());
+        CAmount fees{0};
+        for (size_t i = 1; i < block.vtx.size(); ++i) {
+            const CTransaction& tx = *block.vtx[i];
+            CAmount value_in{0};
+            for (const CTxIn& txin : tx.vin) {
+                const Coin& coin = view.AccessCoin(txin.prevout);
+                if (!coin.IsSpent()) value_in += coin.out.nValue;
+            }
+            if (value_in > tx.GetValueOut()) {
+                fees += value_in - tx.GetValueOut();
+            }
+            AddCoins(view, tx, tip->nHeight + 1, /*check=*/true);
+        }
+        if (fees > 0) {
+            const CAmount subsidy{GetBlockSubsidyInner(tip->nBits, tip->nHeight, chainparams.GetConsensus(), /*fV20Active=*/false)};
+            CMutableTransaction tx_coinbase{*block.vtx[0]};
+            tx_coinbase.vout.resize(1);
+            tx_coinbase.vout[0].nValue = subsidy + fees;
+            std::vector<CTxOut> vout_mn;
+            std::vector<CTxOut> vout_sb;
+            m_node.chain_helper->mn_payments->FillBlockPayments(tx_coinbase, tip, subsidy, fees, vout_mn, vout_sb);
+            block.vtx[0] = MakeTransactionRef(std::move(tx_coinbase));
+        }
     }
 
     // Manually update CbTx as we modified the block here

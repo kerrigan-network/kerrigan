@@ -1329,7 +1329,17 @@ public:
         // No checkpoint for regtest, genesis hash is parameter-dependent
         checkpointData = {};
 
-        m_assumeutxo_data = MapAssumeutxo{};
+        // For use by unit tests only (TestChain100Setup chains)
+        m_assumeutxo_data = MapAssumeutxo{
+            {
+                110,
+                {AssumeutxoHash{uint256S("0x3fe5e190fdb6ee7d3f7cd364d336a1fcc37d6a1373665d67837de48eab3dd22c")}, 111},
+            },
+            {
+                200,
+                {AssumeutxoHash{uint256S("0xf2f04b33690245bb0c6e5b5f7afbfce41c1bddd9f621c11df9c97b6aeb186f9a")}, 201},
+            },
+        };
 
         chainTxData = ChainTxData{
             0,

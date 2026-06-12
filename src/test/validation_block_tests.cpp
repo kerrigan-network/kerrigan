@@ -8,6 +8,8 @@
 #include <consensus/consensus.h>
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <evo/chainhelper.h>
+#include <masternode/payments.h>
 #include <node/miner.h>
 #include <pow.h>
 #include <random.h>
@@ -71,18 +73,29 @@ std::shared_ptr<CBlock> MinerTestingSetup::Block(const uint256& prev_hash)
     pblock->hashPrevBlock = prev_hash;
     pblock->nTime = ++time;
 
-    // Make the coinbase transaction with two outputs:
+    // The template was assembled on the active tip, but the block attaches at
+    // prev_hash, where the subsidy and treasury payments may differ. Rebuild
+    // the coinbase payments for the actual attachment height so the treasury
+    // payee checks pass.
+    const CBlockIndex* prev_index = WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(prev_hash));
+    const CAmount subsidy{GetBlockSubsidyInner(prev_index->nBits, prev_index->nHeight, Params().GetConsensus(), /*fV20Active=*/false)};
+
+    // Make the coinbase transaction with two outputs ahead of the treasury
+    // payments:
     // One zero-value one that has a unique pubkey to make sure that blocks at
     // the same height can have a different hash. Another one that has the
-    // coinbase reward in a P2SH with OP_TRUE as scriptPubKey to make it easy to
+    // miner reward in a P2SH with OP_TRUE as scriptPubKey to make it easy to
     // spend
     CMutableTransaction txCoinbase(*pblock->vtx[0]);
-    txCoinbase.vout.resize(2);
-    txCoinbase.vout[1].scriptPubKey = P2SH_OP_TRUE;
-    txCoinbase.vout[1].nValue = txCoinbase.vout[0].nValue;
+    txCoinbase.vout.resize(1);
+    txCoinbase.vout[0].nValue = subsidy;
+    std::vector<CTxOut> vout_mn;
+    std::vector<CTxOut> vout_sb;
+    m_node.chain_helper->mn_payments->FillBlockPayments(txCoinbase, prev_index, subsidy, 0, vout_mn, vout_sb);
+    txCoinbase.vout.insert(txCoinbase.vout.begin() + 1, CTxOut(txCoinbase.vout[0].nValue, P2SH_OP_TRUE));
     txCoinbase.vout[0].nValue = 0;
     // Always pad with OP_0 at the end to avoid bad-cb-length error
-    txCoinbase.vin[0].scriptSig = CScript{} << WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(prev_hash)->nHeight + 1) << OP_0;
+    txCoinbase.vin[0].scriptSig = CScript{} << prev_index->nHeight + 1 << OP_0;
     pblock->vtx[0] = MakeTransactionRef(std::move(txCoinbase));
 
     return pblock;
