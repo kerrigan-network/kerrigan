@@ -75,6 +75,15 @@ void ChainLockSigner::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlock
 
 void ChainLockSigner::TrySignChainTip()
 {
+    // One signing attempt at a time. The scheduler tick and UpdatedBlockTip can
+    // both reach here concurrently and otherwise each pass the lastSignedHeight
+    // check below and sign a different competing tip, splitting this node's
+    // signing-share contribution across two block hashes.
+    TRY_LOCK(cs_try_sign, locked);
+    if (!locked) {
+        return;
+    }
+
     if (!m_mn_sync.IsBlockchainSynced()) {
         return;
     }
@@ -182,6 +191,13 @@ void ChainLockSigner::BlockDisconnected(const std::shared_ptr<const CBlock>& blo
 
 void ChainLockSigner::BlockConnected(const std::shared_ptr<const CBlock>& block, const CBlockIndex* pindex)
 {
+    // During IBD we never sign (TrySignChainTip bails on !IsBlockchainSynced) and
+    // Cleanup() also bails, so populating blockTxs per block would grow it
+    // unbounded across the whole sync. Skip until synced.
+    if (!m_mn_sync.IsBlockchainSynced()) {
+        return;
+    }
+
     // We need this information later when we try to sign a new tip, so that we can determine if all included TXs are safe.
     const uint256& hash = pindex->GetBlockHash();
 

@@ -45,6 +45,9 @@ private:
 
 private:
     mutable Mutex cs_signer;
+    // Serializes TrySignChainTip so the scheduler tick and the block-tip notify
+    // cannot both pass the lastSignedHeight check and sign competing tips.
+    mutable Mutex cs_try_sign;
 
     std::unique_ptr<CScheduler> m_scheduler;
     std::unique_ptr<std::thread> m_scheduler_thread;
@@ -77,7 +80,7 @@ public:
     void BlockDisconnected(const std::shared_ptr<const CBlock>& block, const CBlockIndex* pindex) override
         EXCLUSIVE_LOCKS_REQUIRED(!cs_signer);
     void UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork, bool fInitialDownload) override
-        EXCLUSIVE_LOCKS_REQUIRED(!cs_signer);
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_signer, !cs_try_sign);
 
     [[nodiscard]] MessageProcessingResult HandleNewRecoveredSig(const llmq::CRecoveredSig& recoveredSig) override
         EXCLUSIVE_LOCKS_REQUIRED(!cs_signer);
@@ -85,7 +88,7 @@ public:
     void Cleanup() EXCLUSIVE_LOCKS_REQUIRED(!cs_signer);
 
 private:
-    void TrySignChainTip() EXCLUSIVE_LOCKS_REQUIRED(!cs_signer);
+    void TrySignChainTip() EXCLUSIVE_LOCKS_REQUIRED(!cs_signer, !cs_try_sign);
 
     [[nodiscard]] BlockTxs::mapped_type GetBlockTxs(const uint256& blockHash)
         EXCLUSIVE_LOCKS_REQUIRED(!cs_signer);
