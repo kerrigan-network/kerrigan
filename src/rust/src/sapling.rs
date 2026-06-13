@@ -5,6 +5,7 @@
 use std::convert::{TryFrom, TryInto};
 use std::io;
 use std::mem;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use bellman::groth16::Proof;
 use bls12_381::Bls12;
@@ -649,6 +650,11 @@ impl Verifier {
         spend_auth_sig: &[u8; 64],
         sighash_value: &[u8; 32],
     ) -> bool {
+        // Consensus verify path across the cxx boundary: a panic here would abort
+        // the node. Today every field is decoded fallibly so no panic path exists,
+        // but contain it as false (reject) to stay fail-closed if a future crate
+        // bump introduces one. Matches the catch_unwind used elsewhere in the bridge.
+        catch_unwind(AssertUnwindSafe(|| {
         let cv = match Option::from(ValueCommitment::from_bytes_not_small_order(cv)) {
             Some(p) => p,
             None => return false,
@@ -688,6 +694,11 @@ impl Verifier {
             zkproof,
             &vk.prepare(),
         )
+        }))
+        .unwrap_or_else(|_| {
+            eprintln!("ERROR: Sapling check_spend panicked -- rejecting");
+            false
+        })
     }
 
     pub(crate) fn check_output(
@@ -697,6 +708,8 @@ impl Verifier {
         ephemeral_key: &[u8; 32],
         zkproof: &[u8; GROTH_PROOF_SIZE],
     ) -> bool {
+        // See check_spend: contain any future panic as a reject, fail-closed.
+        catch_unwind(AssertUnwindSafe(|| {
         let cv = match Option::from(ValueCommitment::from_bytes_not_small_order(cv)) {
             Some(p) => p,
             None => return false,
@@ -731,6 +744,11 @@ impl Verifier {
             zkproof,
             &vk.prepare(),
         )
+        }))
+        .unwrap_or_else(|_| {
+            eprintln!("ERROR: Sapling check_output panicked -- rejecting");
+            false
+        })
     }
 
     pub(crate) fn final_check(
@@ -739,6 +757,8 @@ impl Verifier {
         binding_sig: &[u8; 64],
         sighash_value: &[u8; 32],
     ) -> bool {
+        // See check_spend: contain any future panic as a reject, fail-closed.
+        catch_unwind(AssertUnwindSafe(|| {
         let value_balance = match ZatBalance::from_i64(value_balance) {
             Ok(vb) => vb,
             Err(_) => return false,
@@ -748,6 +768,11 @@ impl Verifier {
 
         self.0
             .final_check(value_balance, sighash_value, binding_sig)
+        }))
+        .unwrap_or_else(|_| {
+            eprintln!("ERROR: Sapling final_check panicked -- rejecting");
+            false
+        })
     }
 }
 
@@ -767,6 +792,10 @@ pub(crate) fn init_batch_validator(cache_store: bool) -> Box<BatchValidator> {
     })))
 }
 
+// NOT A CONSENSUS PATH. This v5 BatchValidator is unused by Kerrigan consensus,
+// which verifies shielded txs via the per-item Verifier above. It carries the only
+// .unwrap() panic sites in this file and a cache "return true on hit" shortcut; do
+// not wire it into acceptance without re-auditing it as consensus.
 impl BatchValidator {
     #[allow(clippy::boxed_local)]
     pub(crate) fn check_bundle(&mut self, bundle: Box<Bundle>, sighash: [u8; 32]) -> bool {

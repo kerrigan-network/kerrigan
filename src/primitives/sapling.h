@@ -83,6 +83,11 @@ public:
         return inner->value_balance_zat();
     }
 
+    // NOT A CONSENSUS PATH. The v5 BatchValidator (this method, batch.check_bundle,
+    // batch.validate) is unused: Kerrigan validates shielded txs only through
+    // CheckSaplingTx -> VerifySaplingProofs (the per-item Verifier). This batch path
+    // has a cache "return true on hit" shortcut and is a weaker route; do not wire it
+    // into block/mempool acceptance without re-auditing it as consensus.
     bool QueueAuthValidation(
         sapling::BatchValidator& batch, const uint256& sighash) const
     {
