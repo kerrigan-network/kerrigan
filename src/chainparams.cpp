@@ -287,12 +287,18 @@ public:
         // The hybrid HMP fork-choice architecture remains the v1.3.0 target at
         // a later activation height in a separate release.
         consensus.nPrevSealHashFixHeight = 57000;
-        // Deterministic seal weighting: not yet scheduled on mainnet. Set to a
-        // future height once the fix has soaked on testnet.
-        consensus.nHMPDeterministicSealHeight = 0;
-        // DAA retarget symmetry fix: not yet scheduled. Set to a future height
-        // to bring block time back toward 120s.
-        consensus.nDaaRetargetFixHeight = 0;
+        // Deterministic seal weighting hard-fork. Activates the rebuild-to-parent
+        // path that makes nSealWeight independent of reorg history; the seal-weight
+        // fork-choice comparator has been live since Stage 4 (height 500), so before
+        // this height a reorg can diverge nChainSealWork between nodes. Well above
+        // nHMPStage4Height + the rebuild lookback (~1100), so no straddle. Nodes that
+        // participate in HMP must run unpruned (the rebuild halts on an unreadable
+        // block in the lookback).
+        consensus.nHMPDeterministicSealHeight = 74000;
+        // DAA retarget symmetry hard-fork. Makes the retarget clamp symmetric
+        // (+-16%) and bounds the stale-algo gap reset, bringing block time back from
+        // ~58-64s toward 120s. Same height as the seal fix so operators hit one fork.
+        consensus.nDaaRetargetFixHeight = 74000;
         consensus.MinBIP9WarningHeight = 0;
         // Per-algo genesis powLimits -- permissive targets for chain bootstrapping.
         // These are intentionally easy so the first miner on each algo can produce blocks.
