@@ -19,6 +19,10 @@
 #include <util/strencodings.h>
 #include <util/string.h>
 #include <util/syserror.h>
+
+#ifdef WIN32
+#include <cwchar>
+#endif
 #include <util/threadnames.h>
 #include <util/translation.h>
 
@@ -48,6 +52,8 @@
 #include <sched.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #else
 
@@ -56,6 +62,7 @@
 #include <io.h> /* for _commit */
 #include <shellapi.h>
 #include <shlobj.h>
+#include <windows.h>
 #endif
 
 #ifdef HAVE_MALLOPT_ARENA_MAX
@@ -1381,13 +1388,86 @@ std::string ShellEscape(const std::string& arg)
 void runCommand(const std::string& strCommand)
 {
     if (strCommand.empty()) return;
+
 #ifndef WIN32
-    int nErr = ::system(strCommand.c_str());
+    // Use fork/exec instead of system() to avoid shell injection.
+    // Split command into program + arguments by whitespace.
+    std::vector<std::string> args = SplitString(strCommand, ' ');
+    if (args.empty()) return;
+
+    std::vector<char*> argv;
+    for (auto& arg : args) {
+        argv.push_back(arg.data());
+    }
+    argv.push_back(nullptr);
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        LogPrintf("runCommand error: fork failed for (%s)\n", strCommand);
+        return;
+    }
+
+    if (pid == 0) {
+        // Child process: exec without shell
+        execvp(argv[0], argv.data());
+        // If exec returns, it failed
+        _exit(127);
+    }
+
+    // Parent: wait for child
+    int status;
+    waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        int nErr = WEXITSTATUS(status);
+        if (nErr)
+            LogPrintf("runCommand error: process(%s) returned %d\n", strCommand, nErr);
+    } else if (WIFSIGNALED(status)) {
+        LogPrintf("runCommand error: process(%s) killed by signal %d\n", strCommand, WTERMSIG(status));
+    }
 #else
-    int nErr = ::_wsystem(std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>,wchar_t>().from_bytes(strCommand).c_str());
+    // Use CreateProcessW instead of _wsystem to avoid shell injection.
+    std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
+    std::wstring cmd = converter.from_bytes(strCommand);
+
+    // CreateProcessW can modify the string, so make a mutable copy
+    std::vector<wchar_t> cmdLine(cmd.begin(), cmd.end());
+    cmdLine.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+
+    PROCESS_INFORMATION pi{};
+
+    BOOL success = CreateProcessW(
+        NULL,
+        cmdLine.data(),
+        NULL,
+        NULL,
+        FALSE,
+        CREATE_NO_WINDOW,
+        NULL,
+        NULL,
+        &si,
+        &pi
+    );
+
+    if (!success) {
+        LogPrintf("runCommand error: CreateProcess(%s) failed: %d\n", strCommand, GetLastError());
+        return;
+    }
+
+    // Wait for the process to complete
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    DWORD exitCode;
+    if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != 0) {
+        LogPrintf("runCommand error: process(%s) returned %lu\n", strCommand, exitCode);
+    }
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
 #endif
-    if (nErr)
-        LogPrintf("runCommand error: system(%s) returned %d\n", strCommand, nErr);
 }
 #endif
 
