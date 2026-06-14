@@ -3129,9 +3129,9 @@ BOOST_AUTO_TEST_CASE(PrevSealHash_OnNewBlock_IdempotentUnderFixToggle)
 // Deterministic seal weighting (nHMPDeterministicSealHeight gate). The gate
 // selects, per height, whether ConnectBlock rebuilds the trackers to the
 // block's parent before weighing and credits the privilege window from raw
-// on-chain signers. The end-to-end reorg-determinism scenario needs at least
-// two signing identities reaching Stage 3 plus a forced reorg and is deferred
-// to feature_hmp_deterministic_seal.py.TODO; this locks the gate semantics.
+// on-chain signers. The end-to-end reorg-determinism scenario (two signing
+// identities reaching Stage 3 plus a forced reorg) lives in
+// feature_hmp_deterministic_seal.py; this locks the gate semantics.
 BOOST_AUTO_TEST_CASE(DeterministicSeal_GateBoundary)
 {
     Consensus::Params params;

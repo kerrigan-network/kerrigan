@@ -5985,8 +5985,10 @@ bool CChainState::RebuildHMPState(const CBlockIndex* pindexTarget)
     // Post-activation the rebuilt window is consensus-canonical, so a block we
     // cannot read (over-pruned or corrupt) must halt the node, not silently
     // produce a short window. Pre-activation the rebuild is best-effort and a
-    // read failure is tolerated as before.
-    const bool fStrict = consensus.IsDeterministicSealActive(target->nHeight);
+    // read failure is tolerated as before. Gate on the block this rebuild arms
+    // (target's child), so the activation block itself is covered when it is
+    // connected via a reorg (target would otherwise be the pre-activation parent).
+    const bool fStrict = consensus.IsDeterministicSealActive(target->nHeight + 1);
 
     // Only rebuild if HMP is active at the target
     if (!DeploymentActiveAt(*target, consensus, Consensus::DEPLOYMENT_HMP)) {
