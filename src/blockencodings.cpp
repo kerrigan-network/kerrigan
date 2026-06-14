@@ -54,7 +54,11 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
     if (cmpctblock.shorttxids.size() + cmpctblock.prefilledtxn.size() > MaxBlockSize() / MIN_TRANSACTION_SIZE)
         return READ_STATUS_INVALID;
 
-    assert(header.IsNull() && txn_available.empty());
+    // A second InitData/FillBlock on an already-used object would corrupt state;
+    // a remote peer can trigger re-entry with a duplicate message (CVE-2024-35202,
+    // bitcoin#26898). Return INVALID instead of asserting so the caller
+    // disconnects the peer rather than aborting the node.
+    if (!header.IsNull() || !txn_available.empty()) return READ_STATUS_INVALID;
     header = cmpctblock.header;
     txn_available.resize(cmpctblock.BlockTxCount());
 
@@ -170,13 +174,16 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
 }
 
 bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const {
-    assert(!header.IsNull());
+    if (header.IsNull()) return false; // already filled / not initialized (CVE-2024-35202)
     assert(index < txn_available.size());
     return txn_available[index] != nullptr;
 }
 
 ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing) {
-    assert(!header.IsNull());
+    // Re-entry guard: header is nulled at the end of a successful FillBlock, so a
+    // duplicate blocktxn must not re-enter and abort. Return INVALID instead
+    // (CVE-2024-35202, bitcoin#26898).
+    if (header.IsNull()) return READ_STATUS_INVALID;
     uint256 hash = header.GetHash();
     block = header;
     block.vtx.resize(txn_available.size());
