@@ -24,6 +24,7 @@
 
 #include <array>
 #include <mutex>
+#include <type_traits>
 #include <unistd.h>
 
 #include <atomic>
@@ -126,6 +127,19 @@ public:
             try {
                 impl = ImplType::FromBytes(bls::Bytes(vecBytes.data(), vecBytes.size()), specificLegacyScheme);
                 fValid = true;
+                // Reject the identity (point at infinity) for group-element types
+                // -- public keys and signatures that arrive over the wire / on
+                // chain. The all-zero encoding is handled above; this catches the
+                // 0xc0-infinity encoding. An identity key/sig is cryptographically
+                // degenerate (rogue-key edge cases) and never legitimately appears
+                // (verified: no on-chain BLS field is the identity). G1/G2 default
+                // construct to infinity (g1_set_infty), so this comparison is exact.
+                if constexpr (std::is_same_v<ImplType, bls::G1Element> ||
+                              std::is_same_v<ImplType, bls::G2Element>) {
+                    if (impl == ImplType()) {
+                        Reset();
+                    }
+                }
             } catch (...) {
                 Reset();
             }
