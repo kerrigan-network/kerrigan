@@ -39,9 +39,19 @@ src/kerrigan-wallet
 src/kerrigan-util
 src/kerrigan-node
 src/qt/kerrigan-qt
+src/kerrigan-qt
 src/test/test_kerrigan
 src/test/fuzz/fuzz
 src/bench/bench_kerrigan
+
+# Build residue that embeds absolute home paths (must never be committed)
+src/.v1.0.3-backup/
+cargo-home/
+src/Makefile
+src/Makefile.in
+doc/man/Makefile
+doc/man/Makefile.in
+*.status.old
 
 # IDE
 .vscode/
