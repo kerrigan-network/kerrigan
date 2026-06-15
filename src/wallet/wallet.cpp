@@ -1487,9 +1487,34 @@ void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& 
         }
     }
 
-    // Update witnesses now that all commitments are known
+    // Update witnesses now that all commitments are known.
+    //
+    // The inline update is O(block commitments x tracked notes) and runs under
+    // cs_wallet on the block-connect path. Both factors are attacker-amplifiable
+    // -- a block can carry up to ~1800 output commitments, and a wallet's note
+    // count can be inflated with dust shielded sends -- so an unbounded inline
+    // update could stall the wallet for minutes. If the work would exceed the
+    // cap, clear the witnesses and hand off to the chunked, off-thread self-heal
+    // rebuild (MaybeAutoRebuildSaplingWitnesses, dispatched right after this
+    // block), which yields cs_wallet between chunks. The rebuild replays through
+    // here with m_sapling_rebuild_active set, so it always does the full update
+    // and never recurses into this defer path.
+    // kMaxInlineWitnessAppends bounds the connect-thread hold; it is far above
+    // any normal wallet's commitments x notes and only abnormal load trips it.
     if (!blockCmus.empty()) {
-        m_sapling_key_manager.UpdateWitnesses(height, blockCmus, &batch);
+        static constexpr uint64_t kMaxInlineWitnessAppends = 10'000'000;
+        const bool inRebuild = m_sapling_rebuild_active.load(std::memory_order_acquire);
+        const uint64_t work = static_cast<uint64_t>(blockCmus.size()) *
+                              m_sapling_key_manager.GetUnspentWitnessedNoteCount();
+        if (!inRebuild && work > kMaxInlineWitnessAppends) {
+            m_sapling_key_manager.ClearWitnessesForRebuild(&batch);
+            m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+            WalletLogPrintf("Sapling: deferring witness update at height %d (%u commitments x notes "
+                            "exceeds inline cap); scheduled background rebuild\n",
+                            height, (unsigned)blockCmus.size());
+        } else {
+            m_sapling_key_manager.UpdateWitnesses(height, blockCmus, &batch);
+        }
     }
 
     // Detect shielded spends using computed nullifiers

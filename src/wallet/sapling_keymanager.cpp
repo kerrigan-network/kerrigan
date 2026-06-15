@@ -490,6 +490,16 @@ size_t SaplingKeyManager::GetNoteCount() const
     return mapSaplingNotes.size();
 }
 
+size_t SaplingKeyManager::GetUnspentWitnessedNoteCount() const
+{
+    LOCK(cs);
+    size_t n = 0;
+    for (const auto& [key, nd] : mapSaplingNotes) {
+        if (!nd.isSpent && !nd.witnessData.empty()) ++n;
+    }
+    return n;
+}
+
 int SaplingKeyManager::ValidateConsistency() const
 {
     LOCK(cs);

@@ -240,6 +240,13 @@ public:
     size_t GetNoteCount() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
+     * Returns the number of unspent notes that carry a live witness -- i.e. the
+     * set UpdateWitnesses iterates per block commitment. Used by the live
+     * block-connect path to bound inline witness work before it runs.
+     */
+    size_t GetUnspentWitnessedNoteCount() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
      * Post-load consistency check. Verifies that:
      *  - Every spending key has a corresponding FVK record
      *  - The stored FVK matches the FVK re-derived from the spending key
