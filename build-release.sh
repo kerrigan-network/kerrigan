@@ -153,6 +153,29 @@ for name in os.listdir(bindir):
         with open(p, 'wb') as f: f.write(data.replace(src, new + pad))
 " "$SRCDIR" "$outdir/bin"
 
+    # Portability gate: fail if any binary needs a glibc newer than the floor.
+    # depends/ does not supply libc, so a Linux build links the host glibc; on a
+    # modern host the binaries silently require a too-new glibc and won't run on
+    # older systems (a repeating release failure). This does not fix portability
+    # -- build in an older-glibc container (e.g. Ubuntu 20.04) to lower the
+    # requirement -- it catches the problem before shipping. Override the floor
+    # with GLIBC_FLOOR= if a higher requirement is intentional.
+    if command -v objdump >/dev/null 2>&1; then
+        local glibc_floor="${GLIBC_FLOOR:-2.31}"
+        local maxglibc
+        maxglibc=$(objdump -T "$outdir/bin/"* 2>/dev/null \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/GLIBC_//' \
+            | sort -V | tail -1)
+        if [ -n "$maxglibc" ]; then
+            if [ "$(printf '%s\n%s\n' "$maxglibc" "$glibc_floor" | sort -V | tail -1)" != "$glibc_floor" ]; then
+                error "$tag binaries require glibc $maxglibc (> floor $glibc_floor). Build in an older-glibc container, or set GLIBC_FLOOR if intentional."
+            fi
+            info "$tag glibc requirement $maxglibc (<= floor $glibc_floor, portable)"
+        fi
+    else
+        info "WARNING: objdump not found; skipped glibc portability check for $tag"
+    fi
+
     # Deterministic tarball: same source -> same SHA across rebuilds. The HEAD
     # commit time (whatever commit is checked out, tagged or not) is the stable
     # SOURCE_DATE_EPOCH; tar is normalised (sorted entries, owner=root, fixed
