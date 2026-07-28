@@ -30,6 +30,7 @@ void RegisterGovernanceRPCCommands(CRPCTable &tableRPC);
 void RegisterEvoRPCCommands(CRPCTable &tableRPC);
 void RegisterQuorumsRPCCommands(CRPCTable &tableRPC);
 void RegisterHMPRPCCommands(CRPCTable &tableRPC);
+void RegisterRecoveryRPCCommands(CRPCTable &tableRPC);
 
 #ifdef ENABLE_WALLET
 // Kerrigan-specific wallet-only RPC commands
@@ -58,6 +59,7 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
     RegisterEvoRPCCommands(t);
     RegisterQuorumsRPCCommands(t);
     RegisterHMPRPCCommands(t);
+    RegisterRecoveryRPCCommands(t);
 }
 
 #endif // BITCOIN_RPC_REGISTER_H

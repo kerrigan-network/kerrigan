@@ -53,6 +53,23 @@ bool BuildQuorumRotationInfo(CDeterministicMNManager& dmnman, CQuorumSnapshotMan
 {
     AssertLockHeld(::cs_main);
 
+    // Quorum rotation is enabled only for InstantSend atm.
+    Consensus::LLMQType llmqType = Params().GetConsensus().llmqTypeDIP0024InstantSend;
+    const auto& llmq_params_opt = Params().GetLLMQ(llmqType);
+    assert(llmq_params_opt.has_value());
+
+    // Kerrigan v1.3.0: InstantSend runs on the NON-rotated LLMQ_60_60, so
+    // there is no rotation cycle to describe -- ConstructCycle/
+    // GetSnapshotForBlock would error for every request. Degrade gracefully:
+    // return an empty (default) rotation-info object instead of an error so
+    // external tooling that polls getqrinfo (and P2P QGETQRINFO peers) keeps
+    // working above the fork. Non-consensus; signing/verification never uses
+    // this path for non-rotated types (they resolve quorums via GetQuorum).
+    if (!llmq_params_opt->useRotation) {
+        response.extraShare = request.extraShare;
+        return true;
+    }
+
     std::vector<const CBlockIndex*> baseBlockIndexes;
     if (request.baseBlockHashes.size() == 0) {
         const CBlockIndex* blockIndex = chainman.ActiveChain().Genesis();
@@ -99,13 +116,7 @@ bool BuildQuorumRotationInfo(CDeterministicMNManager& dmnman, CQuorumSnapshotMan
         return false;
     }
 
-    // Quorum rotation is enabled only for InstantSend atm.
-    Consensus::LLMQType llmqType = Params().GetConsensus().llmqTypeDIP0024InstantSend;
-
     // Since the returned quorums are in reversed order, the most recent one is at index 0
-    const auto& llmq_params_opt = Params().GetLLMQ(llmqType);
-    assert(llmq_params_opt.has_value());
-
     const int cycleLength = llmq_params_opt->dkgInterval;
 
     auto cycle_base_opt = ConstructCycle(qsnapman, llmqType, /*skip_snap=*/true,

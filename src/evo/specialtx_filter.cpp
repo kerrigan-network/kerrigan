@@ -5,6 +5,7 @@
 #include <evo/specialtx_filter.h>
 
 #include <evo/assetlocktx.h>
+#include <evo/inference_wire.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
 #include <primitives/transaction.h>
@@ -83,6 +84,13 @@ void ExtractSpecialTxFilterElements(const CTransaction& tx, const std::function<
                     AddScriptElement(script, addElement);
                 }
             }
+        }
+        break;
+    }
+    case TRANSACTION_DRONE_REGISTER: {
+        if (const auto opt_droneTx = GetTxPayload<CDroneRegTx>(tx)) {
+            AddHashElement(opt_droneTx->blsPubKeyHash, addElement);
+            AddScriptElement(opt_droneTx->scriptPayout, addElement);
         }
         break;
     }

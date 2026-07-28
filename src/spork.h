@@ -45,6 +45,7 @@ enum SporkId : int32_t {
     SPORK_23_QUORUM_POSE                                   = 10022,
     // SPORK_24_DEPRECATED = 10023,
     SPORK_25_HMP_ENABLED                                   = 10024,
+    SPORK_26_DRONE_PAYOUT_ENABLED                          = 10025,
 
     SPORK_INVALID                                          = -1,
 };
@@ -70,7 +71,7 @@ struct CSporkDef
 };
 
 #define MAKE_SPORK_DEF(name, defaultValue) CSporkDef{name, defaultValue, #name}
-[[maybe_unused]] static constexpr std::array<CSporkDef, 8> sporkDefs = {
+[[maybe_unused]] static constexpr std::array<CSporkDef, 9> sporkDefs = {
     MAKE_SPORK_DEF(SPORK_2_INSTANTSEND_ENABLED,            4070908800ULL), // OFF, needs LLMQ
     MAKE_SPORK_DEF(SPORK_3_INSTANTSEND_BLOCK_FILTERING,    4070908800ULL), // OFF
     MAKE_SPORK_DEF(SPORK_9_SUPERBLOCKS_ENABLED,            4070908800ULL), // OFF
@@ -79,6 +80,15 @@ struct CSporkDef
     MAKE_SPORK_DEF(SPORK_21_QUORUM_ALL_CONNECTED,          4070908800ULL), // OFF
     MAKE_SPORK_DEF(SPORK_23_QUORUM_POSE,                   4070908800ULL), // OFF
     MAKE_SPORK_DEF(SPORK_25_HMP_ENABLED,                   0),            // ON
+    // ENABLE-ONCE cutover switch for the drone-payout fork, layered ON TOP of
+    // the nDronePayoutHeight hard floor (see IsDronePayoutEffective,
+    // evo/dronelist.h). Default OFF: the operator flips it on only when the
+    // ecosystem (Rust SDK + coordinator special-tx registration support) is
+    // ready. ONE-WAY IN PRACTICE: once real TRANSACTION_DRONE_REGISTER txs
+    // have confirmed with the spork on, turning it back off would make every
+    // node reject those historical registrations (and the drone-paying
+    // coinbases above them) on reindex/IBD -- treat enabling as irreversible.
+    MAKE_SPORK_DEF(SPORK_26_DRONE_PAYOUT_ENABLED,          4070908800ULL), // OFF, enable-once
 };
 #undef MAKE_SPORK_DEF
 

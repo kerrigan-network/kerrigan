@@ -490,13 +490,6 @@ static bool ExecuteCommands(const std::vector<const CRPCCommand*>& commands, con
 
 UniValue CRPCTable::execute(const JSONRPCRequest &request) const
 {
-    // Return immediately if in warmup
-    {
-        LOCK(g_rpc_warmup_mutex);
-        if (fRPCInWarmup)
-            throw JSONRPCError(RPC_IN_WARMUP, rpcWarmupStatus);
-    }
-
     auto it = mapCommands.end();
 
     std::string subcommand;
@@ -509,6 +502,22 @@ UniValue CRPCTable::execute(const JSONRPCRequest &request) const
     if (it == mapCommands.end()) {
         it = mapCommands.find(request.strMethod);
         subcommand.clear();
+    }
+
+    // Return immediately if in warmup, unless every registered handler for
+    // the (resolved) command is explicitly warmup-callable. The command is
+    // resolved FIRST but unknown methods still get RPC_IN_WARMUP (not
+    // "Method not found") while warming up, so nothing new about the command
+    // table is probeable pre-init. Warmup-callable handlers must touch only
+    // self-owned state (see CRPCCommand::okDuringWarmup).
+    {
+        LOCK(g_rpc_warmup_mutex);
+        if (fRPCInWarmup) {
+            const bool warmup_ok = it != mapCommands.end() && !it->second.empty() &&
+                                   std::all_of(it->second.begin(), it->second.end(),
+                                               [](const CRPCCommand* cmd) { return cmd->okDuringWarmup; });
+            if (!warmup_ok) throw JSONRPCError(RPC_IN_WARMUP, rpcWarmupStatus);
+        }
     }
     if (it != mapCommands.end()) {
         UniValue result;

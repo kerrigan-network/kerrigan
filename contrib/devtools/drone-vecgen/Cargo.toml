@@ -1,0 +1,9 @@
+[package]
+name = "vecgen"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+blst = "=0.3.16"
+sha2 = "=0.10.9"
+ripemd = "=0.1.3"

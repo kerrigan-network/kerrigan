@@ -21,12 +21,14 @@
 #include <key_io.h>
 #include <llmq/blockprocessor.h>
 #include <llmq/context.h>
+#include <evo/dronelist.h>
 #include <evo/evodb.h>
 #include <net.h>
 #include <node/context.h>
 #include <node/miner.h>
 #include <governance/governance.h>
 #include <pow.h>
+#include <recovery/recovery.h>
 #include <rpc/blockchain.h>
 #include <rpc/mining.h>
 #include <rpc/server.h>
@@ -324,6 +326,11 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
 static UniValue generateBlocks(ChainstateManager& chainman, const NodeContext& node, const CTxMemPool& mempool, const CScript& coinbase_script,
                                int nGenerate, uint64_t nMaxTries, int algo = ALGO_X11)
 {
+    // Quarantine gate (WS-HEAL v2 5.2.2): a quarantined node must not
+    // assemble or extend the chain on state it proved inconsistent.
+    if (recovery::IsQuarantined()) {
+        throw JSONRPCError(RPC_IN_QUARANTINE, "Node is quarantined (see getrecoverystatus)");
+    }
     EnsureLLMQContext(node);
 
     UniValue blockHashes(UniValue::VARR);
@@ -552,6 +559,11 @@ static RPCHelpMan generateblock()
     }
 
     const CChainParams& chainparams(Params());
+
+    // Quarantine gate (WS-HEAL v2 5.2.2).
+    if (recovery::IsQuarantined()) {
+        throw JSONRPCError(RPC_IN_QUARANTINE, "Node is quarantined (see getrecoverystatus)");
+    }
 
     ChainstateManager& chainman = EnsureChainman(node);
     CChainState& active_chainstate = chainman.ActiveChainstate();
@@ -913,6 +925,12 @@ static RPCHelpMan getblocktemplate()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     const NodeContext& node = EnsureAnyNodeContext(request.context);
+
+    // Quarantine gate (WS-HEAL v2 5.2.2): refuse to hand out block templates
+    // built on state the node proved inconsistent.
+    if (recovery::IsQuarantined()) {
+        throw JSONRPCError(RPC_IN_QUARANTINE, "Node is quarantined (see getrecoverystatus)");
+    }
 
     ChainstateManager& chainman = EnsureChainman(node);
     LOCK(cs_main);
@@ -1491,8 +1509,9 @@ static RPCHelpMan getblocksubsidy()
             {
                 {RPCResult::Type::STR_AMOUNT, "miner", "miner's portion in KRGN (20%)"},
                 {RPCResult::Type::STR_AMOUNT, "masternode", "masternode portion in KRGN (20%)"},
-                {RPCResult::Type::STR_AMOUNT, "growthescrow", "growth escrow portion in KRGN (40%, burns via OP_RETURN after escrow sunset)"},
-                {RPCResult::Type::BOOL, "escrow_sunset", "true if escrow has sunset (40% burns via OP_RETURN instead of accumulating)"},
+                {RPCResult::Type::STR_AMOUNT, "growthescrow", "growth escrow / drone-payout portion in KRGN (40%; paid to the selected inference drone once the drone-payout fork is active and a drone is eligible, otherwise escrow-or-burn)"},
+                {RPCResult::Type::BOOL, "escrow_sunset", "true if escrow has sunset (with no eligible drone the 40% burns via OP_RETURN instead of accumulating)"},
+                {RPCResult::Type::BOOL, "drone_payout_active", "true if the drone-payout fork is in effect at this height (past nDronePayoutHeight AND spork SPORK_26_DRONE_PAYOUT_ENABLED on): the 40% slot pays an eligible registered drone; with zero eligible drones it falls back to escrow-or-burn"},
                 {RPCResult::Type::STR_AMOUNT, "devfund", "dev fund portion in KRGN (15%)"},
                 {RPCResult::Type::STR_AMOUNT, "founders", "founders portion in KRGN (5%)"},
             }},
@@ -1534,12 +1553,22 @@ static RPCHelpMan getblocksubsidy()
     // Escrow sunset: after nGrowthEscrowEndHeight, the 40% burns via OP_RETURN
     // instead of accumulating. The amount is the same; the destination changes.
     bool fEscrowSunset = (consensus.nGrowthEscrowEndHeight > 0 && nHeight > consensus.nGrowthEscrowEndHeight);
+    // Drone-payout fork: once EFFECTIVE (at/after nDronePayoutHeight AND with
+    // SPORK_26_DRONE_PAYOUT_ENABLED on) the 40% slot pays the round-robin
+    // drone payee (see getdronelist); the amount is unchanged and the
+    // destination depends on drone-list state at the height, so only the mode
+    // flag is reported here (miners/pools should read the exact outputs from
+    // getblocktemplate's "masternode" array as usual). The flag reflects the
+    // CURRENT spork state, i.e. what the payout rule would actually be if the
+    // block were validated now.
+    bool fDronePayoutActive = IsDronePayoutEffective(consensus, nHeight);
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("miner", ValueFromAmount(minerReward));
     result.pushKV("masternode", ValueFromAmount(mnReward));
     result.pushKV("growthescrow", ValueFromAmount(escrowReward));
     result.pushKV("escrow_sunset", fEscrowSunset);
+    result.pushKV("drone_payout_active", fDronePayoutActive);
     result.pushKV("devfund", ValueFromAmount(devReward));
     result.pushKV("founders", ValueFromAmount(foundersReward));
     return result;

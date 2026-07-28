@@ -20,24 +20,33 @@ void Test(NodeContext& node)
     using namespace llmq;
     auto tip = node.chainman->ActiveTip();
     const auto& consensus_params = Params().GetConsensus();
+    // Kerrigan mainnet assigns the ChainLocks/InstantSend/EHF roles to the
+    // height-gated LLMQ_60_60 small-network quorum; below nLLMQ6060Height that
+    // type is disabled regardless of the DIP0024 flags (at the test tip the
+    // gate has not been reached, so the expectation is false on mainnet).
+    const bool fLLMQ6060Enabled{consensus_params.nLLMQ6060Height > 0 &&
+                                tip->nHeight + 1 >= consensus_params.nLLMQ6060Height};
+    auto expected = [&](Consensus::LLMQType llmqType, bool legacy_expected) {
+        return llmqType == Consensus::LLMQType::LLMQ_60_60 ? fLLMQ6060Enabled : legacy_expected;
+    };
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypeDIP0024InstantSend, tip,
                                                          /*optDIP0024IsActive=*/false, /*optHaveDIP0024Quorums=*/false),
-                      false);
+                      expected(consensus_params.llmqTypeDIP0024InstantSend, false));
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypeDIP0024InstantSend, tip,
                                                          /*optDIP0024IsActive=*/true, /*optHaveDIP0024Quorums=*/false),
-                      true);
+                      expected(consensus_params.llmqTypeDIP0024InstantSend, true));
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypeDIP0024InstantSend, tip,
                                                          /*optDIP0024IsActive=*/true, /*optHaveDIP0024Quorums=*/true),
-                      true);
+                      expected(consensus_params.llmqTypeDIP0024InstantSend, true));
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypeChainLocks, tip,
                                                          /*optDIP0024IsActive=*/false, /*optHaveDIP0024Quorums=*/false),
-                      true);
+                      expected(consensus_params.llmqTypeChainLocks, true));
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypeChainLocks, tip,
                                                          /*optDIP0024IsActive=*/true, /*optHaveDIP0024Quorums=*/false),
-                      true);
+                      expected(consensus_params.llmqTypeChainLocks, true));
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypeChainLocks, tip,
                                                          /*optDIP0024IsActive=*/true, /*optHaveDIP0024Quorums=*/true),
-                      true);
+                      expected(consensus_params.llmqTypeChainLocks, true));
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypePlatform, tip,
                                                          /*optDIP0024IsActive=*/false, /*optHaveDIP0024Quorums=*/false),
                       Params().IsTestChain());
@@ -49,13 +58,13 @@ void Test(NodeContext& node)
                       Params().IsTestChain());
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypeMnhf, tip,
                                                          /*optDIP0024IsActive=*/false, /*optHaveDIP0024Quorums=*/false),
-                      true);
+                      expected(consensus_params.llmqTypeMnhf, true));
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypeMnhf, tip,
                                                          /*optDIP0024IsActive=*/true, /*optHaveDIP0024Quorums=*/false),
-                      true);
+                      expected(consensus_params.llmqTypeMnhf, true));
     BOOST_CHECK_EQUAL(node.chainman->IsQuorumTypeEnabled(consensus_params.llmqTypeMnhf, tip,
                                                          /*optDIP0024IsActive=*/true, /*optHaveDIP0024Quorums=*/true),
-                      true);
+                      expected(consensus_params.llmqTypeMnhf, true));
 }
 
 BOOST_FIXTURE_TEST_CASE(utils_IsQuorumTypeEnabled_tests_regtest, RegTestingSetup)

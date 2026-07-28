@@ -24,6 +24,7 @@
 
 #include <evo/assetlocktx.h>
 #include <evo/cbtx.h>
+#include <evo/inference_wire.h>
 #include <evo/mnhftx.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
@@ -329,6 +330,10 @@ void TxToUniv(const CTransaction& tx, const uint256& block_hash, UniValue& entry
     } else if (tx.nType == TRANSACTION_SAPLING) {
         if (const auto opt_saplingTx = GetTxPayload<SaplingTxPayload>(tx)) {
             entry.pushKV("saplingTx", opt_saplingTx->ToJson());
+        }
+    } else if (tx.nType == TRANSACTION_DRONE_REGISTER) {
+        if (const auto opt_droneRegTx = GetTxPayload<CDroneRegTx>(tx)) {
+            entry.pushKV("droneRegTx", opt_droneRegTx->ToJson());
         }
     }
 

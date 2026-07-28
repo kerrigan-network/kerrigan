@@ -1465,6 +1465,19 @@ public:
     void AddPendingProbeConnections(const std::set<uint256>& proTxHashes);
 
     size_t GetNodeCount(ConnectionDirection) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /** Recovery (self-heal) L3 actuator: unconditionally add the compiled-in
+     *  fixed seeds for reachable networks to addrman, bypassing the one-shot
+     *  empty-addrman gate in ThreadOpenConnections. Non-destructive: adds
+     *  known-good addresses to the "new" tables only; nothing is evicted or
+     *  banned. Returns the number of seed addresses offered to addrman. */
+    size_t InjectFixedSeeds();
+
+    /** Queue a name (typically a DNS seed) for a short-lived ADDR_FETCH
+     *  connection. Public for the recovery L3 re-seed; also used internally
+     *  by -seednode / ThreadDNSAddressSeed handling. */
+    void AddAddrFetch(const std::string& strDest) EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex);
+
     std::map<CNetAddr, LocalServiceInfo> getNetLocalAddresses() const;
     size_t GetMaxOutboundNodeCount();
     size_t GetMaxOutboundOnionNodeCount();
@@ -1556,7 +1569,6 @@ private:
     void ThreadOpenAddedConnections()
         EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_nodes_mutex, !m_reconnections_mutex,
                                  !m_unused_i2p_sessions_mutex, !mutexMsgProc, !cs_mapSocketToNode);
-    void AddAddrFetch(const std::string& strDest) EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex);
     void ProcessAddrFetch()
         EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_nodes_mutex, !m_unused_i2p_sessions_mutex,
                                  !mutexMsgProc, !cs_mapSocketToNode);

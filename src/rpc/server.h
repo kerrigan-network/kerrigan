@@ -110,11 +110,24 @@ public:
     {
     }
 
+    //! Constructor additionally marking the command warmup-callable. Handlers
+    //! registered with ok_during_warmup=true are dispatched while
+    //! fRPCInWarmup is still set and therefore MUST NOT touch cs_main, the
+    //! wallet, or any chainstate pointer -- only self-owned state that exists
+    //! before init completes (see the recovery RPCs).
+    CRPCCommand(std::string category, RpcMethodFnType fn, bool ok_during_warmup)
+        : CRPCCommand(std::move(category), fn)
+    {
+        okDuringWarmup = ok_during_warmup;
+    }
+
     std::string category;
     std::string name;
     Actor actor;
     std::vector<std::string> argNames;
     intptr_t unique_id;
+    //! Whether this command may execute during RPC warmup (default: no).
+    bool okDuringWarmup{false};
 };
 
 /**

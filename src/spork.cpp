@@ -313,6 +313,13 @@ SporkValue CSporkManager::GetSporkValue(SporkId nSporkID) const
                 return 1;
             case SPORK_25_HMP_ENABLED:
                 break; // fall through to normal spork lookup
+            case SPORK_26_DRONE_PAYOUT_ENABLED:
+                // Deliberately NOT hardened: this is the operator-controlled
+                // enable-once cutover for the drone-payout fork (defaults OFF
+                // via sporkDefs). It must remain settable on mainnet with the
+                // existing spork key so the fork can be armed when the
+                // ecosystem is ready. See IsDronePayoutEffective (evo/dronelist.h).
+                break; // fall through to normal spork lookup
             // IS/CL must stay OFF at genesis; LLMQ needs masternodes registered first.
             // Superblocks OFF at genesis, no governance without meaningful MN participation.
             // Return 4070908800 (far-future disabled sentinel) so IsSporkActive() returns false.

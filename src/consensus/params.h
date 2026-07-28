@@ -8,6 +8,7 @@
 #ifndef KERRIGAN_CONSENSUS_PARAMS_H
 #define KERRIGAN_CONSENSUS_PARAMS_H
 
+#include <consensus/amount.h>
 #include <uint256.h>
 #include <llmq/params.h>
 
@@ -260,6 +261,60 @@ struct Params {
     {
         return nDaaRetargetFixHeight > 0 && height >= nDaaRetargetFixHeight;
     }
+
+    /** Hard-fork activation height for the LLMQ_60_60 small-network quorum.
+     *  The Dash-inherited quorum roles (ChainLocks on LLMQ_400_60, EHF on
+     *  LLMQ_400_85, InstantSend on the DIP0024-rotated LLMQ_60_75) can never
+     *  form on a network with fewer than several hundred masternodes, so no
+     *  quorum of those types has ever existed on Kerrigan mainnet. From this
+     *  height LLMQ_60_60 DKGs are enabled (see ChainstateManager::
+     *  IsQuorumTypeEnabled) and the type takes over the ChainLocks,
+     *  InstantSend and EHF roles. Because no LLMQ_60_60 quorum can exist
+     *  below this height, pre-fork block validity (CbTx bestCLSignature,
+     *  MnEHF special txs, mined commitments) is bit-identical to older
+     *  releases; behaviour only diverges at/after the flag day, which is
+     *  shared with the other v1.3.0 hard forks.
+     *  0 = never activate (safe default). Set per-network in chainparams.cpp. */
+    int nLLMQ6060Height{0};
+
+    /** Hard-fork activation height for inference-drone coinbase payouts.
+     *  At/after this height the 40% growth-escrow coinbase slot is paid to a
+     *  registered, bonded, recently-alive inference drone, selected round-robin
+     *  by last-paid height from the deterministic drone list built from
+     *  on-chain OP_RETURN 0x01 registrations (see evo/dronelist.h). With zero
+     *  eligible drones the slot falls back to the exact pre-fork behaviour
+     *  (escrow accumulation before nGrowthEscrowEndHeight, OP_RETURN burn
+     *  after), so fork-day behaviour is byte-identical until the first bonded
+     *  registration confirms. The drone list itself starts empty at this
+     *  height: registrations mined before activation are ignored by consensus.
+     *  0 = never activate (safe default). Set per-network in chainparams.cpp. */
+    int nDronePayoutHeight{0};
+
+    /** Whether drone coinbase payouts are active at a given height. */
+    bool IsDronePayoutActive(int height) const
+    {
+        return nDronePayoutHeight > 0 && height >= nDronePayoutHeight;
+    }
+
+    /** Exact value of the bond output a drone registration TX must carry for
+     *  consensus to admit it into the drone list. The bond output's
+     *  scriptPubKey becomes the drone's payout script and its outpoint is the
+     *  collateral: spending it deregisters the drone (same collateral pattern
+     *  as deterministic masternodes). Zero or multiple outputs matching this
+     *  exact value make the TX not-a-registration (never block-invalid).
+     *  RETUNABLE AT RELEASE CUT: size to ~3-6 months of a single drone's
+     *  expected payout at launch drone count so sybil identities tie up more
+     *  capital than they can extract (v1 payee selection is capital-gated,
+     *  not service-gated). 0 = registrations never admitted. */
+    CAmount nDroneCollateralAmount{0};
+
+    /** Maximum age, in blocks, of a drone's last authenticated liveness
+     *  signal (registration or heartbeat re-registration whose inputs spend
+     *  from the drone's payout script) before the drone becomes ineligible
+     *  for coinbase payouts. Drones fall out of rotation silently and return
+     *  on their next authenticated heartbeat; the entry itself is only
+     *  removed when the collateral is spent. 0 = no liveness gating. */
+    int nDroneMaxAge{0};
 
     int nHMPBroodDemotionDuration{1000}; // blocks to stay demoted after equivocation (~33hr)
     int nHMPBroodChainWeightBonus{300};  // bps bonus per BROOD signer's algo in seal multiplier

@@ -53,12 +53,96 @@ doc/man/Makefile
 doc/man/Makefile.in
 *.status.old
 
+# Secrets and credentials (never commit)
+*.pem
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.env
+.env.*
+secrets.env
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+
+# Editor / tooling state that records local paths or session content
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.direnv/
+.envrc
+compile_commands.json
+.cache/
+.ccls-cache/
+.clangd/
+tags
+TAGS
+cscope.*
+
+# Merge residue. Deliberately NOT *.patch / *.diff -- depends/patches/,
+# contrib/guix/patches/ and src/dashbls/setjmp_patch.diff are tracked build
+# inputs, and ignoring them silently breaks `make -C depends` for anyone
+# building from a fresh clone.
+*.orig
+*.rej
+*.bak
+
+# Coverage, profiling, crash dumps
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.profraw
+*.profdata
+perf.data
+perf.data.old
+core
+core.*
+vgcore.*
+callgrind.out.*
+massif.out.*
+nohup.out
+
+# Node datadirs and runtime state (never belongs in the source tree).
+# Root-anchored on purpose: a bare "llmq/" or "blocks/" would silently
+# swallow new files under src/llmq/, src/index/, etc.
+debug.log
+db.log
+*.pid
+.cookie
+wallet.dat
+peers.dat
+banlist.dat
+mempool.dat
+fee_estimates.dat
+governance.dat
+netfulfilled.dat
+mncache.dat
+/blocks/
+/chainstate/
+/evodb/
+/indexes/
+/llmq/
+/datadir*/
+/regtest/
+/testnet3/
+/devnet*/
+/kerrigan.conf
+
+# Release artifacts (built out-of-tree; never commit binaries or tarballs)
+/release/
+/*.tar.gz
+/*.tar.xz
+/*.zip
+/*.dmg
+/*.exe
+/*.AppImage
 
 # OS
 .DS_Store

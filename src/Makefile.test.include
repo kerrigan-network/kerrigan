@@ -27,6 +27,7 @@ JSON_TEST_FILES = \
   test/data/sighash.json \
   test/data/trivially_invalid.json \
   test/data/trivially_valid.json \
+  test/data/drone_wire_vectors.json \
   test/data/tx_invalid.json \
   test/data/tx_valid.json
 
@@ -109,10 +110,12 @@ BITCOIN_TESTS =\
   test/cuckoocache_tests.cpp \
   test/denialofservice_tests.cpp \
   test/dip0020opcodes_tests.cpp \
+  test/drone_list_tests.cpp \
   test/descriptor_tests.cpp \
   test/dynamic_activation_thresholds_tests.cpp \
   test/evo_assetlocks_tests.cpp \
   test/evo_deterministicmns_tests.cpp \
+  test/inference_wire_tests.cpp \
   test/evo_islock_tests.cpp \
   test/evo_mnhf_tests.cpp \
   test/evo_netinfo_tests.cpp \

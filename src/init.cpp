@@ -50,6 +50,7 @@
 #include <node/txreconciliation.h>
 #include <policy/feerate.h>
 #include <policy/fees.h>
+#include <recovery/recovery.h>
 #include <key_io.h>
 #include <policy/outpoint_blacklist.h>
 #include <policy/planx_rollback.h>
@@ -460,6 +461,10 @@ void PrepareShutdown(NodeContext& node)
     // After everything has been shut down, but before things get flushed, stop the
     // CScheduler/checkqueue, threadGroup and load block thread.
     if (node.scheduler) node.scheduler->stop();
+
+    // No more recovery ticks can run (scheduler stopped); drop the recovery
+    // module's subsystem pointers before those objects are destroyed below.
+    if (recovery::g_recovery) recovery::g_recovery->DetachNode();
     if (node.chainman && node.chainman->m_load_block.joinable()) node.chainman->m_load_block.join();
     StopScriptCheckWorkerThreads();
 
@@ -608,6 +613,15 @@ void Shutdown(NodeContext& node)
     node.fee_estimator.reset();
     node.chainman.reset();
     node.scheduler.reset();
+
+    // Guided-repair wipe (WS-HEAL v2 6.2.2): executes here, after every DB
+    // has been flushed and closed, driven by the marker written by
+    // `repairnode`. This ordering leaves the datadir in the
+    // bootstrap-triggering state (blocks/ absent) before a managing wallet
+    // respawns the daemon. Crash-safety: a marker that survives an
+    // interrupted wipe is finished at next start (RunStartupRepairTasks).
+    recovery::ExecuteShutdownWipe();
+    recovery::g_recovery.reset();
 
     try {
         if (!fs::remove(GetPidFile(*node.args))) {
@@ -765,6 +779,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-parbls=<n>", strprintf("Set the number of BLS verification threads (%u to %d, 0 = auto, <0 = leave that many cores free, default: %d)",
         -GetNumCores(), llmq::MAX_BLSCHECK_THREADS, llmq::DEFAULT_BLSCHECK_THREADS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-persistmempool", strprintf("Whether to save the mempool on shutdown and load on restart (default: %u)", DEFAULT_PERSIST_MEMPOOL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-recoverytickinterval=<n>", strprintf("Interval in seconds between self-heal diagnosis ticks (regression testing only; default: %u)", 30), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-selfheal", "Enable the automatic (non-destructive) network self-heal engine. Diagnosis and the getrecoverystatus RPC stay active either way (default: 1)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-pid=<file>", strprintf("Specify pid file. Relative paths will be prefixed by a net-specific datadir location. (default: %s)", BITCOIN_PID_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-saplingparamdir=<dir>", "Specify directory containing Sapling zk-SNARK parameter files (sapling-spend.params and sapling-output.params). (default: ~/.zcash-params/)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-prune=<n>", strprintf("Reduce storage requirements by enabling pruning (deleting) of old blocks. This allows the pruneblockchain RPC to be called to delete specific blocks, and enables automatic pruning of old blocks if a target size in MiB is provided. This mode is incompatible with -txindex, -rescan and -disablegovernance=false. "
@@ -2390,6 +2406,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // this is the on-disk record that the destructive flag fired this boot.
     RecordResetChainstate();
 
+    // Guided-repair marker protocol (WS-HEAL v2 6.2.3): if a repair marker is
+    // present (crash mid-wipe, or the daemon was killed after arming), finish
+    // the wipe BEFORE any database is opened; also reclaim rename-tombstones
+    // left by an interrupted wipe. Must precede Step 5/7 (wallet + chainstate
+    // DB opens).
+    if (!recovery::RunStartupRepairTasks()) {
+        return InitError(_("Failed to complete pending node repair. See debug.log for details."));
+    }
+
     LogPrintf("Using at most %i automatic connections (%i file descriptors available)\n", nMaxConnections, nFD);
 
     // Warn about relative -datadir path.
@@ -2495,6 +2520,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (!AppInitServers(node))
             return InitError(_("Unable to start HTTP server. See debug log for details."));
     }
+
+    // Recovery manager (WS-HEAL v2 2): constructed before the chainstate
+    // loads so startup drift/load-failure diagnosis has somewhere to live and
+    // the warmup-callable getrecoverystatus/repairnode RPCs can serve it.
+    assert(!recovery::g_recovery);
+    recovery::g_recovery = std::make_unique<recovery::RecoveryManager>();
 
     // ********************************************************* Step 5: verify wallet database integrity
 
@@ -3143,12 +3174,26 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             if (!fReset) {
                 bool fRet = uiInterface.ThreadSafeQuestion(
                     strLoadError + Untranslated(".\n\n") + _("Do you want to rebuild the block database now?"),
-                    strLoadError.original + ".\nPlease restart with -reindex or -reindex-chainstate to recover.",
+                    strLoadError.original + ".\nPlease restart with -reindex or -reindex-chainstate to recover." +
+                        "\n[recovery] Guided repair is also available: inspect with `kerrigan-cli getrecoverystatus`, then `kerrigan-cli repairnode` (dry-run first).",
                     "", CClientUIInterface::MSG_ERROR | CClientUIInterface::BTN_ABORT);
                 if (fRet) {
                     fReindex = true;
                     AbortShutdown();
                 } else {
+                    // WS-HEAL v2 5.3: when the load failure is a recorded
+                    // consistency drift (the converted DisconnectBlock /
+                    // ConnectBlock drift checks fired during load/VerifyDB),
+                    // park in crippled_wait instead of exiting: RPC stays up
+                    // in warmup, the warmup-callable recovery RPCs serve the
+                    // diagnosis, and `repairnode` (+ shutdown:true headless)
+                    // arms the guided wipe+resync. Every other load failure
+                    // keeps the historical abort (C2 disk-class failures must
+                    // halt, 5.1).
+                    if (recovery::g_recovery && recovery::g_recovery->StartupDiagnosisPending()) {
+                        recovery::g_recovery->RunCrippledWait();
+                        return false;
+                    }
                     LogPrintf("Aborted block database rebuild. Exiting.\n");
                     return false;
                 }
@@ -3175,6 +3220,17 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // DetectPostRollbackContamination + policy/planx_rollback.h.
     if (!DetectPostRollbackContamination(node)) {
         return false; // InitError already reported the cause.
+    }
+
+    // WS-HEAL v2 5.3/5.4: generalized startup drift check (all networks, no
+    // Plan-X gating). Mirrors each DB's best-block semantics: EvoDB treats a
+    // missing key as inconsistent (DIP3-active only); SaplingDB treats a
+    // missing key as fresh/consistent. This is the net that catches Sapling
+    // drift too, since VerifyDB skips the SaplingDB check in verify-only
+    // mode. On drift: crippled_wait (diagnosis over warmup RPC), not exit.
+    if (!recovery::StartupDriftCheck(node)) {
+        recovery::g_recovery->RunCrippledWait();
+        return false;
     }
 
     // PLAN X: force the in-process rollback reorg on an already-synced
@@ -3354,6 +3410,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     node.scheduler->scheduleEvery(std::bind(&CMasternodeUtils::DoMaintenance, std::ref(*node.connman), std::ref(*node.dmnman), std::ref(*node.mn_sync)), std::chrono::minutes{1});
     node.scheduler->scheduleEvery(std::bind(&CDeterministicMNManager::DoMaintenance, std::ref(*node.dmnman)), std::chrono::seconds{10});
     node.peerman->ScheduleHandlers(*node.scheduler);
+
+    // Self-heal diagnosis + auto-engine tick (WS-HEAL v2 2/3). The tick
+    // interval is compressible for regression tests only (-recoverytickinterval).
+    recovery::g_recovery->AttachNode(node);
+    {
+        const auto recovery_tick = std::chrono::seconds{
+            std::clamp<int64_t>(args.GetIntArg("-recoverytickinterval", 30), 1, 3600)};
+        node.scheduler->scheduleEvery([] { recovery::g_recovery->SchedulerTick(); }, recovery_tick);
+    }
 
     if (node.active_ctx) {
         node.active_ctx->Start(*node.connman, *node.peerman);
@@ -3718,6 +3783,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // waitforblockheight.
     RPCNotifyBlockChange(chainman.ActiveTip());
     SetRPCWarmupFinished();
+    recovery::g_recovery->SetInitComplete();
 
     uiInterface.InitMessage(_("Done loading").translated);
 

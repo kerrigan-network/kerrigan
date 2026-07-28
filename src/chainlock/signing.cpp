@@ -11,6 +11,7 @@
 #include <masternode/sync.h>
 #include <msg_result.h>
 #include <node/blockstorage.h>
+#include <recovery/recovery.h>
 #include <scheduler.h>
 #include <util/thread.h>
 #include <validation.h>
@@ -89,6 +90,14 @@ void ChainLockSigner::TrySignChainTip()
     }
 
     if (!m_chainlocks.IsEnabled() || !m_chainlocks.IsSigningEnabled()) {
+        return;
+    }
+
+    // Quarantine gate (WS-HEAL v2 5.2.3): never contribute ChainLock
+    // signatures from a node that proved its state inconsistent. This signer
+    // runs on its own scheduler thread, so the gate must live here rather
+    // than on the main scheduler.
+    if (recovery::IsQuarantined()) {
         return;
     }
 

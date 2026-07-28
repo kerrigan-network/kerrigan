@@ -127,6 +127,14 @@ public:
     uint256 GetBestBlock() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
+     * REGRESSION TESTING ONLY: overwrite the stored best-block key so the
+     * consistency-drift detection paths (quarantine / crippled_wait) can be
+     * exercised deterministically. Callers must gate on
+     * CChainParams::IsMockableChain(); see the hidden recovery_inducedrift RPC.
+     */
+    void CorruptBestBlockForTesting(const uint256& bogus) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
      * Get the current cumulative Sapling value pool balance (ZIP-209).
      */
     CAmount GetValuePool() const EXCLUSIVE_LOCKS_REQUIRED(!cs);

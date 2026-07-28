@@ -8,6 +8,7 @@
 
 #include <chainlock/chainlock.h>
 #include <evo/creditpool.h>
+#include <evo/dronelist.h>
 #include <evo/mnhftx.h>
 #include <evo/specialtxman.h>
 #include <instantsend/instantsend.h>
@@ -15,6 +16,7 @@
 #include <masternode/payments.h>
 #include <sapling/sapling_init.h>
 #include <sapling/sapling_state.h>
+#include <util/system.h>
 
 // Set during init, cleared on shutdown
 static sapling::CSaplingState* g_sapling_state_ptr = nullptr;
@@ -37,6 +39,19 @@ static bool ValidAnchorCallbackImpl(const uint256& anchor)
     return g_sapling_state_ptr->IsValidAnchor(anchor);
 }
 
+/** Drone-list snapshot cadence. Overridable on REGTEST ONLY via
+ *  -dronesnapshotperiod so functional tests can cross snapshot boundaries
+ *  without mining 576-block spans; every other network is pinned to the
+ *  default. Purely local storage layout -- any period rebuilds the identical
+ *  lists -- but keep mainnet uniform anyway. */
+static int GetDroneSnapshotPeriod()
+{
+    if (Params().NetworkIDString() == CBaseChainParams::REGTEST) {
+        return static_cast<int>(gArgs.GetIntArg("-dronesnapshotperiod", CDroneListManager::DISK_SNAPSHOT_PERIOD));
+    }
+    return CDroneListManager::DISK_SNAPSHOT_PERIOD;
+}
+
 CChainstateHelper::CChainstateHelper(CEvoDB& evodb, CDeterministicMNManager& dmnman, CGovernanceManager& govman,
                                      llmq::CInstantSendManager& isman, llmq::CQuorumBlockProcessor& qblockman,
                                      llmq::CQuorumSnapshotManager& qsnapman, const ChainstateManager& chainman,
@@ -49,10 +64,12 @@ CChainstateHelper::CChainstateHelper(CEvoDB& evodb, CDeterministicMNManager& dmn
     credit_pool_manager{std::make_unique<CCreditPoolManager>(evodb, chainman)},
     m_chainlocks{chainlocks},
     ehf_manager{std::make_unique<CMNHFManager>(evodb, chainman, qman)},
-    mn_payments{std::make_unique<CMNPaymentsProcessor>(dmnman, govman, chainman, consensus_params, mn_sync, sporkman)},
+    drone_manager{std::make_unique<CDroneListManager>(evodb, GetDroneSnapshotPeriod())},
+    mn_payments{std::make_unique<CMNPaymentsProcessor>(dmnman, *drone_manager, govman, chainman, consensus_params, mn_sync, sporkman)},
     sapling_state{std::make_unique<sapling::CSaplingState>(data_dir / "sapling", 1 << 20 /* 1 MiB cache */, false, fWipe)},
-    special_tx{std::make_unique<CSpecialTxProcessor>(*credit_pool_manager, dmnman, *ehf_manager, qblockman, qsnapman,
-                                                     chainman, consensus_params, chainlocks, qman, *sapling_state)}
+    special_tx{std::make_unique<CSpecialTxProcessor>(*credit_pool_manager, dmnman, *drone_manager, *ehf_manager,
+                                                     qblockman, qsnapman, chainman, consensus_params, chainlocks,
+                                                     qman, *sapling_state)}
 {
     // Anchor callbacks let wallet RPCs retrieve tree roots without LevelDB linkage
     g_sapling_state_ptr = sapling_state.get();

@@ -104,6 +104,7 @@ BASE_SCRIPTS = [
     'feature_sapling_fees.py',
     'feature_sapling_relay.py',
     'feature_sapling_activation.py',
+    'feature_recovery_selfheal.py',
     'feature_multi_algo_mining.py',
     'feature_llmq_data_recovery.py',
     'wallet_hd.py --legacy-wallet',
@@ -138,6 +139,7 @@ BASE_SCRIPTS = [
     'feature_llmq_chainlocks.py', # NOTE: needs dash_hash to pass
     'feature_llmq_simplepose.py', # NOTE: needs dash_hash to pass
     'feature_llmq_simplepose.py --disable-spork23', # NOTE: needs dash_hash to pass
+    'feature_drone_payments.py', # NOTE: needs dash_hash to pass
     'feature_dip3_deterministicmns.py --legacy-wallet', # NOTE: needs dash_hash to pass
     'feature_dip3_deterministicmns.py --descriptors', # NOTE: needs dash_hash to pass
     'feature_llmq_signing.py', # NOTE: needs dash_hash to pass

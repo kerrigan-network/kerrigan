@@ -338,7 +338,9 @@ BITCOIN_CORE_H = \
   evo/creditpool.h \
   evo/deterministicmns.h \
   evo/dmnstate.h \
+  evo/dronelist.h \
   evo/evodb.h \
+  evo/inference_wire.h \
   evo/mnauth.h \
   evo/mnhftx.h \
   evo/netinfo.h \
@@ -465,6 +467,8 @@ BITCOIN_CORE_H = \
   psbt.h \
   random.h \
   randomenv.h \
+  recovery/recovery.h \
+  recovery/witnesshook.h \
   rest.h \
   rpc/blockchain.h \
   rpc/client.h \
@@ -656,7 +660,9 @@ libbitcoin_node_a_SOURCES = \
   evo/chainhelper.cpp \
   evo/deterministicmns.cpp \
   evo/dmnstate.cpp \
+  evo/dronelist.cpp \
   evo/evodb.cpp \
+  evo/inference_wire.cpp \
   evo/mnauth.cpp \
   evo/mnhftx.cpp \
   evo/providertx.cpp \
@@ -741,6 +747,7 @@ libbitcoin_node_a_SOURCES = \
   policy/policy.cpp \
   policy/settings.cpp \
   pow.cpp \
+  recovery/recovery.cpp \
   rest.cpp \
   rpc/blockchain.cpp \
   rpc/evo.cpp \
@@ -755,6 +762,7 @@ libbitcoin_node_a_SOURCES = \
   rpc/output_script.cpp \
   rpc/quorums.cpp \
   rpc/rawtransaction.cpp \
+  rpc/recovery.cpp \
   rpc/hmp.cpp \
   rpc/server.cpp \
   rpc/server_util.cpp \
@@ -1126,6 +1134,7 @@ libbitcoin_common_a_SOURCES = \
   policy/policy.cpp \
   protocol.cpp \
   psbt.cpp \
+  recovery/witnesshook.cpp \
   rpc/evo_util.cpp \
   rpc/external_signer.cpp \
   rpc/rawtransaction_util.cpp \

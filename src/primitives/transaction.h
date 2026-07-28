@@ -34,6 +34,7 @@ enum {
     TRANSACTION_ASSET_LOCK = 8,
     TRANSACTION_ASSET_UNLOCK = 9,
     TRANSACTION_SAPLING = 10,
+    TRANSACTION_DRONE_REGISTER = 11,
 };
 
 /** An outpoint - a combination of a transaction hash and an index n into its vout */

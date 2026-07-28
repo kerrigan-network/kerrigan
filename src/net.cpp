@@ -2864,6 +2864,23 @@ int CConnman::GetExtraBlockRelayCount() const
     return std::max(block_relay_peers - m_max_outbound_block_relay, 0);
 }
 
+size_t CConnman::InjectFixedSeeds()
+{
+    // Recovery L3 re-seed (WS-HEAL v2 3.3): the exact call
+    // ThreadOpenConnections performs for an empty addrman (below), but
+    // WITHOUT the GetReachableEmptyNetworks() gate -- a populated-but-stale
+    // addrman gets the fixed seeds merged into its "new" tables too.
+    std::vector<CAddress> seed_addrs{ConvertSeeds(Params().FixedSeeds())};
+    seed_addrs.erase(std::remove_if(seed_addrs.begin(), seed_addrs.end(),
+                                    [](const CAddress& addr) { return !g_reachable_nets.Contains(addr); }),
+                     seed_addrs.end());
+    CNetAddr local;
+    local.SetInternal("fixedseeds");
+    addrman.Add(seed_addrs, local);
+    LogPrint(BCLog::NET, "recovery: injected %d fixed seed addresses into addrman\n", seed_addrs.size());
+    return seed_addrs.size();
+}
+
 std::unordered_set<Network> CConnman::GetReachableEmptyNetworks() const
 {
     std::unordered_set<Network> networks{};

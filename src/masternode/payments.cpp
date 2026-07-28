@@ -10,6 +10,7 @@
 #include <consensus/amount.h>
 #include <deploymentstatus.h>
 #include <evo/deterministicmns.h>
+#include <evo/dronelist.h>
 #include <governance/classes.h>
 #include <governance/governance.h>
 #include <key_io.h>
@@ -39,7 +40,10 @@ CAmount PlatformShare(const CAmount reward)
  *   20% masternode (selected from deterministic MN list)
  *    5% founders (hardcoded address)
  *   15% dev fund (hardcoded address)
- *   40% growth escrow (consensus-locked, burns after nGrowthEscrowEndHeight)
+ *   40% growth escrow (consensus-locked, burns after nGrowthEscrowEndHeight);
+ *       from nDronePayoutHeight this slot pays an eligible inference drone
+ *       (deterministic drone list, round-robin by last-paid), falling back to
+ *       the exact escrow-or-burn behaviour when zero drones are eligible.
  *
  * If no masternodes are registered yet, the MN 20% stays with the miner.
  */
@@ -51,17 +55,43 @@ CAmount PlatformShare(const CAmount reward)
     const int nBlockHeight = pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1;
     const CAmount totalReward = blockSubsidy + feeReward;
 
-    // Growth escrow: 40% -- consensus-locked until governance vote, burns after sunset
+    // Growth-escrow slot: 40%. CONSENSUS: both the miner template
+    // (FillBlockPayments) and block validation (IsTransactionValid) go through
+    // this function, so they can never disagree on the slot's destination.
     CAmount escrowReward = totalReward * 40 / 100;
-    if (m_consensus_params.nGrowthEscrowEndHeight > 0 && nBlockHeight > m_consensus_params.nGrowthEscrowEndHeight) {
-        // After escrow sunset: 40% burns via OP_RETURN (provably unspendable)
-        CScript burnScript = CScript() << OP_RETURN;
-        voutMasternodePaymentsRet.emplace_back(escrowReward, burnScript);
-    } else {
-        // Escrow accumulation: coins are consensus-locked (see CheckGrowthEscrowSpend)
-        CScript escrowScript(m_consensus_params.growthEscrowScript.begin(),
-                             m_consensus_params.growthEscrowScript.end());
-        voutMasternodePaymentsRet.emplace_back(escrowReward, escrowScript);
+    bool fDronePaid = false;
+    // Combined gate: height floor AND SPORK_26_DRONE_PAYOUT_ENABLED. Must
+    // stay in lockstep with the TRANSACTION_DRONE_REGISTER acceptance gates
+    // (validation.cpp ContextualCheckTransaction, specialtxman.cpp
+    // CheckDroneRegTx) -- see IsDronePayoutEffective in evo/dronelist.h for
+    // the reindex-safety argument. While the spork is off this branch is
+    // never taken and the slot below is byte-identical to pre-fork.
+    if (IsDronePayoutEffective(m_consensus_params, nBlockHeight)) {
+        // Drone payout fork: pay the round-robin drone payee selected from the
+        // deterministic drone list as of the PREVIOUS block (a registration in
+        // block H first affects the payee of H+1, never its own block).
+        const auto droneList = m_droneman.GetListForBlock(pindexPrev, m_consensus_params);
+        if (const CDroneEntry* payee = droneList.GetPayee(nBlockHeight, m_consensus_params)) {
+            voutMasternodePaymentsRet.emplace_back(escrowReward, payee->payoutScript);
+            fDronePaid = true;
+            LogPrint(BCLog::MNPAYMENTS, "CMNPaymentsProcessor::%s -- height=%d drone payee %s\n",
+                     __func__, nBlockHeight, payee->blsPubKeyHash.ToString());
+        }
+        // Zero eligible drones: fall through to the exact pre-fork behaviour
+        // below, so activation itself changes nothing until the first bonded
+        // registration confirms.
+    }
+    if (!fDronePaid) {
+        if (m_consensus_params.nGrowthEscrowEndHeight > 0 && nBlockHeight > m_consensus_params.nGrowthEscrowEndHeight) {
+            // After escrow sunset: 40% burns via OP_RETURN (provably unspendable)
+            CScript burnScript = CScript() << OP_RETURN;
+            voutMasternodePaymentsRet.emplace_back(escrowReward, burnScript);
+        } else {
+            // Escrow accumulation: coins are consensus-locked (see CheckGrowthEscrowSpend)
+            CScript escrowScript(m_consensus_params.growthEscrowScript.begin(),
+                                 m_consensus_params.growthEscrowScript.end());
+            voutMasternodePaymentsRet.emplace_back(escrowReward, escrowScript);
+        }
     }
 
     // Masternode: 20% (if any MNs registered)

@@ -257,6 +257,14 @@ uint256 CSaplingState::GetBestBlock() const
     return stored;
 }
 
+void CSaplingState::CorruptBestBlockForTesting(const uint256& bogus)
+{
+    LOCK(cs);
+    // Synchronous write so the corruption survives an immediate SIGKILL and
+    // is visible to the very next VerifyBestBlock() call.
+    db->Write(DB_BEST_BLOCK, bogus, /*fSync=*/true);
+}
+
 CAmount CSaplingState::GetValuePool() const
 {
     LOCK(cs);

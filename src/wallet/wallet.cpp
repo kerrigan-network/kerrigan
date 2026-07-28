@@ -1892,8 +1892,15 @@ int CWallet::RebuildSaplingWitnessesSynchronous(int fromHeight)
     return applied;
 }
 
-void CWallet::MaybeAutoRebuildSaplingWitnesses()
+void CWallet::MaybeAutoRebuildSaplingWitnesses(bool force_ignore_config)
 {
+    // Guided repair (WS-HEAL v2 6.4.b) re-arms the one-shot check and
+    // bypasses the operator opt-out: a wipe+resync ALWAYS ends with a witness
+    // rebuild so shielded funds are not silently left unspendable.
+    if (force_ignore_config) {
+        m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
+    }
+
     // One-shot: the first thread to flip the flag does the work. Subsequent
     // block tips short-circuit immediately with a single atomic load.
     if (!m_sapling_witness_check_pending.load(std::memory_order_relaxed)) return;
@@ -1904,7 +1911,7 @@ void CWallet::MaybeAutoRebuildSaplingWitnesses()
 
     // Operator opt-out. Default is on; paranoid operators can disable this
     // and run z_rebuildsaplingwitnesses manually when needed.
-    if (!gArgs.GetBoolArg("-autorebuildsaplingwitnesses", true)) {
+    if (!force_ignore_config && !gArgs.GetBoolArg("-autorebuildsaplingwitnesses", true)) {
         if (m_sapling_witness_check_pending.exchange(false, std::memory_order_relaxed)) {
             WalletLogPrintf("Sapling witness auto-rebuild disabled by -noautorebuildsaplingwitnesses\n");
         }

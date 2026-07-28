@@ -19,6 +19,7 @@ class CCoinsViewCache;
 class CCreditPoolManager;
 class CDeterministicMNList;
 class CDeterministicMNManager;
+class CDroneListManager;
 class CTransaction;
 class ChainstateManager;
 class CMNHFManager;
@@ -43,6 +44,7 @@ class CSpecialTxProcessor
 private:
     CCreditPoolManager& m_cpoolman;
     CDeterministicMNManager& m_dmnman;
+    CDroneListManager& m_droneman;
     CMNHFManager& m_mnhfman;
     llmq::CQuorumBlockProcessor& m_qblockman;
     llmq::CQuorumSnapshotManager& m_qsnapman;
@@ -53,13 +55,15 @@ private:
     sapling::CSaplingState& m_sapling_state;
 
 public:
-    explicit CSpecialTxProcessor(CCreditPoolManager& cpoolman, CDeterministicMNManager& dmnman, CMNHFManager& mnhfman,
+    explicit CSpecialTxProcessor(CCreditPoolManager& cpoolman, CDeterministicMNManager& dmnman,
+                                 CDroneListManager& droneman, CMNHFManager& mnhfman,
                                  llmq::CQuorumBlockProcessor& qblockman, llmq::CQuorumSnapshotManager& qsnapman,
                                  const ChainstateManager& chainman, const Consensus::Params& consensus_params,
                                  const chainlock::Chainlocks& chainlocks, const llmq::CQuorumManager& qman,
                                  sapling::CSaplingState& sapling_state) :
         m_cpoolman(cpoolman),
         m_dmnman{dmnman},
+        m_droneman{droneman},
         m_mnhfman{mnhfman},
         m_qblockman{qblockman},
         m_qsnapman{qsnapman},
@@ -109,5 +113,11 @@ bool CheckProUpRegTx(const CTransaction& tx, gsl::not_null<const CBlockIndex*> p
                      TxValidationState& state, bool check_sigs);
 bool CheckProUpRevTx(const CTransaction& tx, gsl::not_null<const CBlockIndex*> pindexPrev, CDeterministicMNManager& dmnman,
                      const ChainstateManager& chainman, TxValidationState& state, bool check_sigs);
+/** Consensus checks for a TRANSACTION_DRONE_REGISTER special TX (payload
+ *  shape, bond output, payout script, inputs hash and the BLS min_sig
+ *  key-ownership signature). See evo/inference_wire.h. */
+bool CheckDroneRegTx(const CTransaction& tx, gsl::not_null<const CBlockIndex*> pindexPrev,
+                     CDroneListManager& droneman, const ChainstateManager& chainman, TxValidationState& state,
+                     bool check_sigs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 #endif // BITCOIN_EVO_SPECIALTXMAN_H

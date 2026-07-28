@@ -95,6 +95,7 @@ BOOST_AUTO_TEST_CASE(llmq_params_types_test)
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(LLMQType::LLMQ_100_67), 4);
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(LLMQType::LLMQ_60_75), 5);
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(LLMQType::LLMQ_25_67), 6);
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(LLMQType::LLMQ_60_60), 7);
 
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(LLMQType::LLMQ_TEST), 100);
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(LLMQType::LLMQ_DEVNET), 101);

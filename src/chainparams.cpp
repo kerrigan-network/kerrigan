@@ -294,11 +294,63 @@ public:
         // nHMPStage4Height + the rebuild lookback (~1100), so no straddle. Nodes that
         // participate in HMP must run unpruned (the rebuild halts on an unreadable
         // block in the lookback).
-        consensus.nHMPDeterministicSealHeight = 74000;
+        //
+        // NOTE: this height has now been missed TWICE. First armed at h=74000,
+        // then moved to h=110000 on 2026-07-02 (tip ~86k) assuming ~16 days of
+        // runway at an assumed ~60s cadence. The real measured cadence was
+        // ~93.7 s/block (~922 blocks/day), and h=110000 was reached on
+        // 2026-07-28 with still no release deployed, so no node ever activated
+        // at either height.
+        //
+        // Re-armed at h=130000: 20,015 blocks above the 2026-07-28 tip of
+        // 109,985, i.e. ~21.7 days (~2026-08-19) at the MEASURED 922
+        // blocks/day -- not the assumed rate that burned the last two windows.
+        //
+        // WHY THIS MUST NOT SLIP AGAIN (it is not a cosmetic miss): the DAA
+        // fork below changes the retarget clamp that GetNextWorkRequired feeds
+        // to ContextualCheckBlockHeader. If the height passes while the
+        // network is still on v1.2.x, a later-released v1.3.0 computes a
+        // different required nBits for every block above it than the chain
+        // actually mined, and rejects the whole range with "bad-diffbits" --
+        // the release simply cannot sync mainnet.
+        //
+        // RE-CHECK against the live tip when the release is actually cut
+        // (`getblockcount`, or explorer.kerrigan.network/api/status): keep
+        // >=10 days of upgrade runway at the measured rate or move it again.
+        consensus.nHMPDeterministicSealHeight = 130000;
         // DAA retarget symmetry hard-fork. Makes the retarget clamp symmetric
         // (+-16%) and bounds the stale-algo gap reset, bringing block time back from
         // ~58-64s toward 120s. Same height as the seal fix so operators hit one fork.
-        consensus.nDaaRetargetFixHeight = 74000;
+        consensus.nDaaRetargetFixHeight = 130000;
+        // LLMQ_60_60 small-network quorum hard-fork. Enables the DKG for the
+        // 60-member quorum type that takes over the ChainLocks / InstantSend /
+        // EHF roles from the unformable Dash-sized types (see the long living
+        // quorum params block below for the full rationale). Same height as the
+        // seal + DAA forks so operators hit one flag day; if that height moves,
+        // move this one with it.
+        consensus.nLLMQ6060Height = 130000;
+        // Inference-drone coinbase payout hard-fork (v1.3.0). From this height
+        // the 40% growth-escrow slot pays a registered + bonded + recently-alive
+        // inference drone (round-robin by last-paid, see evo/dronelist.h). With
+        // zero eligible drones the slot is byte-identical to pre-fork behaviour
+        // (escrow accumulation, then burn after the sunset), so activation is
+        // safe even if no drone has re-registered in the bonded format yet.
+        // Same flag day as the seal + DAA + LLMQ_60_60 forks; if that height
+        // moves, move this one with it.
+        consensus.nDronePayoutHeight = 130000;
+        // Registration bond: exact output value each drone registration must
+        // carry; doubles as the payout anchor and the deregistration outpoint.
+        // RETUNABLE AT RELEASE CUT: target ~3-6 months of a single drone's
+        // expected payout at launch drone count (v1 selection is capital-gated,
+        // not service-gated -- see consensus/params.h).
+        consensus.nDroneCollateralAmount = 10000 * COIN;
+        // Liveness window: a drone with no authenticated heartbeat within this
+        // many blocks is skipped for payouts. 21600 blocks = 30 days nominal
+        // (120 s spacing); at the cadence measured over 2026-07-02..07-28
+        // (~93.7 s/block, ~922 blocks/day) it is ~23 days. The window widens
+        // back toward 30 days once nDaaRetargetFixHeight activates and pulls
+        // spacing toward 120 s, so this needs no retune for the fork itself.
+        consensus.nDroneMaxAge = 21600;
         consensus.MinBIP9WarningHeight = 0;
         // Per-algo genesis powLimits -- permissive targets for chain bootstrapping.
         // These are intentionally easy so the first miner on each algo can produce blocks.
@@ -591,15 +643,45 @@ public:
         vFixedSeeds.assign(chainparams_seed_main, chainparams_seed_main + sizeof(chainparams_seed_main));
 
         // long living quorum params
+        //
+        // SMALL-NETWORK RESCALE (v1.3.0 hard fork, gated at nLLMQ6060Height).
+        // The Dash-inherited role assignments could never produce a single
+        // quorum on the young Kerrigan network (~58 registered masternodes as
+        // of 2026-07): LLMQ_400_60 / LLMQ_400_85 need >=300 / >=340 valid DKG
+        // members, LLMQ_100_67 needs >=80, and LLMQ_60_75 is a DIP0024
+        // rotation type that partitions the masternode set into 32 *disjoint*
+        // 60-member quorums per cycle (needs ~2000 MNs). ChainLocks,
+        // InstantSend and EHF signalling were therefore all inert since
+        // genesis -- no quorum of any of those types has ever existed on
+        // mainnet, which is what makes this role switch safe: v1.2.x nodes
+        // never saw a valid chainlock / islock / MnEHF tx, and below
+        // nLLMQ6060Height the new type is disabled (IsQuorumTypeEnabled), so
+        // v1.3.0 accepts bit-identical blocks until the shared flag day at
+        // which the other v1.3.0 hard forks retire old nodes anyway.
+        //
+        // LLMQ_60_60: 60 members (everyone while the network is <60 MNs),
+        // minSize 40, threshold 36 (the classic 60% ChainLocks ratio),
+        // non-rotated, hourly DKG. ChainLocks, InstantSend and EHF share the
+        // type -- request-id domains ("clsig", "isdlock", "MNHF") keep the
+        // signing sessions disjoint, same sharing pattern as our testnet
+        // (LLMQ_50_60 for ChainLocks+EHF) and devnet (LLMQ_DEVNET). LLMQ_50_60
+        // cannot be reused here: IsQuorumTypeEnabled permanently disables it
+        // on mainnet once DIP0024 is active (height 2). The legacy types stay
+        // registered below so historical (null) commitments remain valid;
+        // they simply hold no roles anymore. Signing stays operationally
+        // gated behind SPORK_19_CHAINLOCKS_ENABLED / SPORK_2_INSTANTSEND
+        // (both default OFF): flip them only after the fork height passes and
+        // the first llmq_60_60 quorums appear in `quorum list`.
         AddLLMQ(Consensus::LLMQType::LLMQ_50_60);
+        AddLLMQ(Consensus::LLMQType::LLMQ_60_60);
         AddLLMQ(Consensus::LLMQType::LLMQ_60_75);
         AddLLMQ(Consensus::LLMQType::LLMQ_400_60);
         AddLLMQ(Consensus::LLMQType::LLMQ_400_85);
         AddLLMQ(Consensus::LLMQType::LLMQ_100_67);
-        consensus.llmqTypeChainLocks = Consensus::LLMQType::LLMQ_400_60;
-        consensus.llmqTypeDIP0024InstantSend = Consensus::LLMQType::LLMQ_60_75;
+        consensus.llmqTypeChainLocks = Consensus::LLMQType::LLMQ_60_60;
+        consensus.llmqTypeDIP0024InstantSend = Consensus::LLMQType::LLMQ_60_60;
         consensus.llmqTypePlatform = Consensus::LLMQType::LLMQ_100_67;
-        consensus.llmqTypeMnhf = Consensus::LLMQType::LLMQ_400_85;
+        consensus.llmqTypeMnhf = Consensus::LLMQType::LLMQ_60_60;
 
         fDefaultConsistencyChecks = false;
         fRequireStandard = true;
@@ -745,6 +827,15 @@ public:
         consensus.nHMPDeterministicSealHeight = 0;
         // DAA retarget symmetry fix: off until scheduled.
         consensus.nDaaRetargetFixHeight = 0;
+        // LLMQ_60_60 small-network quorum: mainnet-only; testnet keeps its
+        // LLMQ_50_60-based roles (that type stays enabled on testnet).
+        consensus.nLLMQ6060Height = 0;
+        // Drone coinbase payouts: off until scheduled (same pattern as the
+        // other v1.3.0 forks; set a real height before reviving testnet).
+        // Bond/liveness values mirror mainnet so arming is a one-line change.
+        consensus.nDronePayoutHeight = 0;
+        consensus.nDroneCollateralAmount = 10000 * COIN;
+        consensus.nDroneMaxAge = 21600;
         consensus.MinBIP9WarningHeight = 0;
         // Testnet powLimit: ~uint256(0) >> 1, very easy for CPU mining all algos.
         // Equihash BLAKE2b PoW hash varies per solution; with ~2^254 target, ~30% of
@@ -962,6 +1053,13 @@ public:
         // via -testactivationheight).
         consensus.nHMPDeterministicSealHeight = 0;
         consensus.nDaaRetargetFixHeight = 0;
+        // LLMQ_60_60 small-network quorum: mainnet-only; devnets use the LLMQ_DEVNET types.
+        consensus.nLLMQ6060Height = 0;
+        // Drone coinbase payouts: off until scheduled (mirrors the other
+        // v1.3.0 forks). Bond/liveness values mirror mainnet.
+        consensus.nDronePayoutHeight = 0;
+        consensus.nDroneCollateralAmount = 10000 * COIN;
+        consensus.nDroneMaxAge = 21600;
         consensus.MinBIP9WarningHeight = 2 + 2016; // withdrawals activation height + miner confirmation window
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on devnet; all algos use global powLimit
@@ -1247,6 +1345,18 @@ public:
         // covered by pow_tests in-process. The -testactivationheight override
         // exists for parity but does not exercise retargeting on regtest.
         consensus.nDaaRetargetFixHeight = 0;
+        // LLMQ_60_60 small-network quorum: mainnet-only; regtest uses the LLMQ_TEST types.
+        consensus.nLLMQ6060Height = 0;
+        // Drone coinbase payouts: active at a low height so functional tests
+        // can exercise the activation boundary without long setup mining;
+        // move per-test via -testactivationheight=dronepayout@N. Inert for
+        // every test that never registers a drone (the zero-drone fallback is
+        // byte-identical to pre-fork behaviour). Bond kept small so ordinary
+        // wallet balances can fund registrations; liveness window kept tiny so
+        // heartbeat expiry is testable in a handful of blocks.
+        consensus.nDronePayoutHeight = 200;
+        consensus.nDroneCollateralAmount = 100 * COIN;
+        consensus.nDroneMaxAge = 20;
         consensus.MinBIP9WarningHeight = 0;
         consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"); // ~uint256(0) >> 1
         // No per-algo floors on regtest; all algos use global powLimit
@@ -1529,6 +1639,11 @@ static void MaybeUpdateHeights(const ArgsManager& args, Consensus::Params& conse
             // (asymmetric clamp, floor-jump reset) and post-fix (symmetric
             // clamp, bounded reset) blocks in the same run.
             consensus.nDaaRetargetFixHeight = int{height};
+        } else if (name == "dronepayout") {
+            // Inference-drone coinbase payout fork. Lets regtest tests mine
+            // pre-fork (escrow slot) and post-fork (drone payee slot) blocks
+            // in the same run.
+            consensus.nDronePayoutHeight = int{height};
         } else if (name == "withdrawals") {
             consensus.WithdrawalsHeight = int{height};
         } else {
@@ -1903,7 +2018,8 @@ void SetupChainParamsOptions(ArgsManager& argsman)
     argsman.AddArg("-llmqtestplatformparams=<size>:<threshold>", "Override the default LLMQ size for the LLMQ_TEST_PLATFORM quorum (default: 3:2, regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-minimumdifficultyblocks=<n>", "The number of blocks that can be mined with the minimum difficulty at the start of a chain (default: 0, devnet-only)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-powtargetspacing=<n>", "Override the default PowTargetSpacing value in seconds (default: 120s, devnet-only)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (bip147, bip34, dersig, cltv, csv, brr, dip0001, dip0008, dip0024, v19, v20, mn_rr, sapling, hmp, hmp_seal_algo, hmp_prevseal_fix, hmp_deterministic_seal, daa_retarget_fix, withdrawals). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (bip147, bip34, dersig, cltv, csv, brr, dip0001, dip0008, dip0024, v19, v20, mn_rr, sapling, hmp, hmp_seal_algo, hmp_prevseal_fix, hmp_deterministic_seal, daa_retarget_fix, withdrawals, dronepayout). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-dronesnapshotperiod=<n>", "Override the drone-list full-snapshot interval in blocks (default: 576). Local storage layout only, never consensus. (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-vbparams=<deployment>:<start>:<end>(:min_activation_height(:<window>:<threshold/thresholdstart>(:<thresholdmin>:<falloffcoeff>:<mnactivation>)))",
                  "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only). "
                  "Specifying window, threshold/thresholdstart, thresholdmin, falloffcoeff and mnactivation is optional.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);

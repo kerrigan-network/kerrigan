@@ -5,6 +5,7 @@
 #include <common/bloom.h>
 
 #include <evo/assetlocktx.h>
+#include <evo/inference_wire.h>
 #include <evo/providertx.h>
 #include <evo/specialtx.h>
 #include <hash.h>
@@ -209,6 +210,17 @@ bool CBloomFilter::CheckSpecialTransactionMatchesAndUpdate(const CTransaction &t
                         insert(tx.GetHash());
                     return true;
                 }
+            }
+        }
+        return false;
+    }
+    case(TRANSACTION_DRONE_REGISTER): {
+        if (const auto opt_droneTx = GetTxPayload<CDroneRegTx>(tx)) {
+            if (contains(opt_droneTx->blsPubKeyHash) ||
+                    CheckScript(opt_droneTx->scriptPayout)) {
+                if ((nFlags & BLOOM_UPDATE_MASK) == BLOOM_UPDATE_ALL)
+                    insert(tx.GetHash());
+                return true;
             }
         }
         return false;

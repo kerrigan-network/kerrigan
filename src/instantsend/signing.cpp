@@ -10,6 +10,7 @@
 #include <index/txindex.h>
 #include <instantsend/instantsend.h>
 #include <logging.h>
+#include <recovery/recovery.h>
 #include <sapling/sapling_tx_payload.h>
 #include <util/irange.h>
 #include <validation.h>
@@ -279,6 +280,12 @@ void InstantSendSigner::ProcessTx(const CTransaction& tx, bool fRetroactive, con
     if (tx.nType == TRANSACTION_SAPLING) return;
 
     if (!m_isman.IsInstantSendEnabled() || !m_mn_sync.IsBlockchainSynced()) {
+        return;
+    }
+
+    // Quarantine gate (WS-HEAL v2 5.2.3): no InstantSend lock signing on
+    // state the node proved inconsistent.
+    if (recovery::IsQuarantined()) {
         return;
     }
 

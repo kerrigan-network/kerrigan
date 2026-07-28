@@ -10,6 +10,7 @@
 #include <fs.h>
 #include <policy/settings.h>
 #include <primitives/transaction.h>
+#include <recovery/recovery.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
@@ -58,6 +59,12 @@ RPCHelpMan sendrawtransaction()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
         {
+            // Quarantine gate (WS-HEAL v2 5.2.5): broadcast is naturally dead
+            // (networking off) but the failure must be explicit, not silent.
+            if (recovery::IsQuarantined()) {
+                throw JSONRPCError(RPC_IN_QUARANTINE, "Node is quarantined (see getrecoverystatus)");
+            }
+
             RPCTypeCheck(request.params, {
                 UniValue::VSTR,
                 UniValueType(), // VNUM or VSTR, checked inside AmountFromValue()

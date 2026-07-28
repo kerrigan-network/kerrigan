@@ -35,6 +35,7 @@
 #include <crypto/ethash/include/ethash/ethash.hpp>
 #include <crypto/ethash/include/ethash/progpow.hpp>
 #include <primitives/transaction.h>
+#include <recovery/recovery.h>
 #include <script/script.h>
 #include <script/sigcache.h>
 #include <shutdown.h>
@@ -57,6 +58,7 @@
 #include <chainlock/chainlock.h>
 #include <evo/chainhelper.h>
 #include <evo/deterministicmns.h>
+#include <evo/dronelist.h>
 #include <governance/escrow_validator.h>
 #include <governance/governance.h>
 #include <instantsend/instantsend.h>
@@ -426,6 +428,16 @@ static bool ContextualCheckTransaction(const CTransaction& tx, TxValidationState
     if (fDIP0003Active_context) {
         // check version 3 transaction types
         if (tx.IsSpecialTxVersion()) {
+            // TRANSACTION_DRONE_REGISTER only exists once the drone-payout
+            // fork is EFFECTIVE (height floor AND SPORK_26); outside that the
+            // type stays unknown ("bad-txns-type"), byte-identical to pre-fork
+            // (v1.2.x) nodes. CONSENSUS/reindex-safety: this must use the same
+            // combined predicate as the coinbase drone-vs-escrow branch
+            // (payments.cpp GetBlockTxOuts) so no registration can ever
+            // confirm while the payout gate is off -- see IsDronePayoutEffective
+            // (evo/dronelist.h).
+            const bool fDronePayoutActive_context =
+                IsDronePayoutEffective(consensusParams, (pindexPrev == nullptr ? 0 : pindexPrev->nHeight) + 1);
             if (tx.nType != TRANSACTION_NORMAL &&
                 tx.nType != TRANSACTION_PROVIDER_REGISTER &&
                 tx.nType != TRANSACTION_PROVIDER_UPDATE_SERVICE &&
@@ -436,7 +448,8 @@ static bool ContextualCheckTransaction(const CTransaction& tx, TxValidationState
                 tx.nType != TRANSACTION_MNHF_SIGNAL &&
                 tx.nType != TRANSACTION_ASSET_LOCK &&
                 tx.nType != TRANSACTION_ASSET_UNLOCK &&
-                tx.nType != TRANSACTION_SAPLING) {
+                tx.nType != TRANSACTION_SAPLING &&
+                !(tx.nType == TRANSACTION_DRONE_REGISTER && fDronePayoutActive_context)) {
                 return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-type");
             }
             if (tx.IsCoinBase() && tx.nType != TRANSACTION_COINBASE)
@@ -2133,6 +2146,9 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
 
 bool AbortNode(BlockValidationState& state, const std::string& strMessage, const bilingual_str& userMessage)
 {
+    // Best-effort record so the NEXT start can surface NODE_ABORTED (and
+    // ACTION_CHECK_DISK for disk-class failures) through getrecoverystatus.
+    recovery::RecordAbortReason(strMessage);
     AbortNode(strMessage, userMessage);
     return state.Error(strMessage);
 }
@@ -2181,8 +2197,17 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
 
     bool fDIP0003Active = DeploymentActiveAt(*pindex, m_params.GetConsensus(), Consensus::DEPLOYMENT_DIP0003);
     if (fDIP0003Active && !m_evoDb.VerifyBestBlock(pindex->GetBlockHash())) {
-        // Nodes that upgraded after DIP3 activation will have to reindex to ensure evodb consistency
-        AbortNode("Found EvoDB inconsistency, you must reindex to continue");
+        // Consistency drift between EvoDB and the coin DB (crash mid-flush /
+        // partial write). QUARANTINE instead of AbortNode (WS-HEAL v2 5):
+        // the disconnect is abandoned exactly as before (DISCONNECT_FAILED),
+        // but the node stays up with networking, mining, MN/LLMQ duties and
+        // HMP signing disabled so it cannot act on -- or serve -- state it
+        // just proved inconsistent, while RPC keeps serving the diagnosis
+        // and the guided-repair path (getrecoverystatus / repairnode).
+        // Disk/IO failures still AbortNode (see FlushStateToDisk et al.).
+        recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_EVODB_DISCONNECT,
+                                  strprintf("EvoDB best-block mismatch disconnecting %s (height %d)",
+                                            pindex->GetBlockHash().ToString(), pindex->nHeight));
         return DISCONNECT_FAILED;
     }
 
@@ -2199,7 +2224,11 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
         // handles this idempotently (mirrors connect-path fix).
         int saplingHeight = m_chain_helper->sapling_state->GetBestBlockHeight();
         if (saplingHeight <= pindex->nHeight) {
-            AbortNode("Found SaplingDB inconsistency, you must reindex to continue");
+            // Same consistency-drift class as the EvoDB check above:
+            // quarantine, never AbortNode (WS-HEAL v2 5).
+            recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_SAPLING_DISCONNECT,
+                                      strprintf("SaplingDB best-block mismatch disconnecting %s (height %d, sapling height %d)",
+                                                pindex->GetBlockHash().ToString(), pindex->nHeight, saplingHeight));
             return DISCONNECT_FAILED;
         }
     }
@@ -2861,8 +2890,13 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     if (pindex->pprev) {
         bool fDIP0003Active = DeploymentActiveAt(*pindex, m_params.GetConsensus(), Consensus::DEPLOYMENT_DIP0003);
         if (fDIP0003Active && !m_evoDb.VerifyBestBlock(pindex->pprev->GetBlockHash())) {
-            // Nodes that upgraded after DIP3 activation will have to reindex to ensure evodb consistency
-            return AbortNode(state, "Found EvoDB inconsistency, you must reindex to continue");
+            // Consistency-drift class: QUARANTINE instead of AbortNode
+            // (WS-HEAL v2 5). Block connection fails exactly as before; the
+            // node stays up for diagnosis with all duties gated off.
+            recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_EVODB_CONNECT,
+                                      strprintf("EvoDB best-block mismatch connecting %s (height %d)",
+                                                pindex->GetBlockHash().ToString(), pindex->nHeight));
+            return state.Error("Found EvoDB inconsistency, node quarantined");
         }
     }
     nBlocksTotal++;
@@ -3378,7 +3412,10 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                         // SPORK_25_HMP_ENABLED gates seal signing.
                         // When the kill switch is engaged we still track blocks
                         // (OnNewBlock above) but do not sign or broadcast shares.
-                        if (g_sporkman && g_sporkman->IsSporkActive(SPORK_25_HMP_ENABLED)) {
+                        // Quarantine gates HMP duties the same way (WS-HEAL v2
+                        // 5.2.4): tracking stays consistent, signing stops.
+                        if (g_sporkman && g_sporkman->IsSporkActive(SPORK_25_HMP_ENABLED) &&
+                            !recovery::IsQuarantined()) {
                             auto share = g_seal_manager->SignBlock(blockHash, pindex->GetAlgo());
                             if (share) {
                                 auto result = g_seal_manager->AddSealShare(*share);
@@ -7766,6 +7803,14 @@ bool ChainstateManager::IsQuorumTypeEnabled(const Consensus::LLMQType llmqType,
     }
     case Consensus::LLMQType::LLMQ_25_67:
         return DeploymentActiveAfter(pindexPrev, GetConsensus(), Consensus::DEPLOYMENT_DIP0020);
+
+    case Consensus::LLMQType::LLMQ_60_60:
+        // Kerrigan small-network quorum, height-gated hard fork (v1.3.0).
+        // Below nLLMQ6060Height no LLMQ_60_60 quorum can exist, which keeps
+        // pre-fork block validity (incl. CbTx bestCLSignature and MnEHF
+        // checks against this type) identical to older releases. 0 = never.
+        return GetConsensus().nLLMQ6060Height > 0 &&
+               pindexPrev->nHeight + 1 >= GetConsensus().nLLMQ6060Height;
 
     default:
         throw std::runtime_error(strprintf("%s: Unknown LLMQ type %d", __func__, ToUnderlying(llmqType)));

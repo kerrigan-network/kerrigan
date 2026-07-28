@@ -26,6 +26,7 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <random.h>
+#include <recovery/recovery.h>
 #include <scheduler.h>
 #include <streams.h>
 #include <sync.h>
@@ -6651,6 +6652,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // the download window should be much larger than the to-be-downloaded set of blocks, so disconnection
             // should only happen during initial block download.
             LogPrintf("Peer=%d%s is stalling block download, disconnecting\n", pto->GetId(), fLogIPs ? strprintf(" peeraddr=%s", pto->addr.ToStringAddrPort()) : "");
+            // Anti-double-eviction (WS-HEAL v2 2.2): tell the recovery
+            // module the built-in stall eviction fired so its own T1
+            // rotation stands down for the suppression window.
+            recovery::NoteBuiltinStallEviction();
             pto->fDisconnect = true;
             // Increase timeout for the next peer so that we don't disconnect multiple peers if our own
             // bandwidth is insufficient.

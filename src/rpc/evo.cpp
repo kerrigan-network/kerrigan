@@ -10,6 +10,8 @@
 #include <evo/chainhelper.h>
 #include <evo/deterministicmns.h>
 #include <evo/dmn_types.h>
+#include <evo/dronelist.h>
+#include <evo/inference_wire.h>
 #include <evo/providertx.h>
 #include <evo/smldiff.h>
 #include <evo/specialtx.h>
@@ -2043,6 +2045,177 @@ static RPCHelpMan bls_help()
     };
 }
 
+static RPCHelpMan getdronelist()
+{
+    return RPCHelpMan{"getdronelist",
+        "\nReturns the deterministic inference-drone list as of a block (the consensus registry that\n"
+        "selects the 40%% coinbase-slot payee from nDronePayoutHeight; see the drone-payout hard fork).\n"
+        "Eligibility and the projected payees are evaluated for the NEXT block on top of the queried one,\n"
+        "which is exactly how payee selection consumes the list. The coordinator's off-chain roster can\n"
+        "use this to reconcile against consensus.\n",
+        {
+            {"height", RPCArg::Type::NUM, RPCArg::DefaultHint{"the chain tip"}, "The block height to query the list at."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "height", "the queried block height"},
+                {RPCResult::Type::STR_HEX, "blockhash", "the queried block hash"},
+                {RPCResult::Type::BOOL, "drone_payout_active", "whether the drone-payout fork is in effect (height floor + SPORK_26) for the next block"},
+                {RPCResult::Type::NUM, "count", "number of registered drones"},
+                {RPCResult::Type::ARR, "drones", "registered drones",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "blsPubKeyHash", "HASH160 of the drone's BLS pubkey (the list key)"},
+                        {RPCResult::Type::STR, "payoutAddress", /*optional=*/true, "payout address, when the payout script is standard"},
+                        {RPCResult::Type::STR_HEX, "payoutScript", "immutable payout scriptPubKey (from the registration payload)"},
+                        {RPCResult::Type::STR_HEX, "collateralHash", "bond transaction hash"},
+                        {RPCResult::Type::NUM, "collateralIndex", "bond output index; spending this outpoint deregisters the drone"},
+                        {RPCResult::Type::STR_HEX, "irohNodeId", "iroh transport node id from the registration payload"},
+                        {RPCResult::Type::NUM, "hardwareClass", "raw hardware-class byte (informational)"},
+                        {RPCResult::Type::NUM, "modelTier", "model-capability tier (0=simple, 1=standard, 2=complex, 3=frontier); stored state only, payouts are tier-neutral"},
+                        {RPCResult::Type::NUM, "registeredHeight", "height of the registration"},
+                        {RPCResult::Type::NUM, "lastSeenHeight", "height of the last authenticated heartbeat"},
+                        {RPCResult::Type::NUM, "lastPaidHeight", "height this drone last received the coinbase slot (0 = never)"},
+                        {RPCResult::Type::BOOL, "eligible", "whether the drone is eligible for the next block's payout"},
+                    }},
+                }},
+                {RPCResult::Type::ARR, "projected_payees", "blsPubKeyHash of the next payees, in payment order (up to 10)",
+                {
+                    {RPCResult::Type::STR_HEX, "", ""},
+                }},
+            }},
+        RPCExamples{
+            HelpExampleCli("getdronelist", "")
+    + HelpExampleRpc("getdronelist", "150000")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    const NodeContext& node = EnsureAnyNodeContext(request.context);
+    const ChainstateManager& chainman = EnsureChainman(node);
+    CChainstateHelper& chain_helper = *CHECK_NONFATAL(node.chain_helper);
+    const Consensus::Params& consensus = chainman.GetConsensus();
+
+    const CBlockIndex* pindex{nullptr};
+    {
+        LOCK(cs_main);
+        if (request.params[0].isNull()) {
+            pindex = chainman.ActiveChain().Tip();
+        } else {
+            const int nHeight{request.params[0].getInt<int>()};
+            if (nHeight < 0 || nHeight > chainman.ActiveChain().Height()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Block height out of range");
+            }
+            pindex = chainman.ActiveChain()[nHeight];
+        }
+    }
+    CHECK_NONFATAL(pindex != nullptr);
+
+    const CDroneList droneList = chain_helper.drone_manager->GetListForBlock(pindex, consensus);
+    // Payee selection for block H consumes the list as of H-1, so report
+    // eligibility/projection for the block on top of the queried one.
+    const int nPayHeight = pindex->nHeight + 1;
+
+    UniValue result(UniValue::VOBJ);
+    result.pushKV("height", pindex->nHeight);
+    result.pushKV("blockhash", pindex->GetBlockHash().ToString());
+    // Effective = height floor AND SPORK_26 (evaluated at the CURRENT spork
+    // state): whether the payout of the block on top of the queried one
+    // would actually go to a drone rather than escrow/burn.
+    result.pushKV("drone_payout_active", IsDronePayoutEffective(consensus, nPayHeight));
+    result.pushKV("count", static_cast<int64_t>(droneList.GetAllDroneCount()));
+
+    UniValue drones(UniValue::VARR);
+    droneList.ForEachDrone([&](const CDroneEntry& entry) {
+        UniValue obj = entry.ToJson();
+        obj.pushKV("eligible", droneList.IsEligible(entry, nPayHeight, consensus));
+        drones.push_back(obj);
+    });
+    result.pushKV("drones", drones);
+
+    UniValue payees(UniValue::VARR);
+    for (const CDroneEntry* entry : droneList.GetProjectedPayees(nPayHeight, consensus, 10)) {
+        payees.push_back(entry->blsPubKeyHash.ToString());
+    }
+    result.pushKV("projected_payees", payees);
+    return result;
+},
+    };
+}
+
+static std::vector<unsigned char> ParseFixedHex(const UniValue& v, size_t expected, const std::string& name)
+{
+    if (!v.isStr() || !IsHex(v.get_str())) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be a hex string", name));
+    }
+    std::vector<unsigned char> ret = ParseHex(v.get_str());
+    if (ret.size() != expected) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be %d bytes", name, expected));
+    }
+    return ret;
+}
+
+static RPCHelpMan droneblsfromsecret()
+{
+    return RPCHelpMan{"droneblsfromsecret",
+        "\nDerive the drone BLS min_sig (G2, 96-byte) public key and its HASH160 for a 32-byte secret.\n"
+        "NOTE: this is the swarm's min_sig scheme (pubkeys in G2), NOT the masternode BLS scheme --\n"
+        "the output is only meaningful for drone registrations. Registration/test support.\n",
+        {
+            {"secret", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte BLS secret key (big-endian scalar, reduced mod the group order)"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+                  {{RPCResult::Type::STR_HEX, "secret", "BLS secret key"},
+                   {RPCResult::Type::STR_HEX, "public", "96-byte min_sig public key (compressed G2)"},
+                   {RPCResult::Type::STR_HEX, "pubKeyHash", "HASH160 of the public key (the drone-list key)"}}},
+        RPCExamples{HelpExampleCli("droneblsfromsecret", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    const std::vector<unsigned char> secret = ParseFixedHex(request.params[0], 32, "secret");
+    std::vector<unsigned char> pubkey;
+    if (!DroneBLS::PublicKeyFromSecret(secret, pubkey)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid BLS secret key");
+    }
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("secret", HexStr(secret));
+    ret.pushKV("public", HexStr(pubkey));
+    ret.pushKV("pubKeyHash", Hash160(pubkey).ToString());
+    return ret;
+},
+    };
+}
+
+static RPCHelpMan droneblssign()
+{
+    return RPCHelpMan{"droneblssign",
+        "\nSign a 32-byte message hash with a drone BLS min_sig secret key (48-byte G1 signature,\n"
+        "DST BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_KRGN_REG_V1_). For a drone registration the hash is\n"
+        "SHA256d of the CDroneRegTx payload serialized without its signature field. Registration/test support.\n",
+        {
+            {"secret", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte BLS secret key"},
+            {"msghash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The 32-byte message hash to sign (hex, byte order as signed)"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+                  {{RPCResult::Type::STR_HEX, "signature", "48-byte min_sig signature (compressed G1)"}}},
+        RPCExamples{HelpExampleCli("droneblssign", "<secret> <msghash>")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    const std::vector<unsigned char> secret = ParseFixedHex(request.params[0], 32, "secret");
+    const std::vector<unsigned char> vchHash = ParseFixedHex(request.params[1], 32, "msghash");
+    uint256 msgHash;
+    std::copy(vchHash.begin(), vchHash.end(), msgHash.begin());
+    std::vector<unsigned char> sig;
+    if (!DroneBLS::SignMinSig(secret, msgHash, sig)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "invalid BLS secret key");
+    }
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("signature", HexStr(sig));
+    return ret;
+},
+    };
+}
+
 #ifdef ENABLE_WALLET
 Span<const CRPCCommand> GetWalletEvoRPCCommands()
 {
@@ -2078,6 +2251,9 @@ void RegisterEvoRPCCommands(CRPCTable& tableRPC)
         {"evo", &protx_help},
         {"evo", &protx_diff},
         {"evo", &protx_listdiff},
+        {"evo", &getdronelist},
+        {"hidden", &droneblsfromsecret},
+        {"hidden", &droneblssign},
         {"hidden", &evodb_verify},
         {"hidden", &evodb_repair},
     };

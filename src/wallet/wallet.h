@@ -700,8 +700,11 @@ public:
      * No-op (and cheap) when all witnesses are healthy.
      *
      * Gated by the -autorebuildsaplingwitnesses startup arg (default true).
+     * The guided-repair flow passes force_ignore_config=true to re-arm the
+     * one-shot check and bypass the opt-out (WS-HEAL v2 6.4.b): a repair
+     * must never silently skip the witness rebuild.
      */
-    void MaybeAutoRebuildSaplingWitnesses();
+    void MaybeAutoRebuildSaplingWitnesses(bool force_ignore_config = false);
 
     /**
      * Body of the detached background rebuilder.

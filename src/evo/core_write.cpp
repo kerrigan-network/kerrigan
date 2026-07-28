@@ -6,6 +6,7 @@
 #include <evo/cbtx.h>
 #include <evo/deterministicmns.h>
 #include <evo/dmnstate.h>
+#include <evo/inference_wire.h>
 #include <evo/mnhftx.h>
 #include <evo/netinfo.h>
 #include <evo/providertx.h>
@@ -613,5 +614,24 @@ UniValue MNHFTxPayload::ToJson() const
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("version", nVersion);
     ret.pushKV("signal", signal.ToJson());
+    return ret;
+}
+
+UniValue CDroneRegTx::ToJson() const
+{
+    UniValue ret(UniValue::VOBJ);
+    ret.pushKV("version", nVersion);
+    ret.pushKV("blsPubKeyHash", blsPubKeyHash.ToString());
+    ret.pushKV("blsPubKey", HexStr(vchBlsPubKey));
+    ret.pushKV("irohNodeId", irohNodeId.ToString());
+    ret.pushKV("hardwareClass", nHardwareClass);
+    ret.pushKV("modelTier", nModelTier);
+    ret.pushKV("collateralIndex", static_cast<int64_t>(nCollateralIndex));
+    CTxDestination dest;
+    if (ExtractDestination(scriptPayout, dest)) {
+        ret.pushKV("payoutAddress", EncodeDestination(dest));
+    }
+    ret.pushKV("scriptPayout", HexStr(scriptPayout));
+    ret.pushKV("inputsHash", inputsHash.ToString());
     return ret;
 }

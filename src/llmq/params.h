@@ -20,6 +20,7 @@ enum class LLMQType : uint8_t {
     LLMQ_100_67 = 4, // 100 members, 67 (67%) threshold, one per hour
     LLMQ_60_75 = 5,  // 60 members, 45 (75%) threshold, one every 12 hours
     LLMQ_25_67 = 6, // 25 members, 17 (67%) threshold, one per hour
+    LLMQ_60_60 = 7, // Kerrigan: 60 members, 36 (60%) threshold, one per hour. Small-network quorum (see llmq_60_60 below)
 
     // for testing only
     LLMQ_TEST = 100, // 3 members, 2 (66%) threshold, one per hour. Params might differ when -llmqtestparams is used
@@ -130,7 +131,7 @@ static_assert(std::is_trivially_copyable_v<Consensus::LLMQParams>, "LLMQParams i
 static_assert(std::is_trivially_assignable_v<Consensus::LLMQParams, Consensus::LLMQParams>, "LLMQParams is not trivially assignable");
 
 
-static constexpr std::array<LLMQParams, 14> available_llmqs = {
+static constexpr std::array<LLMQParams, 15> available_llmqs = {
 
     /**
      * llmq_test
@@ -361,6 +362,55 @@ static constexpr std::array<LLMQParams, 14> available_llmqs = {
         .dkgBadVotesThreshold = 40,
 
         .signingActiveQuorumCount = 24, // a full day worth of LLMQs
+        .keepOldConnections = 25,
+        .keepOldKeys = 48,
+        .recoveryMembers = 25,
+    },
+
+    /**
+     * llmq_60_60 (Kerrigan)
+     * Small-network workhorse quorum: ChainLocks, InstantSend and EHF
+     * signalling on mainnet (v1.3.0 hard fork, height-gated via
+     * Consensus::Params::nLLMQ6060Height). The Dash-inherited roles could
+     * never form on the young Kerrigan network (~58 registered masternodes
+     * as of 2026-07): LLMQ_400_60/400_85 need >=300/>=340 valid DKG members
+     * and LLMQ_60_75 is a DIP0024 rotation type that partitions the
+     * masternode set into 32 disjoint 60-member quorums per cycle.
+     *
+     * Sized so quorums actually form on a small network: member selection
+     * takes up to 60 masternodes (everyone, while the network is below 60),
+     * the DKG succeeds with as few as 40 valid members, and signing keeps
+     * the classic 60% ChainLocks threshold (36). Non-rotated, hourly DKG,
+     * mirroring llmq_50_60 (the legacy shared ChainLocks+InstantSend type).
+     */
+    LLMQParams{
+        .type = LLMQType::LLMQ_60_60,
+        .name = "llmq_60_60",
+        .useRotation = false,
+        .size = 60,
+        .minSize = 40,
+        .threshold = 36,
+
+        .dkgInterval = 24, // one DKG per hour
+        .dkgPhaseBlocks = 2,
+        .dkgMiningWindowStart = 10, // dkgPhaseBlocks * 5 = after finalization
+        .dkgMiningWindowEnd = 18,
+        // Dash's rule of thumb is ~80% of .size (llmq_50_60: 40/50,
+        // llmq_60_75: 48/60, llmq_100_67: 80/100), but that assumes quorums
+        // always form at full size. On Kerrigan (~58 registered MNs, minSize
+        // 40) quorums form with 40-58 members, so 48 (80% of 60) can EXCEED
+        // the member count of a formed quorum, making DKG bad-member
+        // exclusion unreachable. Use 40 -- the same absolute value as
+        // llmq_50_60, whose realistic formation profile (40-58 members) this
+        // quorum mirrors: always <= the member count of any quorum that can
+        // form (>= minSize = 40), yet still a strict majority even of a full
+        // 60-member quorum (40 > 30), so no minority coalition can vote
+        // honest members out. DKG-liveness tuning only; this field is never
+        // part of commitment validation, so it is not consensus.
+        .dkgBadVotesThreshold = 40,
+
+        .signingActiveQuorumCount = 24, // a full day worth of LLMQs
+
         .keepOldConnections = 25,
         .keepOldKeys = 48,
         .recoveryMembers = 25,

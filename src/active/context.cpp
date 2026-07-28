@@ -19,6 +19,7 @@
 #include <llmq/ehf_signals.h>
 #include <llmq/quorumsman.h>
 #include <llmq/signing_shares.h>
+#include <recovery/recovery.h>
 #include <util/check.h>
 #include <validation.h>
 #include <validationinterface.h>
@@ -89,6 +90,11 @@ void ActiveContext::UpdatedBlockTip(const CBlockIndex* pindexNew, const CBlockIn
 {
     if (fInitialDownload || pindexNew == pindexFork) // In IBD or blocks were disconnected without any new ones
         return;
+
+    // Quarantine gate (WS-HEAL v2 5.2.3): a quarantined masternode performs
+    // no duties -- no MN state updates, EHF/governance signing, DKG ticks or
+    // quorum handling -- even if networking were somehow re-enabled.
+    if (recovery::IsQuarantined()) return;
 
     nodeman->UpdatedBlockTip(pindexNew, pindexFork, fInitialDownload);
     ehf_sighandler->UpdatedBlockTip(pindexNew);

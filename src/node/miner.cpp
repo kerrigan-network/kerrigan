@@ -31,6 +31,7 @@
 #include <evo/cbtx.h>
 #include <evo/chainhelper.h>
 #include <evo/creditpool.h>
+#include <evo/dronelist.h>
 #include <evo/mnhftx.h>
 #include <evo/deterministicmns.h>
 #include <evo/simplifiedmns.h>
@@ -611,6 +612,30 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
                 continue;
             }
             signals.insert({*signal, 0});
+        }
+
+        // Drone registrations/heartbeats are contextually validated against
+        // the drone list as of pindexPrev, which may have changed since
+        // mempool acceptance (e.g. a mined collateral spend deregisters a
+        // drone and turns a pending bond-less heartbeat into an invalid
+        // fresh registration). CheckDroneRegTx also embeds the combined
+        // height+SPORK_26 gate (IsDronePayoutEffective), so this same check
+        // keeps any type-11 tx out of templates whenever the fork is not
+        // effective. Never let a stale one into the template:
+        // TestBlockValidity would reject the whole block and mining would
+        // stall until the tx expired from the mempool.
+        if (iter->GetTx().nType == TRANSACTION_DRONE_REGISTER) {
+            TxValidationState state;
+            if (!CheckDroneRegTx(iter->GetTx(), pindexPrev, *m_chain_helper.drone_manager,
+                                 m_chainstate.m_chainman, state, /*check_sigs=*/true)) {
+                if (fUsingModified) {
+                    mapModifiedTx.get<ancestor_score>().erase(modit);
+                    failedTx.insert(iter);
+                }
+                LogPrintf("%s: drone registration tx %s skipped due %s\n",
+                          __func__, iter->GetTx().GetHash().ToString(), state.ToString());
+                continue;
+            }
         }
 
         // Freeze enforcement in the block template: never build a template that

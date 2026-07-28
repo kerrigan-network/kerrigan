@@ -14,6 +14,7 @@
 class CBlockIndex;
 class CCreditPoolManager;
 class CDeterministicMNManager;
+class CDroneListManager;
 class CEvoDB;
 class CGovernanceManager;
 class ChainstateManager;
@@ -54,6 +55,9 @@ private:
 public:
     const chainlock::Chainlocks& m_chainlocks;
     const std::unique_ptr<CMNHFManager> ehf_manager;
+    // Deterministic inference-drone list (nDronePayoutHeight fork). Declared
+    // before mn_payments/special_tx, which hold references to it.
+    const std::unique_ptr<CDroneListManager> drone_manager;
     const std::unique_ptr<CMNPaymentsProcessor> mn_payments;
     const std::unique_ptr<sapling::CSaplingState> sapling_state;
     const std::unique_ptr<CSpecialTxProcessor> special_tx;

@@ -8,6 +8,7 @@
 #include <fs.h>
 #include <net.h>
 #include <interfaces/chain.h>
+#include <recovery/witnesshook.h>
 #include <scheduler.h>
 #include <util/check.h>
 #include <util/string.h>
@@ -153,6 +154,27 @@ void StartWallets(WalletContext& context, CScheduler& scheduler)
         scheduler.scheduleEvery([&context] { MaybeCompactWalletDB(context); }, std::chrono::milliseconds{500});
     }
     scheduler.scheduleEvery([&context] { MaybeResendWalletTxs(context); }, 1min);
+
+    // WS-HEAL v2 6.4: let the recovery module observe (and, post-repair,
+    // force) the Sapling witness rebuild so `repair.phase` can hold
+    // "rebuilding_witnesses" until shielded funds are spendable again. The
+    // query is lock-free (atomics only); the trigger reuses the exact
+    // auto-rebuild code path, bypassing -noautorebuildsaplingwitnesses.
+    recovery::RegisterWalletWitnessHook(
+        [&context]() {
+            recovery::WalletWitnessStatus status;
+            for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
+                status.have_wallet = true;
+                status.rebuild_active |= pwallet->IsSaplingRebuildActive();
+                status.check_pending |= pwallet->m_sapling_witness_check_pending.load(std::memory_order_relaxed);
+            }
+            return status;
+        },
+        [&context]() {
+            for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
+                pwallet->MaybeAutoRebuildSaplingWitnesses(/*force_ignore_config=*/true);
+            }
+        });
 }
 
 void FlushWallets(WalletContext& context)

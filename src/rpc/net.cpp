@@ -16,6 +16,7 @@
 #include <netbase.h>
 #include <node/context.h>
 #include <policy/settings.h>
+#include <recovery/recovery.h>
 #include <rpc/blockchain.h>
 #include <rpc/protocol.h>
 #include <rpc/server_util.h>
@@ -914,6 +915,13 @@ static RPCHelpMan setnetworkactive()
 
     const NodeContext& node = EnsureAnyNodeContext(request.context);
     CConnman& connman = EnsureConnman(node);
+
+    // Quarantine gate (WS-HEAL v2 5.2.1): networking must not be re-enabled
+    // while quarantined -- the node would resume serving state it proved
+    // inconsistent. Disabling remains allowed.
+    if (recovery::IsQuarantined() && request.params[0].get_bool()) {
+        throw JSONRPCError(RPC_IN_QUARANTINE, "Node is quarantined (see getrecoverystatus)");
+    }
 
     connman.SetNetworkActive(request.params[0].get_bool(), node.mn_sync.get());
 

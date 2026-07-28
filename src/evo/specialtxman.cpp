@@ -15,6 +15,8 @@
 #include <evo/cbtx.h>
 #include <evo/creditpool.h>
 #include <evo/deterministicmns.h>
+#include <evo/dronelist.h>
+#include <evo/inference_wire.h>
 #include <evo/mnhftx.h>
 #include <evo/netinfo.h>
 #include <evo/simplifiedmns.h>
@@ -106,7 +108,8 @@ static bool CheckCbTxBestChainlock(const CCbTx& cbTx, const CBlockIndex* pindex,
     return true;
 }
 
-static bool CheckSpecialTxInner(CDeterministicMNManager& dmnman, llmq::CQuorumSnapshotManager& qsnapman,
+static bool CheckSpecialTxInner(CDeterministicMNManager& dmnman, CDroneListManager& droneman,
+                                llmq::CQuorumSnapshotManager& qsnapman,
                                 const ChainstateManager& chainman, const llmq::CQuorumManager& qman,
                                 const CTransaction& tx, const CBlockIndex* pindexPrev, const CCoinsViewCache& view,
                                 const std::optional<CRangesSet>& indexes, bool check_sigs, TxValidationState& state)
@@ -156,6 +159,8 @@ static bool CheckSpecialTxInner(CDeterministicMNManager& dmnman, llmq::CQuorumSn
             return CheckAssetLockTx(tx, state);
         case TRANSACTION_ASSET_UNLOCK:
             return CheckAssetUnlockTx(chainman.m_blockman, qman, tx, pindexPrev, indexes, state);
+        case TRANSACTION_DRONE_REGISTER:
+            return CheckDroneRegTx(tx, pindexPrev, droneman, chainman, state, check_sigs);
         }
     } catch (const std::exception& e) {
         LogPrintf("%s -- failed: %s\n", __func__, e.what());
@@ -168,8 +173,8 @@ static bool CheckSpecialTxInner(CDeterministicMNManager& dmnman, llmq::CQuorumSn
 bool CSpecialTxProcessor::CheckSpecialTx(const CTransaction& tx, const CBlockIndex* pindexPrev, const CCoinsViewCache& view, bool check_sigs, TxValidationState& state)
 {
     AssertLockHeld(::cs_main);
-    return CheckSpecialTxInner(m_dmnman, m_qsnapman, m_chainman, m_qman, tx, pindexPrev, view, std::nullopt, check_sigs,
-                               state);
+    return CheckSpecialTxInner(m_dmnman, m_droneman, m_qsnapman, m_chainman, m_qman, tx, pindexPrev, view,
+                               std::nullopt, check_sigs, state);
 }
 
 static void HandleQuorumCommitment(const llmq::CFinalCommitment& qc, const std::vector<CDeterministicMNCPtr>& members,
@@ -592,8 +597,8 @@ bool CSpecialTxProcessor::ProcessSpecialTxsInBlock(const CBlock& block, const CB
 
             const auto ptr_tx = block.vtx[i];
             TxValidationState tx_state;
-            if (!CheckSpecialTxInner(m_dmnman, m_qsnapman, m_chainman, m_qman, *ptr_tx, pindex->pprev, view, indexes,
-                                     fCheckCbTxMerkleRoots, tx_state)) {
+            if (!CheckSpecialTxInner(m_dmnman, m_droneman, m_qsnapman, m_chainman, m_qman, *ptr_tx, pindex->pprev,
+                                     view, indexes, fCheckCbTxMerkleRoots, tx_state)) {
                 assert(tx_state.GetResult() == TxValidationResult::TX_CONSENSUS || tx_state.GetResult() == TxValidationResult::TX_BAD_SPECIAL);
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, tx_state.GetRejectReason(),
                                  strprintf("Special Transaction check failed (tx hash %s) %s", ptr_tx->GetHash().ToString(), tx_state.GetDebugMessage()));
@@ -661,6 +666,15 @@ bool CSpecialTxProcessor::ProcessSpecialTxsInBlock(const CBlock& block, const CB
                 // pass the state returned by the function above
                 return false;
             }
+        }
+
+        // Deterministic drone list (nDronePayoutHeight fork). Runs under the
+        // same cs_main scope as m_dmnman.ProcessBlock; every CDroneRegTx in
+        // the block already passed CheckDroneRegTx in the loop above. No-op
+        // pre-fork and during fJustCheck, mirroring the MN list hook.
+        if (!fJustCheck && !m_droneman.ProcessBlock(block, pindex, m_consensus_params, state)) {
+            // pass the state returned by the function above
+            return false;
         }
 
         int64_t nTime6 = GetTimeMicros();
@@ -753,6 +767,13 @@ bool CSpecialTxProcessor::UndoSpecialTxsInBlock(const CBlock& block, const CBloc
         }
 
         if (!m_mnhfman.UndoBlock(block, pindex)) {
+            return false;
+        }
+
+        // Drone list undo (reverse of the ProcessBlock hook order): evicts the
+        // block's cached list/diff; historical state is rebuilt by forward
+        // replay from snapshots, exact at any reorg depth.
+        if (!m_droneman.UndoBlock(pindex, m_consensus_params)) {
             return false;
         }
 
@@ -1284,6 +1305,104 @@ bool CheckProUpRevTx(const CTransaction& tx, gsl::not_null<const CBlockIndex*> p
     if (check_sigs && !CheckHashSig(*opt_ptx, dmn->pdmnState->pubKeyOperator.Get(), state)) {
         // pass the state returned by the function above
         return false;
+    }
+
+    return true;
+}
+
+bool CheckDroneRegTx(const CTransaction& tx, gsl::not_null<const CBlockIndex*> pindexPrev,
+                     CDroneListManager& droneman, const ChainstateManager& chainman, TxValidationState& state,
+                     bool check_sigs)
+{
+    AssertLockHeld(::cs_main);
+
+    const Consensus::Params& consensus_params = chainman.GetConsensus();
+
+    // Until the drone-payout fork is EFFECTIVE (height floor AND SPORK_26 --
+    // the same combined predicate as the coinbase drone-vs-escrow branch and
+    // the nType whitelist in ContextualCheckTransaction, see
+    // IsDronePayoutEffective in evo/dronelist.h) the TX type does not exist:
+    // reject, exactly like pre-fork (v1.2.x) nodes reject the unknown nType.
+    // Accepting it early would either fork upgraded nodes off the
+    // pre-flag-day network (below the floor) or let a registration confirm
+    // during the spork-off window and break reindex once the spork is on.
+    if (!IsDronePayoutEffective(consensus_params, pindexPrev->nHeight + 1)) {
+        return state.Invalid(TxValidationResult::TX_BAD_SPECIAL, "bad-drone-reg-height");
+    }
+
+    const auto opt_ptx = GetTxPayload<CDroneRegTx>(tx);
+    if (!opt_ptx) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-drone-reg-payload");
+    }
+    if (opt_ptx->nVersion == 0 || opt_ptx->nVersion > CDroneRegTx::CURRENT_VERSION) {
+        return state.Invalid(TxValidationResult::TX_BAD_SPECIAL, "bad-drone-reg-version");
+    }
+    // Model-capability tier must be canonical (0..3) so stored list state is
+    // always canonical too. The tier is stored-state only for now: payout
+    // selection stays tier-neutral round-robin until the stride-frequency
+    // weighting milestone (which needs a tier-attestation scheme first).
+    // This check sits INSIDE the IsDronePayoutEffective gate above, so all
+    // drone-reg consensus gates move in lockstep (reindex safety).
+    if (opt_ptx->nModelTier > CDroneRegTx::MAX_MODEL_TIER) {
+        return state.Invalid(TxValidationResult::TX_BAD_SPECIAL, "bad-drone-reg-tier");
+    }
+    if (opt_ptx->vchBlsPubKey.size() != CDroneRegTx::BLS_PUBKEY_SIZE) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-drone-reg-pubkey");
+    }
+    // The full pubkey must hash to the committed drone-list key (the swarm
+    // keeps identifying drones by HASH160(pubkey) -- rep updates, /v1/models).
+    if (Hash160(opt_ptx->vchBlsPubKey) != opt_ptx->blsPubKeyHash) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-drone-reg-pubkey-hash");
+    }
+    if (opt_ptx->vchSig.size() != CDroneRegTx::BLS_SIGNATURE_SIZE) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-drone-reg-sig");
+    }
+
+    // A payload for an already-registered pkh is a heartbeat: no bond output
+    // is required (the entry keeps its original collateral + payout script,
+    // which are immutable). EXCEPTION: if this TX itself spends the entry's
+    // collateral it deregisters + re-registers in one block, so it must
+    // satisfy the full registration shape.
+    bool is_heartbeat{false};
+    if (const CDroneList droneList = droneman.GetListForBlock(pindexPrev, consensus_params);
+        const CDroneEntry* existing = droneList.GetDrone(opt_ptx->blsPubKeyHash)) {
+        is_heartbeat = true;
+        for (const auto& txin : tx.vin) {
+            if (txin.prevout == existing->collateralOutpoint) {
+                is_heartbeat = false;
+                break;
+            }
+        }
+    }
+
+    if (!is_heartbeat) {
+        if (consensus_params.nDroneCollateralAmount <= 0) {
+            // Bond disabled => registrations impossible on this network.
+            return state.Invalid(TxValidationResult::TX_BAD_SPECIAL, "bad-drone-reg-collateral");
+        }
+        if (opt_ptx->nCollateralIndex >= tx.vout.size()) {
+            return state.Invalid(TxValidationResult::TX_BAD_SPECIAL, "bad-drone-reg-collateral-index");
+        }
+        if (tx.vout[opt_ptx->nCollateralIndex].nValue != consensus_params.nDroneCollateralAmount) {
+            return state.Invalid(TxValidationResult::TX_BAD_SPECIAL, "bad-drone-reg-collateral");
+        }
+        if (!IsValidDronePayoutScript(opt_ptx->scriptPayout)) {
+            return state.Invalid(TxValidationResult::TX_BAD_SPECIAL, "bad-drone-reg-payee");
+        }
+    }
+
+    if (uint256 inputsHash = CalcTxInputsHash(tx); inputsHash != opt_ptx->inputsHash) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-drone-reg-inputs-hash");
+    }
+
+    // The key-ownership proof (review finding M2): a BLS min_sig signature by
+    // the drone key over SHA256d of the payload-without-signature. Because the
+    // signed message covers the payout script, the bond output index and
+    // inputsHash, it binds the key to THIS registration and cannot be
+    // replayed to squat the pkh elsewhere.
+    if (check_sigs &&
+        !DroneBLS::VerifyMinSig(opt_ptx->vchBlsPubKey, ::SerializeHash(*opt_ptx), opt_ptx->vchSig)) {
+        return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-drone-reg-sig");
     }
 
     return true;

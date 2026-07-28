@@ -15,6 +15,7 @@
 
 #include <deploymentstatus.h>
 #include <logging.h>
+#include <recovery/recovery.h>
 #include <util/thread.h>
 #include <validation.h>
 
@@ -97,6 +98,13 @@ std::pair<QuorumPhase, uint256> ActiveDKGSessionHandler::GetPhaseAndQuorumHash()
 bool ActiveDKGSessionHandler::InitNewQuorum(gsl::not_null<const CBlockIndex*> pQuorumBaseBlockIndex)
 {
     if (!DeploymentDIP0003Enforced(pQuorumBaseBlockIndex->nHeight, Params().GetConsensus())) {
+        return false;
+    }
+
+    // Quarantine gate (WS-HEAL v2 5.2.3): decline DKG participation outright
+    // (belt-and-braces under the ActiveContext::UpdatedBlockTip gate) so a
+    // round already in flight aborts instead of contributing.
+    if (recovery::IsQuarantined()) {
         return false;
     }
 
