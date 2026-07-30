@@ -32,11 +32,14 @@ import json
 import os
 import time
 
+from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     assert_greater_than_or_equal,
     assert_raises_rpc_error,
+    get_rpc_proxy,
+    rpc_url,
 )
 
 RPC_IN_WARMUP = -28
@@ -57,12 +60,27 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         # -recoverytickinterval compresses the 30 s diagnosis cadence so the
         # ladder and classifier are observable inside a functional test.
-        self.extra_args = [["-recoverytickinterval=1"], ["-recoverytickinterval=1"]]
+        # -selfheal=1 is explicit because every framework datadir carries
+        # connect=0, which otherwise infers the auto engine off.
+        args = ["-recoverytickinterval=1", "-selfheal=1"]
+        self.extra_args = [args, args]
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
 
     # ---- helpers -----------------------------------------------------
+
+    def node_args(self, i):
+        """Restart args, with the node's baked -mocktime re-pinned to now.
+
+        TestNode bakes -mocktime into self.args at construction time. The
+        stall case pushes mocktime hours forward, so a restart that kept the
+        original value would see every block mined after the bump as "from
+        the future" and fail VerifyDB."""
+        node = self.nodes[i]
+        node.args = [a for a in node.args if not a.startswith("-mocktime=")]
+        node.mocktime = self.mocktime  # TestNode.start() appends this last
+        return self.extra_args[i]
 
     def chain_path(self, i):
         return os.path.join(self.nodes[i].datadir, self.chain)
@@ -98,9 +116,27 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         with open(path, encoding="utf8") as f:
             return json.load(f)
 
-    def arm_repair(self, i=0, scope="full", override=False, shutdown=True):
-        plan = self.nodes[i].repairnode(True, "", scope)
-        return self.nodes[i].repairnode(False, plan["confirm_token"], scope, override, shutdown)
+    def mine(self, i, count):
+        # The framework's deterministic PRIV_KEYS carry devnet-encoded
+        # addresses, so self.generate() cannot be used on this chain; mine to
+        # a wallet address instead.
+        node = self.nodes[i]
+        addr = node.get_wallet_rpc(self.default_wallet_name).getnewaddress()
+        return node.generatetoaddress(count, addr, invalid_call=False)
+
+    def warmup_rpc(self, i):
+        """Raw RPC proxy that does not wait for warmup to finish.
+
+        TestNode.wait_for_rpc_connection() blocks until getblockcount()
+        succeeds, which never happens in crippled_wait -- the whole point of
+        the warmup-callable RPC surface."""
+        node = self.nodes[i]
+        return get_rpc_proxy(rpc_url(node.datadir, node.index, self.chain, node.rpchost),
+                             node.index, timeout=30, coveragedir=node.coverage_dir)
+
+    def arm_repair(self, rpc, scope="full", override=False, shutdown=True):
+        plan = rpc.repairnode(True, "", scope)
+        return rpc.repairnode(False, plan["confirm_token"], scope, override, shutdown)
 
     # ---- the contract ------------------------------------------------
 
@@ -178,7 +214,7 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         # Reconnection + a tip advance is what declares recovery and resets
         # the ladder (design 3.5).
         self.connect_nodes(0, 1)
-        self.generate(self.nodes[1], 1, sync_fun=self.no_op)
+        self.mine(1, 1)
         self.sync_blocks()
         self.wait_for_finding(0, "NET_ISOLATED", present=False)
         s = self.status(0)
@@ -196,8 +232,9 @@ class RecoverySelfHealTest(BitcoinTestFramework):
 
         # Push the clock far past the cadence-relative TIP_STALLED floor
         # (max(60 min, 30x observed spacing)) without producing a block.
-        node.setmocktime(int(time.time()) + 6 * 60 * 60)
-        self.nodes[1].setmocktime(int(time.time()) + 6 * 60 * 60)
+        self.mocktime += 6 * 60 * 60
+        for n in self.nodes:
+            n.setmocktime(self.mocktime)
         self.wait_for_finding(0, "TIP_STALLED_NONNETWORK", present=True)
 
         s = self.status(0)
@@ -217,16 +254,13 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         assert_equal(node.getblockcount(), height_before)
         assert_equal(len(node.getchaintips()), 1)
 
-        node.setmocktime(0)
-        self.nodes[1].setmocktime(0)
-
     # ---- C1: quarantine ---------------------------------------------
 
     def test_quarantine_gates(self):
         self.log.info("C1: sapling drift -> quarantine; assert every duty gate")
         node = self.nodes[0]
         self.disconnect_nodes(0, 1)
-        self.generate(node, 6, sync_fun=self.no_op)
+        self.mine(0, 6)
         target = node.getblockhash(node.getblockcount() - 2)
 
         node.recovery_inducedrift("sapling")
@@ -253,7 +287,7 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         assert_raises_rpc_error(RPC_IN_QUARANTINE, "quarantined", node.getblocktemplate)
         addr = node.get_wallet_rpc(self.default_wallet_name).getnewaddress()
         assert_raises_rpc_error(RPC_IN_QUARANTINE, "quarantined",
-                                node.generatetoaddress, 1, addr)
+                                node.generatetoaddress, 1, addr, invalid_call=False)
 
         # 5.2.5 broadcast fails explicitly rather than silently.
         assert_raises_rpc_error(RPC_IN_QUARANTINE, "quarantined",
@@ -272,16 +306,19 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         self.stop_node(0)
         # Restart WITHOUT the framework's readiness wait: init parks in
         # crippled_wait, so RPC never leaves warmup.
-        node.start(extra_args=self.extra_args[0])
+        node.start(extra_args=self.node_args(0))
+        rpc = None
         deadline = time.time() + 60 * self.options.timeout_factor
         while time.time() < deadline:
             try:
-                if node.getrecoverystatus()["daemon_mode"] == "crippled_wait":
+                rpc = self.warmup_rpc(0)
+                if rpc.getrecoverystatus()["daemon_mode"] == "crippled_wait":
                     break
             except Exception:
-                pass
+                rpc = None
             time.sleep(0.25)
-        s = node.getrecoverystatus()
+        assert rpc is not None, "warmup RPC never came up in crippled_wait"
+        s = rpc.getrecoverystatus()
         assert_equal(s["daemon_mode"], "crippled_wait")
         assert_equal(s["recommended_action"], "ACTION_GUIDED_REPAIR")
         assert "DRIFT_SAPLING" in [f["code"] for f in s["findings"]]
@@ -289,14 +326,21 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         # 7.5: exactly two commands are warmup-callable; everything else --
         # including unknown methods -- still throws RPC_IN_WARMUP so nothing
         # new is probeable pre-init.
-        assert_raises_rpc_error(RPC_IN_WARMUP, None, node.getblockcount)
-        assert_raises_rpc_error(RPC_IN_WARMUP, None, node.getpeerinfo)
-        assert_raises_rpc_error(RPC_IN_WARMUP, None, node.getblockchaininfo)
-        node.repairnode(True)  # must not raise
+        assert_raises_rpc_error(RPC_IN_WARMUP, None, rpc.getblockcount)
+        assert_raises_rpc_error(RPC_IN_WARMUP, None, rpc.getpeerinfo)
+        assert_raises_rpc_error(RPC_IN_WARMUP, None, rpc.getblockchaininfo)
+        # Unknown methods keep returning RPC_IN_WARMUP too, so the new
+        # pre-init surface reveals nothing about the command table.
+        try:
+            rpc.nosuchmethod_recovery_probe()
+            raise AssertionError("unknown method did not raise during warmup")
+        except JSONRPCException as e:
+            assert_equal(e.error["code"], RPC_IN_WARMUP)
+        rpc.repairnode(True)  # must not raise
 
         self.log.info("guided repair: arm, wipe at SHUTDOWN, resync fresh")
         chain_dir = self.chain_path(0)
-        res = self.arm_repair(0, shutdown=True)
+        res = self.arm_repair(rpc, shutdown=True)
         assert_equal(res["armed"], True)
         assert_equal(res["result"], "ARMED")
         assert_equal(res["shutdown_initiated"], True)
@@ -317,7 +361,7 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         assert_equal(len(ledger["attempts"]), 1)
         assert_equal(len(ledger["wipes"]), 1)
 
-        self.start_node(0, extra_args=self.extra_args[0])
+        self.start_node(0, extra_args=self.node_args(0))
         # The done-marker is consumed by the next start.
         assert not os.path.exists(os.path.join(chain_dir, "repair_marker.done.json"))
         assert_equal(self.nodes[0].getblockcount(), 0)
@@ -328,20 +372,41 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         # every wiped directory).
         assert s["repair"]["phase"] in ["syncing", "rebuilding_witnesses", "verifying", "done"]
 
+        # W1 (6.4): once the resync leaves IBD the flow must pass through the
+        # explicit witness-rebuild stage rather than silently declaring done --
+        # a preserved wallet's per-note Sapling witnesses were built against
+        # the pre-wipe chain.
+        self.mine(0, 3)
+        seen = set()
+        deadline = time.time() + 60 * self.options.timeout_factor
+        while time.time() < deadline:
+            seen.add(self.status(0)["repair"]["phase"])
+            if seen & {"verifying", "done"}:
+                break
+            time.sleep(0.25)
+        assert "rebuilding_witnesses" in seen, f"witness stage skipped; phases seen: {seen}"
+        # Phases advance in the documented order; the guard counters only
+        # reset on VERIFIED health, so "done" is not required here (this node
+        # is deliberately isolated and still carries findings).
+        assert seen & {"verifying", "done"}, f"repair never advanced past the witness stage: {seen}"
+        # The wallet survived the wipe and is usable again.
+        assert_greater_than_or_equal(
+            len(self.nodes[0].get_wallet_rpc(self.default_wallet_name).getnewaddress()), 1)
+
     # ---- wipe-rate guard ---------------------------------------------
 
     def test_wipe_rate_guard(self):
         self.log.info("6.6: wipe-rate guard refuses the 3rd wipe and ledgers the override")
         node = self.nodes[0]
         # One wipe is already on the ledger from the guided-repair case.
-        res = self.arm_repair(0, shutdown=True)
+        res = self.arm_repair(node, shutdown=True)
         assert_equal(res["result"], "ARMED")
         node.wait_until_stopped()
-        self.start_node(0, extra_args=self.extra_args[0])
+        self.start_node(0, extra_args=self.node_args(0))
         assert_equal(self.status(0)["guards"]["wipes_in_window"], 2)
 
         # Third attempt inside the 7-day window: refused.
-        res = self.arm_repair(0, shutdown=False)
+        res = self.arm_repair(self.nodes[0], shutdown=False)
         assert_equal(res["armed"], False)
         assert_equal(res["result"], "REPAIR_RATE_LIMITED")
         assert not os.path.exists(os.path.join(self.chain_path(0), "repair_marker.json"))
@@ -354,7 +419,7 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         assert_equal(finding["evidence"]["wipes_max"], 2)
 
         # The explicit override works and is recorded in the ledger.
-        res = self.arm_repair(0, override=True, shutdown=False)
+        res = self.arm_repair(self.nodes[0], override=True, shutdown=False)
         assert_equal(res["armed"], True)
         assert_equal(res["result"], "ARMED")
         assert_equal(self.status(0)["daemon_mode"], "repair_armed")

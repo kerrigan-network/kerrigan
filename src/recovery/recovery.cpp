@@ -445,12 +445,16 @@ RecoveryManager::RecoveryManager()
 {
     LOCK(m_mutex);
     // The auto engine is meaningless when the operator has deliberately
-    // pinned connectivity (-connect) or disabled networking (-networkactive=0
-    // / -nolisten with no outbounds): rotation and re-seed cannot help, and
-    // raising NET_ISOLATED for an intentionally isolated node is noise. The
-    // diagnosis engine and the RPC contract stay live either way.
-    m_selfheal_enabled = gArgs.GetBoolArg("-selfheal", true) && !gArgs.IsArgSet("-connect") &&
-                         gArgs.GetBoolArg("-networkactive", true);
+    // pinned connectivity (-connect, which stops ThreadOpenConnections from
+    // refilling outbound slots at all) or disabled networking
+    // (-networkactive=0): rotation and re-seed cannot help, and raising
+    // NET_ISOLATED for an intentionally isolated node is noise. An explicit
+    // -selfheal=1 overrides the inference (used by the regtest suite, which
+    // sets connect=0 in every datadir). The diagnosis engine and the RPC
+    // contract stay live either way.
+    const bool selfheal_arg = gArgs.GetBoolArg("-selfheal", true);
+    const bool connectivity_pinned = gArgs.IsArgSet("-connect") || !gArgs.GetBoolArg("-networkactive", true);
+    m_selfheal_enabled = selfheal_arg && (gArgs.IsArgSet("-selfheal") || !connectivity_pinned);
 
     // Resume repair-phase tracking across the restart (6.3): the ledger's
     // repair_state survives the wipe because it lives in the datadir root.
@@ -591,14 +595,19 @@ void RecoveryManager::EnterQuarantine(QuarantineReason reason, const std::string
         break;
     } // no default case, so the compiler can warn about missing cases
 
+    // STARTUP_DRIFT does not know which cache drifted; the caller encodes it
+    // in the detail string (which is also what the operator sees in the log).
+    if (reason == QuarantineReason::STARTUP_DRIFT &&
+        (debug_detail.find("sapling") != std::string::npos ||
+         debug_detail.find("Sapling") != std::string::npos)) {
+        code = FindingCode::DRIFT_SAPLING;
+    }
+
     Finding f;
     f.code = code;
     f.since = now;
     f.debug_detail = debug_detail;
-    if (debug_detail.find("sapling") != std::string::npos || debug_detail.find("Sapling") != std::string::npos) {
-        f.code = FindingCode::DRIFT_SAPLING;
-    }
-    UpsertFinding(f.code, std::move(f));
+    UpsertFinding(code, std::move(f));
 
     if (!m_init_complete) {
         // 5.3: startup drift -> crippled_wait. Init parks with RPC (the
@@ -662,6 +671,15 @@ bool RecoveryManager::StartupDiagnosisPending() const
     return m_startup_diagnosis;
 }
 
+//! Set once RunCrippledWait() returns; read after the manager is destroyed,
+//! so it deliberately lives outside RecoveryManager.
+static std::atomic<bool> g_crippled_wait_released{false};
+
+bool CrippledWaitWasReleased()
+{
+    return g_crippled_wait_released.load(std::memory_order_acquire);
+}
+
 void RecoveryManager::RunCrippledWait()
 {
     {
@@ -680,6 +698,7 @@ void RecoveryManager::RunCrippledWait()
     while (!ShutdownRequested()) {
         UninterruptibleSleep(std::chrono::milliseconds{200});
     }
+    g_crippled_wait_released.store(true, std::memory_order_release);
     LogPrintf("recovery: crippled_wait released by shutdown request\n");
 }
 
@@ -1280,6 +1299,9 @@ ArmResult RecoveryManager::RepairArm(const std::string& confirm_token, const std
         LOCK(m_mutex);
         m_repair_phase = RepairPhase::FAILED;
         SetLedgerRepairState("failed");
+        Signals sig;
+        sig.now = now;
+        PublishSnapshot(sig);
         return ArmResult::ATTEMPTS_EXHAUSTED;
     }
     if (!network_scope && wipes >= REPAIR_WIPES_MAX && !override_rate_limit) {
@@ -1301,6 +1323,11 @@ ArmResult RecoveryManager::RepairArm(const std::string& confirm_token, const std
         }
         f.debug_detail = "wipe-rate guard: 2 completed wipes within 7 days";
         UpsertFinding(FindingCode::REPAIR_RATE_LIMITED, std::move(f));
+        // Republish immediately: the very next getrecoverystatus must carry
+        // the refusal, without waiting for the diagnosis tick.
+        Signals sig;
+        sig.now = now;
+        PublishSnapshot(sig);
         return ArmResult::RATE_LIMITED;
     }
 

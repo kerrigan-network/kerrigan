@@ -18,6 +18,7 @@
 #include <node/context.h>
 #include <node/interface_ui.h>
 #include <noui.h>
+#include <recovery/recovery.h>
 #include <shutdown.h>
 #include <util/check.h>
 #include <util/syserror.h>
@@ -249,9 +250,15 @@ static bool AppInit(NodeContext& node, int argc, char* argv[])
         WaitForShutdown();
     }
     Interrupt(node);
+    // WS-HEAL v2 5.3/6.2: a crippled_wait session that the operator resolved
+    // (repairnode + stop, or a plain stop) is an orderly shutdown, not a
+    // crash. Shutdown() below still runs the marker-driven wipe; reporting
+    // EXIT_FAILURE here would make supervisors and the managing wallet treat
+    // an intentional repair as a startup crash loop.
+    const bool orderly_recovery_exit = recovery::CrippledWaitWasReleased();
     Shutdown(node);
 
-    return fRet;
+    return fRet || orderly_recovery_exit;
 }
 
 MAIN_FUNCTION

@@ -332,6 +332,11 @@ void NoteBuiltinStallEviction();
  *  surface NODE_ABORTED / ACTION_CHECK_DISK (C2 handling). Never throws. */
 void RecordAbortReason(const std::string& reason);
 
+/** Whether this process parked in crippled_wait and was released by an
+ *  operator/front-end shutdown request. Callers use it to report an orderly
+ *  exit (EXIT_SUCCESS) for an intentional repair rather than a startup crash. */
+[[nodiscard]] bool CrippledWaitWasReleased();
+
 /** Startup (pre-DB-open): finish any interrupted marker-driven wipe, sweep
  *  leftover rename-tombstones, and consume a marker left by a headless
  *  restart. Returns false only on unrecoverable filesystem errors. */
