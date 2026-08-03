@@ -153,6 +153,15 @@ for name in os.listdir(bindir):
         with open(p, 'wb') as f: f.write(data.replace(src, new + pad))
 " "$SRCDIR" "$outdir/bin"
 
+    # Identity-shield hard gate: no /home/<user>/ path may survive in ANY binary.
+    # Belt-and-suspenders behind the qt_prfxpath sanitize + --remap flags: turns a
+    # silent qmake/DWARF leak into a build failure (cf. v1.0.x /home/raw, v1.1.2 /home/andrew).
+    for _b in "$outdir/bin/"*; do
+        if LC_ALL=C strings "$_b" 2>/dev/null | grep -qE '/home/[a-z]'; then
+            error "$tag: /home/ path leaked in $(basename "$_b") after sanitize (identity-shield gate)"
+        fi
+    done
+
     # Portability gate: fail if any binary needs a glibc newer than the floor.
     # depends/ does not supply libc, so a Linux build links the host glibc; on a
     # modern host the binaries silently require a too-new glibc and won't run on
@@ -281,6 +290,16 @@ PYEOF
                 src/kerrigand.exe src/kerrigan-cli.exe src/kerrigan-tx.exe \
                 src/kerrigan-wallet.exe src/kerrigan-util.exe \
                 src/qt/kerrigan-qt.exe
+
+            # Identity-shield hard gate (mirrors build_linux): fail on ANY surviving
+            # /home/ path -- catches a qt_prfxpath sanitize miss ($SRC mismatch) before
+            # it reaches the zip/NSIS installer. Runs inside the build container.
+            for _b in src/kerrigand.exe src/kerrigan-cli.exe src/kerrigan-tx.exe \
+                      src/kerrigan-wallet.exe src/kerrigan-util.exe src/qt/kerrigan-qt.exe; do
+                if LC_ALL=C strings "$_b" 2>/dev/null | grep -qE "/home/[a-z]"; then
+                    echo "FATAL: /home/ path leaked in $_b after qt_prfxpath sanitize"; exit 1
+                fi
+            done
 
             out="$RELEASE/kerrigan-$VERSION-win64"
             rm -rf "$out"
