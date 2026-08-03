@@ -28,6 +28,8 @@
 #include <validation.h>
 
 #include <cstdint>
+#include <tuple>
+#include <vector>
 
 #include <QDebug>
 #include <QMetaObject>
@@ -62,6 +64,21 @@ ClientModel::ClientModel(interfaces::Node& node, OptionsModel *_optionsModel, QO
     connect(m_thread, &QThread::started, [timer] { timer->start(); });
     // move timer to thread so that polling doesn't disturb main event loop
     timer->moveToThread(m_thread);
+
+    // Recovery (self-heal) status poll (WS-HEAL v2 8.2): same pattern as the
+    // mempool timer above, but on a slower cadence - the daemon republishes
+    // its snapshot on a ~30 s diagnosis tick and on state transitions, and
+    // the snapshot fetch is a plain-data copy (no cs_main).
+    QTimer* recovery_timer = new QTimer;
+    recovery_timer->setInterval(RECOVERY_STATUS_POLL_DELAY);
+    connect(recovery_timer, &QTimer::timeout, [this] { pollRecoveryStatus(); });
+    connect(m_thread, &QThread::finished, recovery_timer, &QObject::deleteLater);
+    connect(m_thread, &QThread::started, [recovery_timer] { recovery_timer->start(); });
+    recovery_timer->moveToThread(m_thread);
+    // Prime the cache promptly so the GUI banner reflects reality right
+    // after startup instead of waiting a full poll interval.
+    QTimer::singleShot(0, recovery_timer, [this] { pollRecoveryStatus(); });
+
     m_thread->start();
     QTimer::singleShot(0, timer, []() {
         util::ThreadRename("qt-clientmodl");
@@ -210,6 +227,48 @@ BlockSource ClientModel::getBlockSource() const
 QString ClientModel::getStatusBarWarnings() const
 {
     return QString::fromStdString(m_node.getWarnings().translated);
+}
+
+recovery::StatusSnapshot ClientModel::getRecoveryStatus() const
+{
+    LOCK(m_recovery_mutex);
+    return m_recovery_status;
+}
+
+void ClientModel::pollRecoveryStatus()
+{
+    const recovery::StatusSnapshot snap = m_node.getRecoveryStatus();
+
+    // Material-change key: the fields the GUI renders its banner/dialog off.
+    // Heights count as material only while a repair is in flight (the banner
+    // shows resync progress then); otherwise routine IBD ticks stay silent.
+    const auto key = [](const recovery::StatusSnapshot& s) {
+        std::vector<int> codes;
+        codes.reserve(s.findings.size());
+        for (const recovery::Finding& f : s.findings) codes.push_back(static_cast<int>(f.code));
+        const bool repair_in_flight = s.repair_phase != recovery::RepairPhase::NONE &&
+                                      s.repair_phase != recovery::RepairPhase::DONE;
+        return std::make_tuple(static_cast<int>(s.daemon_mode), static_cast<int>(s.recommended_action),
+                               static_cast<int>(s.repair_phase), std::move(codes),
+                               s.witnesses_rebuilt, s.witnesses_total,
+                               repair_in_flight ? s.height : 0,
+                               repair_in_flight ? s.target_height : 0);
+    };
+
+    bool changed{false};
+    bool needs_attention{false};
+    {
+        LOCK(m_recovery_mutex);
+        changed = key(snap) != key(m_recovery_status);
+        const bool was_alarming = m_recovery_status.daemon_mode == recovery::DaemonMode::QUARANTINED ||
+                                  m_recovery_status.daemon_mode == recovery::DaemonMode::CRIPPLED_WAIT;
+        const bool is_alarming = snap.daemon_mode == recovery::DaemonMode::QUARANTINED ||
+                                 snap.daemon_mode == recovery::DaemonMode::CRIPPLED_WAIT;
+        needs_attention = is_alarming && !was_alarming;
+        m_recovery_status = snap;
+    }
+    if (changed) Q_EMIT recoveryStatusChanged();
+    if (needs_attention) Q_EMIT recoveryNeedsAttention();
 }
 
 OptionsModel *ClientModel::getOptionsModel()

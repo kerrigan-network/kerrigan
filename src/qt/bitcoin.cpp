@@ -27,8 +27,10 @@
 #include <qt/intro.h>
 #include <qt/networkstyle.h>
 #include <qt/optionsmodel.h>
+#include <qt/repairdialog.h>
 #include <qt/splashscreen.h>
 #include <qt/utilitydialog.h>
+#include <recovery/recovery.h>
 #include <qt/winshutdownmonitor.h>
 #include <stacktraces.h>
 #include <uint256.h>
@@ -349,6 +351,38 @@ void BitcoinApplication::requestInitialize()
     qDebug() << __func__ << ": Requesting initialize";
     startThread();
     Q_EMIT requestedInitialize();
+
+    // WS-HEAL v2 8.2 (startup path): if init diagnoses corruption it parks
+    // the init thread in crippled_wait (RunCrippledWait) and appInitMain does
+    // not return - so the GUI thread must discover the state itself. The
+    // recovery snapshot is plain data (no cs_main), safe to poll mid-init.
+    m_startup_recovery_timer = new QTimer(this);
+    connect(m_startup_recovery_timer, &QTimer::timeout, this, &BitcoinApplication::pollStartupRecovery);
+    m_startup_recovery_timer->start(STARTUP_RECOVERY_POLL_DELAY);
+}
+
+void BitcoinApplication::pollStartupRecovery()
+{
+    if (m_startup_repair_prompted) return;
+    const recovery::StatusSnapshot snap = node().getRecoveryStatus();
+    if (snap.daemon_mode != recovery::DaemonMode::CRIPPLED_WAIT) return;
+
+    m_startup_repair_prompted = true;
+    m_startup_recovery_timer->stop();
+
+    // The init thread is parked in RunCrippledWait(); it returns only when
+    // shutdown is requested. Offer the repair dialog now (GUI thread).
+    RepairDialog dlg(node(), RepairDialog::Context::Startup,
+                     RepairDialog::scopeForAction(snap.recommended_action),
+                     /*parent=*/nullptr);
+    if (dlg.exec() == QDialog::Accepted && dlg.repairArmed()) {
+        // Marker written. Route initializeResult(false) to a relaunch.
+        m_repair_relaunch = true;
+    }
+    // Release the parked init thread either way: appInitMain returns false
+    // and initializeResult(false) then relaunches (repair armed) or shuts
+    // down cleanly (user declined - same as declining the rebuild question).
+    node().startShutdown();
 }
 
 void BitcoinApplication::requestShutdown()
@@ -405,6 +439,13 @@ void BitcoinApplication::initializeResult(bool success, interfaces::BlockAndHead
 {
     qDebug() << __func__ << ": Initialization result: " << success;
 
+    // The crippled-wait watcher is only needed while init is in flight.
+    if (m_startup_recovery_timer) {
+        m_startup_recovery_timer->stop();
+        m_startup_recovery_timer->deleteLater();
+        m_startup_recovery_timer = nullptr;
+    }
+
     // Set exit result.
     returnValue = success ? EXIT_SUCCESS : EXIT_FAILURE;
     if(success) {
@@ -455,6 +496,22 @@ void BitcoinApplication::initializeResult(bool success, interfaces::BlockAndHead
 #endif
         pollShutdownTimer->start(SHUTDOWN_POLLING_DELAY);
     } else {
+        if (m_repair_relaunch) {
+            // Intentional startup repair (WS-HEAL v2 8.2): the marker is
+            // written and the parked init thread was released, so
+            // shutdownRequested() is already true - which is exactly why this
+            // path must NOT go through BitcoinGUI::handleRestart (it refuses
+            // once shutdown is requested). Invoke InitExecutor::restart
+            // directly: it runs appPrepareShutdown() (idempotent; releases
+            // the datadir locks because a restart was flagged), relaunches
+            // the executable, and exits this process. The relaunched process
+            // finds the repair marker and wipes before opening any database.
+            returnValue = EXIT_SUCCESS; // intentional repair, not a startup crash
+            delete m_splash;
+            m_splash = nullptr;
+            m_executor->restart(GUIUtil::getRestartCommandLineArgs());
+            return;
+        }
         requestShutdown();
     }
 }
@@ -527,6 +584,22 @@ int GuiMain(int argc, char* argv[])
 
     SetupEnvironment();
     util::ThreadSetInternalName("main");
+
+    // WS-HEAL v2 7.3/8.2: in the GUI build, `repairnode {shutdown:true}` is
+    // refused (RPC_INVALID_PARAMETER). The GUI owns its clean
+    // shutdown+relaunch through the InitExecutor restart chain, and a
+    // daemon-side StartShutdown() would make BitcoinGUI::handleRestart
+    // refuse to restart. Set before any RPC server can execute commands.
+    recovery::SetRepairShutdownRejected();
+
+    // PARK-VS-EXIT (owner decision, 2026-07-31): the GUI/wallet is a managed
+    // frontend that can offer a one-click Repair, so on a self-heal fault
+    // (chainstate load failure, runtime consistency drift, or a persisted
+    // quarantine) it PARKS the node (crippled_wait/quarantine: process stays
+    // alive with RPC up and P2P off) rather than exiting. Headless kerrigand
+    // leaves this false and instead exits non-zero so systemd/monitoring
+    // catches the fault. Set once, before any fault path or RPC can run.
+    recovery::SetParkOnFault(true);
 
     // Subscribe to global signals from core
     boost::signals2::scoped_connection handler_message_box = ::uiInterface.ThreadSafeMessageBox_connect(noui_ThreadSafeMessageBox);

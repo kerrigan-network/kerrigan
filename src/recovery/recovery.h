@@ -67,6 +67,13 @@ enum class FindingCode {
     TIP_STALLED_NONNETWORK,
     DRIFT_EVODB,
     DRIFT_SAPLING,
+    //! RESERVED, never raised by the daemon. The "shielded funds temporarily
+    //! unspendable" state is conveyed by `repair.phase ==
+    //! rebuilding_witnesses`, which the front-ends already render; raising a
+    //! finding for it would additionally flip daemon_mode to `degraded`
+    //! mid-repair (findings drive that discriminator) and mis-key the
+    //! degraded banner copy. Kept in the enum + front-end copy tables so a
+    //! future wallet-side staleness signal has an id to use.
     WITNESS_STALE,
     REPAIR_RATE_LIMITED,
     CHAINSTATE_LOAD_FAILED, //!< startup chainstate load/verify failure (crippled_wait)
@@ -222,13 +229,22 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     //! Record a startup chainstate-load failure (feeds CHAINSTATE_LOAD_FAILED
-    //! + crippled_wait).
-    void RecordStartupLoadFailure(const std::string& load_error_id, const std::string& debug_detail)
+    //! + crippled_wait). `disk_class` is true for IO/permission/open faults
+    //! (routes to ACTION_CHECK_DISK, NEVER a wipe -- wiping cannot fix a bad
+    //! disk and risks nuking recoverable data on failing hardware) and false
+    //! only for genuine logical corruption (routes to ACTION_GUIDED_REPAIR).
+    void RecordStartupLoadFailure(const std::string& load_error_id, const std::string& debug_detail,
+                                  bool disk_class)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     //! Whether startup diagnosis requested crippled_wait (drift or load
     //! failure recorded before init completed).
     [[nodiscard]] bool StartupDiagnosisPending() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    //! Whether a quarantine sentinel from a PREVIOUS run was found at
+    //! startup (B2: quarantine survives a plain restart). When true, init
+    //! must park the node in crippled_wait instead of returning it to duty.
+    [[nodiscard]] bool PersistedQuarantinePending() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     //! Park the init thread in crippled_wait: RPC (warmup-callable subset)
     //! serves diagnosis until shutdown is requested (typically by
@@ -249,6 +265,12 @@ public:
     [[nodiscard]] ArmResult RepairArm(const std::string& confirm_token, const std::string& scope,
                                       bool override_rate_limit)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    //! repairnode {disarm:true}: remove an armed-but-not-yet-executed repair
+    //! marker so the next shutdown does NOT wipe. Returns true when an armed
+    //! repair was actually cleared. The one in-band undo for an accidental
+    //! arm (an armed repair is otherwise executed by ANY subsequent
+    //! shutdown, crash or reboot).
+    bool RepairDisarm() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
     mutable Mutex m_mutex;
@@ -263,6 +285,7 @@ private:
 
     bool m_init_complete GUARDED_BY(m_mutex){false};
     bool m_startup_diagnosis GUARDED_BY(m_mutex){false};
+    bool m_persisted_quarantine GUARDED_BY(m_mutex){false};
     bool m_selfheal_enabled GUARDED_BY(m_mutex){true};
 
     // ---- published diagnosis ----
@@ -290,6 +313,13 @@ private:
     // handler thread, read by the tick.
     std::atomic<int64_t> m_last_builtin_stall_eviction{0};
 
+    // L1 link-probe worker state, shared with a detached probe thread so the
+    // blocking DNS/TCP work never runs on (or stalls) the CScheduler thread.
+    // 0 = idle, 1 = running, 2 = done/link-ok, 3 = done/link-down. The
+    // shared_ptr keeps the slot alive past manager destruction so a probe
+    // completing during shutdown writes into a still-valid atomic.
+    std::shared_ptr<std::atomic<int>> m_probe_state{std::make_shared<std::atomic<int>>(0)};
+
     // ---- repair state ----
     RepairPhase m_repair_phase GUARDED_BY(m_mutex){RepairPhase::NONE};
     std::string m_confirm_token GUARDED_BY(m_mutex);
@@ -299,18 +329,46 @@ private:
     bool m_repair_in_flight GUARDED_BY(m_mutex){false}; // wipe done, resync running
     int64_t m_verify_start_height GUARDED_BY(m_mutex){-1};
     bool m_witness_stage_triggered GUARDED_BY(m_mutex){false};
+    //! Guard counters, refreshed from the ledger OUTSIDE m_mutex (the ledger
+    //! is a file; no lock-held disk IO -- see the lock-order note above).
+    int m_guard_attempts_used GUARDED_BY(m_mutex){0};
+    int m_guard_wipes_in_window GUARDED_BY(m_mutex){0};
 
     // ---- helpers ----
     struct Signals; // tick-local plain-data signal collection
     Signals CollectSignals();
     void Classify(const Signals& sig) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    void AdvanceRepairPhases(const Signals& sig) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    //! fire_witness_trigger is set when the wallet witness-rebuild trigger
+    //! must run; the CALLER invokes it after releasing m_mutex (the trigger
+    //! takes cs_wallet/cs_main-adjacent locks -- never call it under
+    //! m_mutex, see the lock-order invariant above).
+    //!
+    //! NF-6: this method performs NO filesystem IO. Ledger writes are deferred
+    //! via the out-params and executed by the caller AFTER releasing m_mutex,
+    //! so a small fsync never stalls block processing (validation blocks on
+    //! m_mutex in EnterQuarantine while holding cs_main). `pending_repair_state`
+    //! (when non-empty) is the simple repair_state string to persist;
+    //! `finalize_verified_health` requests the verified-health ledger reset +
+    //! quarantine-sentinel clear.
+    void AdvanceRepairPhases(const Signals& sig, bool& fire_witness_trigger,
+                             std::string& pending_repair_state, bool& finalize_verified_health)
+        EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void PublishSnapshot(const Signals& sig) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void UpsertFinding(FindingCode code, Finding&& f) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void ClearFinding(FindingCode code) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     [[nodiscard]] bool HasFinding(FindingCode code) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    //! True iff a finding of `code` is present AND carries evidence
+    //! `disk_class == 1` (NF-3: disk/IO faults route to ACTION_CHECK_DISK).
+    [[nodiscard]] bool FindingIsDiskClass(FindingCode code) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
     void RotateOutbounds(const std::string& why) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    [[nodiscard]] bool ProbeLocalLink() const;
+    //! Re-read the ledger (file IO) and cache the guard counters. MUST be
+    //! called without m_mutex held; takes it only to store the results.
+    void RefreshGuardCounts() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    //! Launch the L1 link probe on a detached worker thread (M-scheduler:
+    //! blocking DNS/TCP must never run on the shared CScheduler thread).
+    //! No-op while a probe is already in flight; the result is applied by a
+    //! later tick via m_probe_state.
+    void LaunchLinkProbe();
 };
 
 /** The process-wide recovery manager. Created early in AppInitMain (before
@@ -336,6 +394,50 @@ void RecordAbortReason(const std::string& reason);
  *  operator/front-end shutdown request. Callers use it to report an orderly
  *  exit (EXIT_SUCCESS) for an intentional repair rather than a startup crash. */
 [[nodiscard]] bool CrippledWaitWasReleased();
+
+/** GUI-build guard (WS-HEAL v2 7.3/8.2): when set, `repairnode
+ *  {shutdown:true}` is refused with RPC_INVALID_PARAMETER so an RPC caller
+ *  cannot force the broken StartShutdown-before-restart ordering on a GUI
+ *  process. Kerrigan-Qt sets this once at startup; headless kerrigand never
+ *  does, keeping the documented headless convenience intact. One-way for the
+ *  process lifetime. */
+void SetRepairShutdownRejected();
+[[nodiscard]] bool IsRepairShutdownRejected();
+
+/** PARK-VS-EXIT frontend split (owner decision, 2026-07-31). A GUI/wallet-
+ *  managed node PARKS on a fault (crippled_wait / quarantine: process stays
+ *  alive with RPC up and P2P off) so the wallet can offer a one-click Repair.
+ *  A headless/daemon node instead EXITS with a clear diagnostic and a NON-ZERO
+ *  exit code, so systemd/monitoring/MN-alerting sees the failure (a silently
+ *  parked masternode drifts toward a PoSe ban invisibly).
+ *
+ *  Default is FALSE (headless => exit). Kerrigan-Qt's GuiMain sets it TRUE
+ *  next to SetRepairShutdownRejected; kerrigand leaves it false. A hidden
+ *  `-parkonfault` debug arg can force it true for regression tests that need
+ *  to exercise the park path under the headless binary. One-way / process
+ *  lifetime; must be set before any fault path can run. */
+void SetParkOnFault(bool park);
+[[nodiscard]] bool ParkOnFault();
+
+/** Headless runtime-fault terminal path (PARK-VS-EXIT, !ParkOnFault()). Used
+ *  at the runtime drift sites (validation.cpp DisconnectBlock/ConnectBlock)
+ *  and the synthetic test hook when the node must go DOWN rather than sit
+ *  parked-and-quarantined. It (1) engages the serving gates synchronously
+ *  (IsQuarantined() => true) so nothing drifted is served during the brief
+ *  shutdown window, (2) records the abort reason so the next start can surface
+ *  NODE_ABORTED, (3) emits the distinct greppable HEADLESS-FAULT-EXIT
+ *  diagnostic to the log and stderr, (4) requests a fatal AbortNode-style
+ *  shutdown, and (5) latches HeadlessFaultExitRequested() so the process exits
+ *  NON-ZERO even though startup had already succeeded. No quarantine sentinel
+ *  is written (a plain restart is not a park; the on-disk fault, if any,
+ *  re-triggers the headless exit until an operator repairs). */
+void NoteHeadlessFaultShutdown(const std::string& condition, const std::string& detail);
+
+/** True once a headless runtime fault took the AbortNode/NoteHeadlessFaultShutdown
+ *  path. Read in bitcoind.cpp AppInit to force a non-zero process exit code even
+ *  though AppInitMain (fRet) had succeeded, so the fault is not mistaken for a
+ *  clean shutdown. */
+[[nodiscard]] bool HeadlessFaultExitRequested();
 
 /** Startup (pre-DB-open): finish any interrupted marker-driven wipe, sweep
  *  leftover rename-tombstones, and consume a marker left by a headless

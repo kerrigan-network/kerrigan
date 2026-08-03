@@ -17,6 +17,14 @@ static constexpr auto MODEL_UPDATE_DELAY{250ms};
 /* A delay between shutdown pollings */
 static constexpr auto SHUTDOWN_POLLING_DELAY{200ms};
 
+/* A delay between recovery (self-heal) status polls; the daemon's own
+   diagnosis tick republishes its snapshot roughly every 30 s */
+static constexpr auto RECOVERY_STATUS_POLL_DELAY{5s};
+
+/* A delay between startup recovery polls while the init thread may park in
+   crippled_wait (pre-init corruption diagnosis) */
+static constexpr auto STARTUP_RECOVERY_POLL_DELAY{1s};
+
 /* AskPassphraseDialog -- Maximum passphrase length */
 static const int MAX_PASSPHRASE_SIZE = 1024;
 

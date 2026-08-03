@@ -48,6 +48,7 @@
 #include <policy/settings.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <recovery/recovery.h>
 #include <rpc/protocol.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
@@ -821,12 +822,37 @@ public:
     bool isLoadingBlocks() override { return node::fReindex || node::fImporting; }
     void setNetworkActive(bool active) override
     {
+        // Quarantine gate (WS-HEAL v2 5.2.1 / B3): this is the interface the
+        // GUI network menu drives. Re-enabling networking while quarantined
+        // would resume serving state the node proved inconsistent -- refuse
+        // here exactly like the setnetworkactive RPC does. Disabling stays
+        // allowed.
+        if (active && recovery::IsQuarantined()) {
+            LogPrintf("recovery: refusing to re-enable networking while quarantined "
+                      "(see getrecoverystatus)\n");
+            return;
+        }
         if (m_context->connman) {
             m_context->connman->SetNetworkActive(active, m_context->mn_sync.get());
         }
     }
     bool getNetworkActive() override { return m_context->connman && m_context->connman->GetNetworkActive(); }
     CFeeRate getDustRelayFee() override { return ::dustRelayFee; }
+    recovery::StatusSnapshot getRecoveryStatus() override
+    {
+        if (!recovery::g_recovery) return {}; // daemon_mode: STARTING
+        return recovery::g_recovery->GetStatusSnapshot();
+    }
+    recovery::RepairPlan repairDryRun(const std::string& scope) override
+    {
+        if (!recovery::g_recovery) return {}; // empty confirm_token == unavailable
+        return recovery::g_recovery->RepairDryRun(scope);
+    }
+    recovery::ArmResult repairArm(const std::string& confirm_token, const std::string& scope, bool override_rate_limit) override
+    {
+        if (!recovery::g_recovery) return recovery::ArmResult::BAD_TOKEN;
+        return recovery::g_recovery->RepairArm(confirm_token, scope, override_rate_limit);
+    }
     UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) override
     {
         JSONRPCRequest req;

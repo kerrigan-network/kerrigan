@@ -192,7 +192,12 @@ static RPCHelpMan stop()
     // Event loop will exit after current HTTP requests have been handled, so
     // this reply will get back to the client.
     StartShutdown();
-    if (jsonRequest.params[0].isNum()) {
+    // The hidden 'wait' argument is a post-warmup testing convenience only.
+    // `stop` is warmup-callable (so crippled_wait has an in-band exit), but
+    // honoring 'wait' during warmup would let an authenticated caller block an
+    // HTTP worker thread for an arbitrary duration before init completes
+    // (NF-10). Ignore it while warming up.
+    if (jsonRequest.params[0].isNum() && !RPCIsInWarmup(nullptr)) {
         UninterruptibleSleep(std::chrono::milliseconds{jsonRequest.params[0].getInt<int>()});
     }
     return RESULT;
@@ -268,7 +273,12 @@ static const CRPCCommand vRPCCommands[]{
     /* Overall control/query calls */
     {"control", &getrpcinfo},
     {"control", &help},
-    {"control", &stop},
+    // stop is warmup-callable so an operator always has an in-band,
+    // NON-destructive exit from crippled_wait (WS-HEAL v2): without it the
+    // only RPC-reachable way out of the diagnostic park is arming a wipe.
+    // The handler only sets the shutdown flag -- safe at any init phase
+    // (equivalent to SIGTERM, which init already honors everywhere).
+    {"control", &stop, /*ok_during_warmup=*/true},
     {"control", &uptime},
 };
 

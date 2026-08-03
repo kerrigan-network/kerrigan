@@ -258,6 +258,15 @@ static bool AppInit(NodeContext& node, int argc, char* argv[])
     const bool orderly_recovery_exit = recovery::CrippledWaitWasReleased();
     Shutdown(node);
 
+    // PARK-VS-EXIT (owner decision): a headless RUNTIME fault (consistency drift)
+    // took the AbortNode path AFTER startup had already succeeded (fRet==true),
+    // so the plain return below would report EXIT_SUCCESS and look like a clean
+    // shutdown. Force a NON-ZERO exit so systemd/monitoring/MN-alerting sees the
+    // failure. (Startup faults already return false from AppInitMain, i.e.
+    // fRet==false, and are covered by the return below.)
+    if (recovery::HeadlessFaultExitRequested()) {
+        return false;
+    }
     return fRet || orderly_recovery_exit;
 }
 

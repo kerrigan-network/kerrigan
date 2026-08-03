@@ -10,6 +10,7 @@
 #include <net_types.h>                 // For banmap_t
 #include <netaddress.h>                // For Network
 #include <netbase.h>                   // For ConnectionDirection
+#include <recovery/recovery.h>         // For recovery::{StatusSnapshot,RepairPlan,ArmResult}
 #include <saltedhasher.h>              // For StaticSaltedHasher
 #include <support/allocators/secure.h> // For SecureString
 #include <uint256.h>
@@ -386,6 +387,23 @@ public:
 
     //! Get dust relay fee.
     virtual CFeeRate getDustRelayFee() = 0;
+
+    //! Get the self-heal / recovery status snapshot (WS-HEAL v2 contract).
+    //! Plain-data copy; never touches cs_main/wallet/chainstate, safe to
+    //! call from the GUI thread at any point in the node lifecycle
+    //! (returns a default "starting" snapshot before the manager exists).
+    virtual recovery::StatusSnapshot getRecoveryStatus() = 0;
+
+    //! Guided repair dry-run: compute the wipe plan and mint a one-time
+    //! confirm token (5-minute TTL). An empty confirm_token in the result
+    //! means the recovery manager is unavailable.
+    virtual recovery::RepairPlan repairDryRun(const std::string& scope) = 0;
+
+    //! Arm the guided repair (writes the repair marker; never initiates
+    //! shutdown). Deliberately has NO shutdown parameter: in the GUI the
+    //! clean shutdown+relaunch is owned by the InitExecutor restart chain,
+    //! never by the daemon shutting itself down (WS-HEAL v2 8.2).
+    virtual recovery::ArmResult repairArm(const std::string& confirm_token, const std::string& scope, bool override_rate_limit) = 0;
 
     //! Execute rpc command.
     virtual UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) = 0;

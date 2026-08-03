@@ -29,6 +29,7 @@
 #include <qt/optionsdialog.h>
 #include <qt/optionsmodel.h>
 #include <qt/proposallist.h>
+#include <qt/repairdialog.h>
 #include <qt/rpcconsole.h>
 #include <qt/utilitydialog.h>
 
@@ -61,6 +62,7 @@
 #include <QMimeData>
 #include <QPixmap>
 #include <QProgressDialog>
+#include <QPushButton>
 #include <QScreen>
 #include <QSettings>
 #include <QStatusBar>
@@ -123,6 +125,10 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const NetworkStyle* networkStyle,
 
     rpcConsole = new RPCConsole(node, this, enableWallet ? Qt::Window : Qt::Widget);
     helpMessageDialog = new HelpMessageDialog(this, HelpMessageDialog::cmdline);
+
+    // Persistent recovery banner (WS-HEAL v2 8.2); hidden until the client
+    // model reports a degraded/quarantined/repairing daemon_mode.
+    m_recovery_banner = createRecoveryBanner();
 #ifdef ENABLE_WALLET
     if(enableWallet)
     {
@@ -144,9 +150,17 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const NetworkStyle* networkStyle,
 #endif // ENABLE_WALLET
     {
         /* When compiled without wallet or -disablewallet is provided,
-         * the central widget is the rpc console.
+         * the central widget is the rpc console (stacked below the
+         * recovery banner).
          */
-        setCentralWidget(rpcConsole);
+        QVBoxLayout* console_layout = new QVBoxLayout;
+        console_layout->setSpacing(0);
+        console_layout->setContentsMargins(QMargins());
+        console_layout->addWidget(m_recovery_banner);
+        console_layout->addWidget(rpcConsole);
+        QWidget* console_container = new QWidget();
+        console_container->setLayout(console_layout);
+        setCentralWidget(console_container);
         Q_EMIT consoleShown(rpcConsole);
     }
 
@@ -417,6 +431,11 @@ void BitcoinGUI::createActions()
     optionsAction->setMenuRole(QAction::PreferencesRole);
     optionsAction->setEnabled(false);
 
+    repairNodeAction = new QAction(tr("Repair &node…"), this);
+    repairNodeAction->setStatusTip(tr("Wipe damaged chain data and resync from the network (wallet preserved)"));
+    repairNodeAction->setEnabled(false);
+    connect(repairNodeAction, &QAction::triggered, this, &BitcoinGUI::showRepairNodeDialog);
+
     encryptWalletAction = new QAction(tr("&Encrypt Wallet…"), this);
     encryptWalletAction->setStatusTip(tr("Encrypt the private keys that belong to your wallet"));
     backupWalletAction = new QAction(tr("&Backup Wallet…"), this);
@@ -659,6 +678,8 @@ void BitcoinGUI::createMenuBar()
         settings->addSeparator();
     }
     settings->addAction(optionsAction);
+    settings->addSeparator();
+    settings->addAction(repairNodeAction);
 
     QMenu* window_menu = appMenuBar->addMenu(tr("&Window"));
 
@@ -818,6 +839,7 @@ void BitcoinGUI::createToolBars()
         */
         QVBoxLayout *layout = new QVBoxLayout;
         layout->addWidget(toolbar);
+        layout->addWidget(m_recovery_banner);
         layout->addWidget(walletFrame);
         layout->setSpacing(0);
         layout->setContentsMargins(QMargins());
@@ -888,6 +910,19 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
         // Show progress dialog
         connect(_clientModel, &ClientModel::showProgress, this, &BitcoinGUI::showProgress);
 
+        // Recovery (self-heal) status: keep the persistent banner in sync
+        // and raise a one-time modal when the node quarantines itself.
+        connect(_clientModel, &ClientModel::recoveryStatusChanged, this, &BitcoinGUI::updateRecoveryStatus);
+        connect(_clientModel, &ClientModel::recoveryNeedsAttention, this, [this] {
+            message(tr("Node paused for safety"),
+                    tr("Kerrigan found a problem with its local data and paused block processing "
+                       "to protect the network and itself. Your funds are safe. "
+                       "Use the Repair button to wipe the damaged data and resync."),
+                    CClientUIInterface::MSG_WARNING); // MSG_WARNING is modal
+        });
+        repairNodeAction->setEnabled(true);
+        updateRecoveryStatus();
+
         rpcConsole->setClientModel(_clientModel, tip_info->block_height, tip_info->block_time, tip_info->block_hash, tip_info->verification_progress);
 
         updateProxyIcon();
@@ -925,6 +960,8 @@ void BitcoinGUI::setClientModel(ClientModel *_clientModel, interfaces::BlockAndH
             trayIconMenu->clear();
         }
         // Propagate cleared model to child objects
+        repairNodeAction->setEnabled(false);
+        if (m_recovery_banner) m_recovery_banner->setVisible(false);
         rpcConsole->setClientModel(nullptr);
 #ifdef ENABLE_WALLET
         if (walletFrame)
@@ -2270,6 +2307,166 @@ void BitcoinGUI::handleRestart(QStringList args)
 {
     if (!m_node.shutdownRequested())
         Q_EMIT requestedRestart(args);
+}
+
+QWidget* BitcoinGUI::createRecoveryBanner()
+{
+    QWidget* banner = new QWidget(this);
+    banner->setObjectName("recoveryBanner");
+    // A plain QWidget only paints stylesheet backgrounds with this set.
+    banner->setAttribute(Qt::WA_StyledBackground, true);
+
+    QHBoxLayout* layout = new QHBoxLayout(banner);
+    layout->setContentsMargins(12, 6, 12, 6);
+    layout->setSpacing(12);
+
+    m_recovery_banner_label = new QLabel(banner);
+    m_recovery_banner_label->setWordWrap(true);
+    layout->addWidget(m_recovery_banner_label, /*stretch=*/1);
+
+    m_recovery_banner_button = new QPushButton(banner);
+    connect(m_recovery_banner_button, &QPushButton::clicked, this, &BitcoinGUI::showRepairNodeDialog);
+    layout->addWidget(m_recovery_banner_button);
+
+    banner->setVisible(false);
+    return banner;
+}
+
+void BitcoinGUI::updateRecoveryStatus()
+{
+    if (!clientModel || !m_recovery_banner) return;
+    const recovery::StatusSnapshot snap = clientModel->getRecoveryStatus();
+
+    enum class Severity { HIDDEN, INFO, WARNING, CRITICAL };
+    Severity severity{Severity::HIDDEN};
+    QString text;
+    QString button_text; // empty = no button
+
+    // A repair armed in a previous run is "in flight" until it verifies:
+    // surface its progress even while daemon_mode itself reads as
+    // starting/syncing/normal. Progress comes from repair.phase (a step
+    // description) - never a fabricated percentage.
+    const bool repair_in_flight = snap.repair_phase != recovery::RepairPhase::NONE &&
+                                  snap.repair_phase != recovery::RepairPhase::DONE;
+
+    switch (snap.daemon_mode) {
+    case recovery::DaemonMode::STARTING:
+    case recovery::DaemonMode::SYNCING:
+    case recovery::DaemonMode::NORMAL:
+        if (repair_in_flight) {
+            if (snap.repair_phase == recovery::RepairPhase::FAILED) {
+                severity = Severity::CRITICAL;
+                text = tr("Repair failed — see debug.log. You can run the repair again.");
+                button_text = tr("Repair…");
+            } else {
+                severity = Severity::INFO;
+                text = tr("Repair in progress — %1").arg(RepairDialog::phaseText(snap.repair_phase));
+                if (snap.repair_phase == recovery::RepairPhase::SYNCING && snap.target_height > 0) {
+                    // real observed heights, not an estimate
+                    text += tr(" (height %1 of %2)").arg(snap.height).arg(snap.target_height);
+                } else if (snap.repair_phase == recovery::RepairPhase::REBUILDING_WITNESSES) {
+                    text += QStringLiteral(" — ") + RepairDialog::witnessProgressText(snap.witnesses_rebuilt, snap.witnesses_total);
+                }
+            }
+        }
+        break;
+    case recovery::DaemonMode::DEGRADED:
+        severity = Severity::WARNING;
+        text = tr("Reconnecting — the node lost its network connections and is repairing them automatically.");
+        if (snap.recommended_action != recovery::RecommendedAction::ACTION_NONE &&
+            snap.recommended_action != recovery::RecommendedAction::ACTION_WAIT_AUTO) {
+            text = tr("Needs attention — %1").arg(RepairDialog::actionText(snap.recommended_action));
+        }
+        // Only actions that actually route to the guided-repair flow get a
+        // button. ACTION_WAIT_AUTO / ACTION_NONE are informational
+        // ("recovering, no action needed") and ACTION_DIAGNOSE_SUPPORT is a
+        // read-the-logs state -- none of them may open the wipe dialog
+        // (UI M-3: a wait-auto banner previously offered a full-wipe
+        // "Details…" because scopeForAction defaults to "full").
+        switch (snap.recommended_action) {
+        case recovery::RecommendedAction::ACTION_GUIDED_REPAIR:
+        case recovery::RecommendedAction::ACTION_GUIDED_NETWORK_REPAIR:
+        case recovery::RecommendedAction::ACTION_CHECK_DISK:
+            button_text = tr("Repair…");
+            break;
+        case recovery::RecommendedAction::ACTION_NONE:
+        case recovery::RecommendedAction::ACTION_WAIT_AUTO:
+        case recovery::RecommendedAction::ACTION_DIAGNOSE_SUPPORT:
+        case recovery::RecommendedAction::ACTION_MANAGE_NODE_ELSEWHERE:
+            break;
+        } // no default case, so the compiler can warn about missing cases
+        break;
+    case recovery::DaemonMode::QUARANTINED:
+        severity = Severity::CRITICAL;
+        text = tr("Paused for safety — the node found a data problem and stopped block processing. Your funds are safe.");
+        button_text = tr("Repair…");
+        break;
+    case recovery::DaemonMode::CRIPPLED_WAIT:
+        // Deliberately NOT a normal "loading" state (7.4): startup found
+        // damage and is holding for a repair decision.
+        severity = Severity::CRITICAL;
+        text = tr("Startup found damaged data — the node is waiting for repair.");
+        button_text = tr("Repair…");
+        break;
+    case recovery::DaemonMode::REPAIR_ARMED:
+        severity = Severity::WARNING;
+        text = tr("Repair armed — restarting to repair…");
+        break;
+    } // no default case, so the compiler can warn about missing cases
+
+    if (severity == Severity::HIDDEN) {
+        m_recovery_banner->setVisible(false);
+        return;
+    }
+
+    QString background;
+    QString foreground{QStringLiteral("#ffffff")};
+    switch (severity) {
+    case Severity::INFO: background = QStringLiteral("#2d5f8a"); break;     // blue: informational progress
+    case Severity::WARNING: background = QStringLiteral("#a87d1f"); break;  // amber: degraded / restarting
+    case Severity::CRITICAL: background = QStringLiteral("#8a2d2d"); break; // red: quarantined / repair needed
+    case Severity::HIDDEN: break;
+    }
+    m_recovery_banner->setStyleSheet(
+        QStringLiteral("QWidget#recoveryBanner { background-color: %1; } "
+                       "QWidget#recoveryBanner QLabel { color: %2; font-weight: bold; background: transparent; }")
+            .arg(background, foreground));
+    m_recovery_banner_label->setText(text);
+    m_recovery_banner_button->setText(button_text);
+    m_recovery_banner_button->setVisible(!button_text.isEmpty());
+    m_recovery_banner->setVisible(true);
+}
+
+void BitcoinGUI::showRepairNodeDialog()
+{
+    if (!clientModel) return;
+    const recovery::StatusSnapshot snap = clientModel->getRecoveryStatus();
+
+    // Belt-and-suspenders for UI M-3: never open the (destructive) repair
+    // dialog for states that do not call for one -- wait-auto/none are
+    // auto-recovering, diagnose-support is a read-the-logs state. The
+    // quarantined/crippled_wait modes always warrant it.
+    const bool held_mode = snap.daemon_mode == recovery::DaemonMode::QUARANTINED ||
+                           snap.daemon_mode == recovery::DaemonMode::CRIPPLED_WAIT;
+    const bool repair_action =
+        snap.recommended_action == recovery::RecommendedAction::ACTION_GUIDED_REPAIR ||
+        snap.recommended_action == recovery::RecommendedAction::ACTION_GUIDED_NETWORK_REPAIR ||
+        snap.recommended_action == recovery::RecommendedAction::ACTION_CHECK_DISK;
+    const bool repair_failed = snap.repair_phase == recovery::RepairPhase::FAILED;
+    if (!held_mode && !repair_action && !repair_failed) return;
+
+    RepairDialog dlg(m_node, RepairDialog::Context::Runtime,
+                     RepairDialog::scopeForAction(snap.recommended_action), this);
+    if (dlg.exec() != QDialog::Accepted || !dlg.repairArmed()) return;
+
+    // CRITICAL ORDERING (WS-HEAL v2 8.2): arming only wrote the repair
+    // marker - nothing has requested shutdown, so shutdownRequested() is
+    // still false and handleRestart() will emit requestedRestart, driving
+    // the existing InitExecutor::restart chain (clean prepare-shutdown,
+    // relaunch, exit). The relaunched process finds the marker and executes
+    // the wipe before opening any database. Calling startShutdown() first
+    // would make handleRestart() refuse - never do that on this path.
+    handleRestart(GUIUtil::getRestartCommandLineArgs());
 }
 
 bool BitcoinGUI::isPrivacyModeActivated() const

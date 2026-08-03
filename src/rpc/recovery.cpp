@@ -191,6 +191,7 @@ static RPCHelpMan repairnode()
             {"scope", RPCArg::Type::STR, RPCArg::Default{"full"}, "\"full\" (wipe+resync) or \"network\" (peers.dat/anchors.dat only)"},
             {"override_rate_limit", RPCArg::Type::BOOL, RPCArg::Default{false}, "Override the 2-wipes-per-7-days guard (ledgered)"},
             {"shutdown", RPCArg::Type::BOOL, RPCArg::Default{false}, "Also initiate daemon shutdown after arming (headless convenience)"},
+            {"disarm", RPCArg::Type::BOOL, RPCArg::Default{false}, "Cancel an armed repair: remove the marker so NO wipe executes at the next shutdown/start"},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -212,8 +213,9 @@ static RPCHelpMan repairnode()
                     {RPCResult::Type::BOOL, "rate_limited", ""},
                 }},
                 {RPCResult::Type::BOOL, "armed", /*optional=*/true, "present on arm responses"},
-                {RPCResult::Type::STR, "result", /*optional=*/true, "ARMED|BAD_TOKEN|ATTEMPTS_EXHAUSTED|REPAIR_RATE_LIMITED|ALREADY_ARMED"},
+                {RPCResult::Type::STR, "result", /*optional=*/true, "ARMED|BAD_TOKEN|ATTEMPTS_EXHAUSTED|REPAIR_RATE_LIMITED|ALREADY_ARMED|DISARMED|NOT_ARMED"},
                 {RPCResult::Type::BOOL, "shutdown_initiated", /*optional=*/true, ""},
+                {RPCResult::Type::BOOL, "disarmed", /*optional=*/true, "present on disarm responses"},
             }},
         RPCExamples{
             HelpExampleCli("repairnode", "true")
@@ -229,9 +231,22 @@ static RPCHelpMan repairnode()
     const std::string scope{request.params[2].isNull() ? "full" : request.params[2].get_str()};
     const bool override_rate_limit{request.params[3].isNull() ? false : request.params[3].get_bool()};
     const bool do_shutdown{request.params[4].isNull() ? false : request.params[4].get_bool()};
+    const bool disarm{request.params[5].isNull() ? false : request.params[5].get_bool()};
 
     if (scope != "full" && scope != "network") {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "scope must be \"full\" or \"network\"");
+    }
+    if (disarm && (dry_run || do_shutdown || !confirm_token.empty())) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "disarm cannot be combined with dry_run/confirm_token/shutdown");
+    }
+    // GUI-build guard (7.3/8.2): a GUI process owns its own clean
+    // shutdown+relaunch chain; letting an RPC caller StartShutdown() here
+    // would break that ordering (the GUI refuses to restart once shutdown
+    // has been requested). Rejected up front so a refused call never arms.
+    if (do_shutdown && recovery::IsRepairShutdownRejected()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           "shutdown:true is not available in this build (the GUI owns the restart); "
+                           "arm without shutdown and restart from the GUI");
     }
     if (!recovery::g_recovery) {
         throw JSONRPCError(RPC_IN_WARMUP, "recovery manager not yet constructed");
@@ -239,6 +254,13 @@ static RPCHelpMan repairnode()
 
     UniValue result(UniValue::VOBJ);
     result.pushKV("contract_version", recovery::RECOVERY_CONTRACT_VERSION);
+
+    if (disarm) {
+        const bool cleared = recovery::g_recovery->RepairDisarm();
+        result.pushKV("disarmed", cleared);
+        result.pushKV("result", cleared ? "DISARMED" : "NOT_ARMED");
+        return result;
+    }
 
     if (dry_run) {
         const recovery::RepairPlan plan = recovery::g_recovery->RepairDryRun(scope);
@@ -310,8 +332,20 @@ static RPCHelpMan recovery_inducedrift()
     UniValue result(UniValue::VOBJ);
     result.pushKV("db", db);
     if (db == "quarantine") {
-        recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_EVODB_CONNECT,
-                                  "recovery_inducedrift: synthetic quarantine (regtest only)");
+        // PARK-VS-EXIT: mirror the runtime-drift split so this synthetic hook
+        // exercises BOTH terminal behaviours. Under ParkOnFault() (GUI, or the
+        // headless -parkonfault test arg) the node parks-and-quarantines alive;
+        // otherwise (headless default) it goes DOWN via the AbortNode path with
+        // a non-zero exit -- no on-disk corruption and no sentinel, so a plain
+        // restart comes back clean.
+        if (recovery::ParkOnFault()) {
+            recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_EVODB_CONNECT,
+                                      "recovery_inducedrift: synthetic quarantine (regtest only)");
+        } else {
+            recovery::NoteHeadlessFaultShutdown(
+                "SYNTHETIC_DRIFT (recovery_inducedrift)",
+                "recovery_inducedrift: synthetic headless fault (regtest only)");
+        }
         result.pushKV("corrupted", false);
         return result;
     }

@@ -140,6 +140,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "repairnode", 0, "dry_run" },
     { "repairnode", 3, "override_rate_limit" },
     { "repairnode", 4, "shutdown" },
+    { "repairnode", 5, "disarm" },
     { "testmempoolaccept", 0, "rawtxs" },
     { "testmempoolaccept", 1, "maxfeerate" },
     { "submitpackage", 0, "package" },

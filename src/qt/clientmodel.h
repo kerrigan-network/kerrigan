@@ -89,6 +89,11 @@ public:
     //! Return warnings to be displayed in status bar
     QString getStatusBarWarnings() const;
 
+    //! Latest self-heal / recovery snapshot (WS-HEAL v2). Plain-data copy
+    //! refreshed by a periodic poll on the model thread; cheap to call from
+    //! the GUI thread (never touches cs_main or the wallet).
+    recovery::StatusSnapshot getRecoveryStatus() const EXCLUSIVE_LOCKS_REQUIRED(!m_recovery_mutex);
+
     QString formatFullVersion() const;
     QString formatSubVersion() const;
     bool isReleaseVersion() const;
@@ -107,6 +112,14 @@ public:
     uint256 m_cached_tip_blocks GUARDED_BY(m_cached_tip_mutex){};
 
 private:
+    //! Poll tick (runs on m_thread): fetch the recovery snapshot, cache it,
+    //! and emit recoveryStatusChanged / recoveryNeedsAttention on material
+    //! transitions.
+    void pollRecoveryStatus() EXCLUSIVE_LOCKS_REQUIRED(!m_recovery_mutex);
+
+    mutable Mutex m_recovery_mutex;
+    recovery::StatusSnapshot m_recovery_status GUARDED_BY(m_recovery_mutex);
+
     interfaces::Node& m_node;
     std::vector<std::unique_ptr<interfaces::Handler>> m_event_handlers;
     OptionsModel *optionsModel;
@@ -141,6 +154,14 @@ Q_SIGNALS:
     void instantSendChanged();
     void networkActiveChanged(bool networkActive);
     void alertsChanged(const QString &warnings);
+
+    //! The recovery snapshot changed materially (daemon_mode, recommended
+    //! action, findings, or repair phase). Receivers pull the details with
+    //! getRecoveryStatus().
+    void recoveryStatusChanged();
+    //! One-shot: the node just entered quarantine (or came up awaiting
+    //! repair) - the GUI should actively get the user's attention.
+    void recoveryNeedsAttention();
 
     //! Fired when a message should be reported to the user
     void message(const QString &title, const QString &message, unsigned int style);

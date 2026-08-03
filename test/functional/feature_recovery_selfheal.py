@@ -16,7 +16,15 @@ Covers the daemon-side classes of the design:
      by the engine).
   4. C1 quarantine -- corrupt the SaplingDB best-block key, force a
      disconnect, and assert daemon_mode "quarantined", networking off, and
-     every gated duty subsystem refusing with RPC_IN_QUARANTINE (-35).
+     every gated duty subsystem refusing with RPC_IN_QUARANTINE (-37).
+
+PARK-VS-EXIT (owner decision, 2026-07-31): GUI/wallet-managed nodes PARK on a
+fault (crippled_wait/quarantine) so the wallet can offer a one-click Repair;
+headless kerrigand instead EXITS non-zero with a clear diagnostic so
+systemd/monitoring catches the fault. The whole suite runs kerrigand with
+-parkonfault=1 to keep exercising the park path; test_headless_exit_on_* drop
+the flag to cover the production headless default (exit on startup fault and on
+runtime drift).
   5. crippled_wait -- restart on the corrupted state and assert the two
      warmup-callable RPCs answer while every other method (including unknown
      methods) still throws RPC_IN_WARMUP.
@@ -34,6 +42,7 @@ import time
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_node import ErrorMatch
 from test_framework.util import (
     assert_equal,
     assert_greater_than_or_equal,
@@ -43,8 +52,18 @@ from test_framework.util import (
 )
 
 RPC_IN_WARMUP = -28
-RPC_IN_QUARANTINE = -35
+# Must not collide with RPC_WALLET_ALREADY_LOADED (-35) -- see rpc/protocol.h.
+RPC_IN_QUARANTINE = -37
 RPC_METHOD_NOT_FOUND = -32601
+RPC_INVALID_PARAMETER = -8
+
+# PARK-VS-EXIT (owner decision, 2026-07-31): the distinct, greppable line the
+# headless binary emits (log + stderr) when it EXITS non-zero on a fault instead
+# of parking. The whole suite runs kerrigand with -parkonfault=1 so it keeps
+# exercising the PARK path (GUI/wallet behaviour); the two dedicated headless-
+# exit cases drop the flag to prove the default headless behaviour is to exit.
+HEADLESS_EXIT_TAG = "HEADLESS FAULT EXIT"
+PARK_ON_FAULT_ARG = "-parkonfault=1"
 
 # Directories a full repair removes, and state it must always preserve.
 WIPED_DIRS = ["blocks", "chainstate", "sapling", "evodb", "llmq", "indexes"]
@@ -62,7 +81,12 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         # ladder and classifier are observable inside a functional test.
         # -selfheal=1 is explicit because every framework datadir carries
         # connect=0, which otherwise infers the auto engine off.
-        args = ["-recoverytickinterval=1", "-selfheal=1"]
+        # -parkonfault=1 simulates a GUI/wallet-managed frontend so the headless
+        # kerrigand keeps exercising the PARK path (crippled_wait/quarantine)
+        # that the wallet's one-click Repair depends on. The two dedicated
+        # headless-exit cases restart WITHOUT this flag to cover the production
+        # headless default (exit non-zero on a fault).
+        args = ["-recoverytickinterval=1", "-selfheal=1", PARK_ON_FAULT_ARG]
         self.extra_args = [args, args]
 
     def skip_test_if_missing_module(self):
@@ -81,6 +105,30 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         node.args = [a for a in node.args if not a.startswith("-mocktime=")]
         node.mocktime = self.mocktime  # TestNode.start() appends this last
         return self.extra_args[i]
+
+    def node_args_no_park(self, i):
+        """node_args(i) with -parkonfault dropped: the production headless
+        default, where a fault EXITS non-zero instead of parking."""
+        return [a for a in self.node_args(i) if a != PARK_ON_FAULT_ARG]
+
+    def assert_exited_nonzero(self, i, timeout=60):
+        """Wait for node i's process to exit and assert a NON-ZERO code, then
+        tidy the framework bookkeeping (the node did NOT stop cleanly, so
+        wait_until_stopped -- which asserts exit 0 -- must not be used)."""
+        node = self.nodes[i]
+        deadline = time.time() + timeout * self.options.timeout_factor
+        rc = None
+        while time.time() < deadline:
+            rc = node.process.poll()
+            if rc is not None:
+                break
+            time.sleep(0.25)
+        assert rc is not None, "node stayed alive on a headless fault (parked?) instead of exiting"
+        assert rc != 0, f"a headless fault must exit non-zero; got exit code {rc}"
+        node.running = False
+        node.process = None
+        node.rpc = None
+        node.rpc_connected = False
 
     def chain_path(self, i):
         return os.path.join(self.nodes[i].datadir, self.chain)
@@ -426,13 +474,411 @@ class RecoverySelfHealTest(BitcoinTestFramework):
         attempts = self.ledger(0)["attempts"]
         assert_equal(attempts[-1]["override_rate_limit"], True)
 
+    # ---- B1: the wipe executor never follows marker-supplied paths --------
+
+    def test_marker_cannot_wipe_outside_datadir(self):
+        """A crafted marker must not delete anything, anywhere.
+
+        Regression for the confirmed data-loss finding: ResolveWipePath used
+        to do `datadir / label` with no validation, so an absolute label
+        discarded the datadir prefix and a `../` label escaped it -- and the
+        rename-to-tombstone failure then fell through to a direct
+        remove_all(). The executor now derives its target set from a
+        hard-coded whitelist and validates every marker label; one bad label
+        aborts the WHOLE repair with nothing removed."""
+        self.log.info("B1: a crafted marker cannot wipe paths outside the datadir")
+        node = self.nodes[0]
+        chain_dir = self.chain_path(0)
+
+        # Canaries: one OUTSIDE the datadir entirely (absolute path, the
+        # confirmed wallet.dat case) and one reached by `..` traversal.
+        outside_dir = os.path.join(self.options.tmpdir, "CANARY_outside")
+        outside_file = os.path.join(outside_dir, "wallet.dat")
+        os.makedirs(outside_dir, exist_ok=True)
+        with open(outside_file, "w", encoding="utf8") as f:
+            f.write("precious")
+        sibling_dir = os.path.join(self.nodes[0].datadir, "CANARY_sibling")
+        os.makedirs(sibling_dir, exist_ok=True)
+        sibling_file = os.path.join(sibling_dir, "wallet.dat")
+        with open(sibling_file, "w", encoding="utf8") as f:
+            f.write("precious")
+
+        self.stop_node(0)
+        marker_path = os.path.join(chain_dir, "repair_marker.json")
+        for wipe_dirs in ([outside_dir], ["../CANARY_sibling"], [outside_dir, "../CANARY_sibling"]):
+            with open(marker_path, "w", encoding="utf8") as f:
+                json.dump({"version": 1, "armed_ts": int(time.time()), "scope": "full",
+                           "wipe_dirs": wipe_dirs, "wipe_files": []}, f)
+            # Startup consumes/validates the marker before any DB is opened.
+            self.start_node(0, extra_args=self.node_args(0))
+            assert os.path.exists(outside_file), "canary OUTSIDE the datadir was deleted"
+            assert os.path.exists(sibling_file), "canary reached by `..` was deleted"
+            # Fail-closed: refused, not silently executed. The marker is
+            # quarantined (not left to re-fire) and the repair reads failed.
+            assert not os.path.exists(marker_path), "rejected marker was left armed"
+            assert os.path.exists(os.path.join(chain_dir, "repair_marker.rejected.json"))
+            assert_equal(self.status(0)["repair"]["phase"], "failed")
+            # And nothing legitimate was wiped either -- the abort is total.
+            assert os.path.isdir(os.path.join(chain_dir, "blocks")), "blocks/ wiped by a refused marker"
+            self.stop_node(0)
+            os.remove(os.path.join(chain_dir, "repair_marker.rejected.json"))
+
+        # A marker naming only whitelisted labels but armed long ago is also
+        # refused at startup (an accidental/forgotten arm, a restored backup,
+        # or a copied datadir must not wipe months later).
+        with open(marker_path, "w", encoding="utf8") as f:
+            json.dump({"version": 1, "armed_ts": int(time.time()) - 40 * 24 * 3600,
+                       "scope": "full", "wipe_dirs": ["blocks"], "wipe_files": []}, f)
+        self.start_node(0, extra_args=self.node_args(0))
+        assert os.path.isdir(os.path.join(chain_dir, "blocks")), "a stale marker wiped blocks/"
+        assert os.path.exists(os.path.join(chain_dir, "repair_marker.rejected.json"))
+        os.remove(os.path.join(chain_dir, "repair_marker.rejected.json"))
+        # Reset the ledger's repair_state so later cases start from idle.
+        assert_equal(self.status(0)["repair"]["phase"], "failed")
+
+    # ---- M-armed-irrevocable: an armed repair can be cancelled -----------
+
+    def test_disarm(self):
+        self.log.info("M-armed: an armed repair can be disarmed before it fires")
+        node = self.nodes[0]
+        chain_dir = self.chain_path(0)
+        res = self.arm_repair(node, shutdown=False)
+        assert_equal(res["result"], "ARMED")
+        assert os.path.exists(os.path.join(chain_dir, "repair_marker.json"))
+        assert_equal(self.status(0)["daemon_mode"], "repair_armed")
+
+        res = node.repairnode(False, "", "full", False, False, True)
+        assert_equal(res["disarmed"], True)
+        assert_equal(res["result"], "DISARMED")
+        assert not os.path.exists(os.path.join(chain_dir, "repair_marker.json"))
+        assert self.status(0)["daemon_mode"] != "repair_armed"
+        # A cancelled arm performed no wipe, so it releases its slot in the
+        # 3-attempts-per-6h loop guard (the wipe-rate guard is untouched).
+        assert_equal(self.status(0)["guards"]["attempts_used"], 0)
+        # Disarming again is a no-op, not an error.
+        assert_equal(node.repairnode(False, "", "full", False, False, True)["result"], "NOT_ARMED")
+        # Mixing disarm with the arm/dry-run parameters is refused.
+        assert_raises_rpc_error(RPC_INVALID_PARAMETER, "disarm cannot be combined",
+                               node.repairnode, True, "", "full", False, False, True)
+
+        # And the disarmed node shuts down WITHOUT wiping anything.
+        self.stop_node(0)
+        for d in WIPED_DIRS[:2]:
+            assert os.path.isdir(os.path.join(chain_dir, d)), f"{d} was wiped after a disarm"
+        self.start_node(0, extra_args=self.node_args(0))
+
+    # ---- B2/B3/M-stop: quarantine survives a restart ---------------------
+
+    def test_quarantine_survives_restart(self):
+        """A quarantined node must not return to full duty on a plain restart.
+
+        Regression for the confirmed escape: quarantine was process-local, so
+        `stop` + an identical restart produced daemon_mode "normal",
+        networkactive true and a servable block template."""
+        self.log.info("B2: quarantine persists across a plain restart")
+        node = self.nodes[0]
+        node.recovery_inducedrift("quarantine")
+        self.wait_for_mode(0, "quarantined")
+        # B3: serving suppression does not depend on the net-active flag.
+        assert_raises_rpc_error(RPC_IN_QUARANTINE, "quarantined", node.setnetworkactive, True)
+        assert_equal(node.getnetworkinfo()["networkactive"], False)
+        assert_raises_rpc_error(RPC_IN_QUARANTINE, "quarantined", node.getblocktemplate)
+        assert os.path.exists(os.path.join(self.chain_path(0), "quarantine_state.json"))
+
+        # M-stop: `stop` works from the held state (no wipe required to exit).
+        self.stop_node(0)
+
+        # Plain restart, identical args: the node comes back HELD, not normal.
+        node.start(extra_args=self.node_args(0))
+        rpc = None
+        deadline = time.time() + 60 * self.options.timeout_factor
+        while time.time() < deadline:
+            try:
+                rpc = self.warmup_rpc(0)
+                if rpc.getrecoverystatus()["daemon_mode"] == "crippled_wait":
+                    break
+            except Exception:
+                rpc = None
+            time.sleep(0.25)
+        assert rpc is not None, "restarted node never reported the persisted quarantine"
+        s = rpc.getrecoverystatus()
+        assert_equal(s["daemon_mode"], "crippled_wait")
+        assert_equal(s["recommended_action"], "ACTION_GUIDED_REPAIR")
+        # Duties are unreachable: warmup keeps every non-recovery RPC out,
+        # and P2P was never started at all.
+        assert_raises_rpc_error(RPC_IN_WARMUP, None, rpc.getblocktemplate)
+        assert_raises_rpc_error(RPC_IN_WARMUP, None, rpc.getpeerinfo)
+
+        # M-stop: `stop` is callable during warmup, so the operator always has
+        # an in-band exit from the held state that is NOT arming a wipe.
+        rpc.stop()
+        node.wait_until_stopped()
+        assert not os.path.exists(os.path.join(self.chain_path(0), "repair_marker.json")), \
+            "stopping a held node armed a wipe"
+        # The sentinel survives an exit-without-repair: still held next boot.
+        assert os.path.exists(os.path.join(self.chain_path(0), "quarantine_state.json"))
+
+        # The documented non-destructive escape: an EXPLICIT operator rebuild.
+        self.start_node(0, extra_args=self.node_args(0) + ["-reindex"])
+        assert not os.path.exists(os.path.join(self.chain_path(0), "quarantine_state.json"))
+        assert_equal(self.status(0)["daemon_mode"] in ["normal", "syncing", "degraded"], True)
+
+    # Modes that are SETTLED (init has decided). A persisted-quarantine node
+    # briefly reports "quarantined" in its pre-init snapshot before init reaches
+    # RunCrippledWait -- calling stop() in that window would exit mid-init (a
+    # non-zero code), so both are treated as still-transient here.
+    _SETTLED_MODES = ("crippled_wait", "normal", "syncing", "degraded")
+
+    def _restart_and_read_mode(self, i):
+        """Restart node i (no warmup wait), wait for a SETTLED daemon_mode,
+        return it, then stop the node cleanly. Handles crippled_wait (which
+        never leaves warmup) via the raw warmup RPC proxy."""
+        node = self.nodes[i]
+        node.start(extra_args=self.node_args(i))
+        rpc = None
+        mode = None
+        deadline = time.time() + 60 * self.options.timeout_factor
+        while time.time() < deadline:
+            try:
+                rpc = self.warmup_rpc(i)
+                mode = rpc.getrecoverystatus()["daemon_mode"]
+                if mode in self._SETTLED_MODES:
+                    break
+            except Exception:
+                rpc = None
+            time.sleep(0.25)
+        assert rpc is not None and mode in self._SETTLED_MODES, \
+            f"node never reached a settled daemon_mode (last={mode})"
+        rpc.stop()
+        node.wait_until_stopped()
+        return mode
+
+    def test_sentinel_fail_closed(self):
+        """NF-1 (BLOCKER): a malformed quarantine sentinel must FAIL CLOSED --
+        the node comes up HELD (crippled_wait), never returns to full duty, and
+        the sentinel is never silently cleared. Regression for the confirmed
+        one-byte defeat: a truncated/empty/non-object sentinel used to boot the
+        node straight back to daemon_mode 'normal'."""
+        self.log.info("NF-1: a malformed quarantine sentinel fails CLOSED")
+        chain_dir = self.chain_path(0)
+        sentinel = os.path.join(chain_dir, "quarantine_state.json")
+        # Start from a clean, stopped node with no recovery files lying around.
+        self.stop_node(0)
+        for name in ("repair_marker.json", "repair_marker.done.json",
+                     "repair_marker.rejected.json", "quarantine_state.json"):
+            p = os.path.join(chain_dir, name)
+            if os.path.exists(p):
+                os.remove(p)
+
+        # Every malformed / ambiguous variant must come up HELD, not normal.
+        for label, content in (("empty", ""),
+                               ("truncated", '{"version":1,"quara'),
+                               ("non-object array", "[]"),
+                               ("non-object scalar", "42"),
+                               ("object missing fields", "{}"),
+                               ("explicit quarantined true", '{"version":1,"quarantined":true}')):
+            with open(sentinel, "w", encoding="utf8") as f:
+                f.write(content)
+            mode = self._restart_and_read_mode(0)
+            assert_equal(mode, "crippled_wait")  # fail closed for: label
+            assert os.path.exists(sentinel), \
+                f"a malformed sentinel ({label}) must never be cleared"
+
+        # The ONLY parse that clears quarantine: a clean object that EXPLICITLY
+        # declares a healthy (not-quarantined) state.
+        with open(sentinel, "w", encoding="utf8") as f:
+            f.write('{"version":1,"quarantined":false}')
+        mode = self._restart_and_read_mode(0)
+        assert mode in ("normal", "syncing", "degraded"), mode
+        # And an ABSENT sentinel is normal.
+        if os.path.exists(sentinel):
+            os.remove(sentinel)
+        mode = self._restart_and_read_mode(0)
+        assert mode in ("normal", "syncing", "degraded"), mode
+        # Leave node0 running clean for anything after.
+        self.start_node(0, extra_args=self.node_args(0))
+
+    def test_wipe_fail_closed(self):
+        """NF-4 (MAJOR): a wipe that cannot remove a target must FAIL CLOSED --
+        it must NOT report success, NOT clear the quarantine sentinel, NOT
+        ledger a completed wipe or consume the marker, and the node must stay
+        held. Realised by relocating 'blocks' under a private -blocksdir made
+        read-only, so the startup wipe can neither rename nor remove it.
+
+        Runs LAST: it deliberately leaves node0's chainstate partially wiped."""
+        self.log.info("NF-4: an unremovable wipe target fails CLOSED (REPAIR_FAILED)")
+        if os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0):
+            self.log.info("  skipped (needs non-root POSIX to make a target undeletable)")
+            return
+        node = self.nodes[0]
+        chain_dir = self.chain_path(0)
+        sentinel = os.path.join(chain_dir, "quarantine_state.json")
+        marker = os.path.join(chain_dir, "repair_marker.json")
+        done = os.path.join(chain_dir, "repair_marker.done.json")
+
+        self.stop_node(0)
+        for name in ("repair_marker.json", "repair_marker.done.json",
+                     "repair_marker.rejected.json", "quarantine_state.json",
+                     "recovery_ledger.json"):
+            p = os.path.join(chain_dir, name)
+            if os.path.exists(p):
+                os.remove(p)
+
+        # Relocate blocks under a private -blocksdir we can chmod read-only.
+        altbd = os.path.join(node.datadir, "altblocks")
+        alt_regtest = os.path.join(altbd, self.chain)
+        os.makedirs(alt_regtest, exist_ok=True)
+        src_blocks = os.path.join(chain_dir, "blocks")
+        dst_blocks = os.path.join(alt_regtest, "blocks")
+        if os.path.isdir(src_blocks) and not os.path.isdir(dst_blocks):
+            os.rename(src_blocks, dst_blocks)
+        os.makedirs(dst_blocks, exist_ok=True)
+        bd_args = self.node_args(0) + ["-blocksdir=" + altbd]
+
+        # A persisted quarantine sentinel (so we can prove it is RETAINED), plus
+        # a freshly-armed valid full-scope marker for the startup wipe to run.
+        with open(sentinel, "w", encoding="utf8") as f:
+            json.dump({"version": 1, "quarantined": True, "ts": int(time.time()),
+                       "finding_code": "DRIFT_EVODB", "debug_detail": "wipe-fail test"}, f)
+        # armed_ts MUST be on the node's clock: the daemon runs under -mocktime,
+        # so a wall-clock stamp reads as far-future and the marker is refused as
+        # stale before the wipe ever runs.
+        with open(marker, "w", encoding="utf8") as f:
+            json.dump({"version": 1, "armed_ts": int(self.mocktime), "scope": "full",
+                       "wipe_dirs": WIPED_DIRS, "wipe_files": []}, f)
+
+        os.chmod(alt_regtest, 0o500)  # read+execute only: no rename/unlink of children
+        try:
+            node.start(extra_args=bd_args)
+            deadline = time.time() + 60 * self.options.timeout_factor
+            rpc, mode = None, None
+            while time.time() < deadline:
+                try:
+                    rpc = self.warmup_rpc(0)
+                    mode = rpc.getrecoverystatus()["daemon_mode"]
+                    if mode in self._SETTLED_MODES:
+                        break
+                except Exception:
+                    rpc = None
+                time.sleep(0.25)
+            assert rpc is not None and mode in self._SETTLED_MODES, \
+                f"node never settled after the failed wipe (last={mode})"
+            # Node stays HELD -- success was NOT reported.
+            assert_equal(mode, "crippled_wait")
+            # The drifted 'blocks' survived (not lied about), and no success
+            # bookkeeping happened.
+            assert os.path.isdir(dst_blocks), "blocks was reported wiped but is still present"
+            assert not os.path.exists(done), "marker was consumed to .done despite a failed wipe"
+            assert os.path.exists(marker), "marker was dropped despite a failed wipe (no retry)"
+            assert os.path.exists(sentinel), "quarantine sentinel was cleared despite a failed wipe"
+            ledger = self.ledger(0)
+            assert_equal(ledger.get("repair_state"), "failed")
+            assert_equal(len(ledger.get("wipes", [])), 0)  # no completed wipe recorded
+            rpc.stop()
+            node.wait_until_stopped()
+        finally:
+            os.chmod(alt_regtest, 0o700)
+
+    # ---- PARK-VS-EXIT: headless nodes EXIT (non-zero) instead of parking ----
+
+    def test_headless_exit_on_persisted_quarantine(self):
+        """A headless node that boots to a quarantine sentinel from a previous
+        run must EXIT non-zero with the clear diagnostic -- not silently park
+        (an invisible PoSe-ban drift for a masternode). The SAME sentinel under
+        a park frontend parks in crippled_wait, proving the split is purely
+        frontend-driven."""
+        self.log.info("PARK-VS-EXIT: headless node with a persisted quarantine sentinel EXITS non-zero")
+        node = self.nodes[0]
+        chain_dir = self.chain_path(0)
+        self.stop_node(0)
+        for name in ("repair_marker.json", "repair_marker.done.json",
+                     "repair_marker.rejected.json", "quarantine_state.json"):
+            p = os.path.join(chain_dir, name)
+            if os.path.exists(p):
+                os.remove(p)
+        sentinel = os.path.join(chain_dir, "quarantine_state.json")
+        with open(sentinel, "w", encoding="utf8") as f:
+            json.dump({"version": 1, "quarantined": True, "ts": int(self.mocktime),
+                       "finding_code": "DRIFT_EVODB", "debug_detail": "headless-exit test"}, f)
+
+        # Headless (no -parkonfault): refuses to start, exits non-zero, and
+        # prints the distinct greppable diagnostic to stderr.
+        node.assert_start_raises_init_error(
+            extra_args=self.node_args_no_park(0),
+            expected_msg=HEADLESS_EXIT_TAG,
+            match=ErrorMatch.PARTIAL_REGEX)
+        # A headless/failed start never clears the sentinel.
+        assert os.path.exists(sentinel), "headless exit must not clear the quarantine sentinel"
+
+        # The identical sentinel under a park frontend (-parkonfault) parks in
+        # crippled_wait instead -- same state, opposite terminal behaviour.
+        mode = self._restart_and_read_mode(0)
+        assert_equal(mode, "crippled_wait")
+        assert os.path.exists(sentinel)
+
+        # Clear the sentinel and return node0 to normal for the rest of the suite.
+        os.remove(sentinel)
+        self.start_node(0, extra_args=self.node_args(0))
+        self.connect_nodes(0, 1)
+        self.sync_all()
+
+    def test_headless_exit_on_runtime_drift(self):
+        """A headless RUNTIME consistency drift must take the AbortNode path --
+        the node goes DOWN with a non-zero exit rather than sitting alive-and-
+        quarantined. Driven through the synthetic recovery_inducedrift hook,
+        which mirrors the real DisconnectBlock/ConnectBlock split."""
+        self.log.info("PARK-VS-EXIT: headless runtime drift goes DOWN (AbortNode), non-zero, not parked")
+        node = self.nodes[0]
+        # Run node0 headless WITHOUT -parkonfault (production default). No fault
+        # at startup, so it comes up normal.
+        self.stop_node(0)
+        self.start_node(0, extra_args=self.node_args_no_park(0))
+        log_path = node.debug_log_path
+        prev_size = os.path.getsize(log_path)
+
+        # Induce a runtime drift. Headless => NoteHeadlessFaultShutdown =>
+        # AbortNode => controlled shutdown with a non-zero exit.
+        try:
+            node.recovery_inducedrift("quarantine")
+        except Exception:
+            pass  # the RPC connection may drop as shutdown begins
+
+        self.assert_exited_nonzero(0)
+        with open(log_path, encoding="utf8") as f:
+            f.seek(prev_size)
+            tail = f.read()
+        assert HEADLESS_EXIT_TAG in tail, f"missing headless-fault diagnostic in log:\n{tail}"
+        # It did NOT park: no quarantine sentinel is persisted for a headless exit,
+        # so a plain restart comes back clean (nothing was corrupted on disk).
+        assert not os.path.exists(os.path.join(self.chain_path(0), "quarantine_state.json")), \
+            "a headless runtime fault must not persist a quarantine sentinel"
+        # The AbortNode path records node_abort.json so the NEXT start surfaces
+        # NODE_ABORTED / ACTION_CHECK_DISK -- correct in production, but it would
+        # bleed a CHECK_DISK recommendation into later cases. Clear it here so
+        # the rest of the suite starts from a clean advisory state.
+        abort_json = os.path.join(self.chain_path(0), "node_abort.json")
+        if os.path.exists(abort_json):
+            os.remove(abort_json)
+
+        # Restore node0 (with the park arg) for the rest of the suite.
+        self.start_node(0, extra_args=self.node_args(0))
+        self.connect_nodes(0, 1)
+        self.sync_all()
+
     def run_test(self):
         self.test_contract_shape()
+        self.test_headless_exit_on_persisted_quarantine()
+        self.test_headless_exit_on_runtime_drift()
         self.test_auto_rejoin()
         self.test_stalled_tip_no_block_action()
+        self.test_marker_cannot_wipe_outside_datadir()
+        self.test_disarm()
+        self.test_quarantine_survives_restart()
+        self.test_sentinel_fail_closed()
         self.test_quarantine_gates()
         self.test_crippled_wait_and_repair()
         self.test_wipe_rate_guard()
+        self.test_wipe_fail_closed()
 
 
 if __name__ == "__main__":

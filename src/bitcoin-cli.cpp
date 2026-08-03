@@ -23,6 +23,7 @@
 #include <univalue.h>
 #include <util/strencodings.h>
 #include <util/system.h>
+#include <util/time.h>
 #include <util/translation.h>
 
 #include <algorithm>
@@ -91,6 +92,8 @@ static void SetupCliArgs(ArgsManager& argsman)
     argsman.AddArg("-netinfo", "Get network peer connection information from the remote server. An optional integer argument from 0 to 4 can be passed for different peers listings (default: 0). Pass \"help\" for detailed help documentation.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 
     argsman.AddArg("-color=<when>", strprintf("Color setting for CLI output (default: %s). Valid values: always, auto (add color codes when standard output is connected to a terminal and OS is not WIN32), never.", DEFAULT_COLOR_SETTING), ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
+    argsman.AddArg("-confirm", "For \"kerrigan-cli repair\": skip the interactive typed confirmation and accept the wipe plan (intended for scripts; the plan is still printed)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-overrideratelimit", "For \"kerrigan-cli repair\": override the 2-wipes-per-7-days safety guard. The override is recorded in the node's recovery ledger. Repeated repairs usually mean failing hardware - check the disk first", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-named", strprintf("Pass named instead of positional arguments (default: %s)", DEFAULT_NAMED), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-rpcclienttimeout=<n>", strprintf("Timeout in seconds during HTTP requests, or 0 for no timeout. (default: %d)", DEFAULT_HTTP_CLIENT_TIMEOUT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-rpcconnect=<ip>", strprintf("Send commands to node running on <ip> (default: %s)", DEFAULT_RPCCONNECT), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -720,6 +723,191 @@ protected:
     std::string address_str;
 };
 
+// ----------------------------------------------------------------------------
+// Recovery front-end (WS-HEAL v2 8.3): `kerrigan-cli doctor` and
+// `kerrigan-cli repair`. The daemon's getrecoverystatus/repairnode contract
+// (contract_version 2) carries stable machine ids ONLY - this file owns the
+// CLI's human-readable English for every id, and must tolerate unknown ids
+// from newer daemons (rendered verbatim). `debug_detail` is never displayed.
+// ----------------------------------------------------------------------------
+
+//! CLI copy for daemon_mode ids. Unknown ids are shown verbatim.
+static std::string RecoveryModeText(const std::string& id)
+{
+    if (id == "starting") return "starting up";
+    if (id == "syncing") return "syncing with the network";
+    if (id == "normal") return "healthy";
+    if (id == "degraded" || id == "running_degraded") return "DEGRADED - running, but needs attention";
+    if (id == "quarantined") return "QUARANTINED - paused for safety after detecting a data problem";
+    if (id == "crippled_wait") return "AWAITING REPAIR - startup found damaged data and is holding";
+    if (id == "repair_armed") return "REPAIR ARMED - restart the daemon to execute the repair";
+    return id + " (unrecognized mode - this kerrigan-cli may be older than the daemon)";
+}
+
+//! CLI copy for recommended_action ids. Unknown ids are shown verbatim.
+static std::string RecoveryActionText(const std::string& id)
+{
+    if (id == "ACTION_NONE") return "none - the node is healthy";
+    if (id == "ACTION_WAIT_AUTO") return "wait - automatic recovery is working on it";
+    if (id == "ACTION_GUIDED_NETWORK_REPAIR") return "run: kerrigan-cli repair network   (resets peer data only; no chain wipe)";
+    if (id == "ACTION_GUIDED_REPAIR") return "run: kerrigan-cli repair   (guided wipe + resync; wallet preserved)";
+    if (id == "ACTION_DIAGNOSE_SUPPORT") return "manual diagnosis needed - check debug.log and ask for support";
+    if (id == "ACTION_CHECK_DISK") return "check disk health and free space before attempting repair";
+    if (id == "ACTION_MANAGE_NODE_ELSEWHERE") return "manage this node from the machine/wallet that runs it";
+    return id + " (unrecognized action)";
+}
+
+//! CLI copy for finding codes. Unknown codes are shown verbatim.
+static std::string RecoveryFindingText(const std::string& code)
+{
+    if (code == "NET_LOCAL_LINK_DOWN") return "local network link appears down (DNS/dial probes failing)";
+    if (code == "NET_ISOLATED") return "no usable peer connections";
+    if (code == "NET_ECLIPSE_SUSPECT") return "peers are known but none work - possible eclipse or stale address book";
+    if (code == "TIP_STALLED_NETWORK") return "chain tip stalled (network-attributable)";
+    if (code == "TIP_STALLED_NONNETWORK") return "chain tip stalled (peers look fine - NOT network-related)";
+    if (code == "DRIFT_EVODB") return "EvoDB disagrees with the chain tip (data corruption)";
+    if (code == "DRIFT_SAPLING") return "Sapling database disagrees with the chain tip (data corruption)";
+    if (code == "WITNESS_STALE") return "shielded note witnesses are stale";
+    if (code == "REPAIR_RATE_LIMITED") return "repair wipe-rate guard tripped (repeated repairs; suspect the disk)";
+    if (code == "CHAINSTATE_LOAD_FAILED") return "the chainstate failed to load at startup";
+    if (code == "NODE_ABORTED") return "the previous run aborted";
+    return code + " (unrecognized finding)";
+}
+
+//! CLI copy for repair.phase ids. Unknown ids are shown verbatim.
+static std::string RecoveryPhaseText(const std::string& id)
+{
+    if (id == "none") return "not active";
+    if (id == "armed") return "armed - waiting for the daemon to restart";
+    if (id == "shutting_down") return "shutting down to execute the wipe";
+    if (id == "wiping") return "wiping damaged data";
+    if (id == "bootstrapping") return "fetching bootstrap data";
+    if (id == "syncing") return "resyncing the chain from the network";
+    if (id == "rebuilding_witnesses") return "rebuilding shielded note witnesses";
+    if (id == "verifying") return "verifying the repaired state";
+    if (id == "done") return "completed";
+    if (id == "failed") return "FAILED - see debug.log";
+    return id + " (unrecognized phase)";
+}
+
+static std::string FormatByteCount(int64_t bytes)
+{
+    if (bytes < 0) return "unknown";
+    constexpr int64_t KB{1000}, MB{1000 * KB}, GB{1000 * MB};
+    if (bytes >= GB) return strprintf("%.1f GB", bytes / double(GB));
+    if (bytes >= MB) return strprintf("%.1f MB", bytes / double(MB));
+    if (bytes >= KB) return strprintf("%.1f kB", bytes / double(KB));
+    return strprintf("%d B", bytes);
+}
+
+//! One formatted line per finding: CLI English + machine evidence fields.
+//! `debug_detail` is deliberately never rendered (contract 7.1).
+static std::string FormatFindingLine(const UniValue& finding)
+{
+    const std::string code{finding["code"].isStr() ? finding["code"].get_str() : "?"};
+    std::string line{strprintf("  - %s: %s", code, RecoveryFindingText(code))};
+    if (finding["since"].isNum()) {
+        line += strprintf("\n      since: %s", FormatISO8601DateTime(finding["since"].getInt<int64_t>()));
+    }
+    const UniValue& evidence{finding["evidence"]};
+    if (evidence.isObject() && !evidence.getKeys().empty()) {
+        std::string ev;
+        for (const std::string& key : evidence.getKeys()) {
+            if (!ev.empty()) ev += ", ";
+            ev += key + "=" + evidence[key].getValStr();
+        }
+        line += "\n      evidence: " + ev;
+    }
+    return line;
+}
+
+/** Process `doctor` requests: a human-readable rendering of
+ *  getrecoverystatus, in the spirit of -getinfo/-netinfo. */
+class DoctorRequestHandler : public BaseRequestHandler
+{
+public:
+    UniValue PrepareRequest(const std::string& method, const std::vector<std::string>& args) override
+    {
+        if (!args.empty()) {
+            throw std::runtime_error("doctor takes no arguments");
+        }
+        return JSONRPCRequestObj("getrecoverystatus", NullUniValue, 1);
+    }
+
+    UniValue ProcessReply(const UniValue& reply) override
+    {
+        const UniValue& error{reply["error"]};
+        if (!error.isNull()) {
+            if (error["code"].isNum() && error["code"].getInt<int>() == RPC_METHOD_NOT_FOUND) {
+                throw std::runtime_error("this kerrigand does not support guided recovery (getrecoverystatus not found) - upgrade the daemon");
+            }
+            return reply;
+        }
+        const UniValue& r{reply["result"]};
+        const std::string mode{r["daemon_mode"].isStr() ? r["daemon_mode"].get_str() : "?"};
+        const std::string action{r["recommended_action"].isStr() ? r["recommended_action"].get_str() : "?"};
+        const UniValue& sync{r["sync"]};
+        const UniValue& auto_block{r["auto"]};
+        const UniValue& repair{r["repair"]};
+        const UniValue& guards{r["guards"]};
+
+        std::string out;
+        out += "Kerrigan node health report\n";
+        out += "---------------------------\n";
+        out += strprintf("Mode:      %s\n", RecoveryModeText(mode));
+
+        const UniValue& findings{r["findings"]};
+        if (!findings.isArray() || findings.empty()) {
+            out += "Findings:  (none)\n";
+        } else {
+            out += strprintf("Findings:  %d active\n", findings.size());
+            for (const UniValue& finding : findings.getValues()) {
+                out += FormatFindingLine(finding) + "\n";
+            }
+        }
+        out += strprintf("Action:    %s\n", RecoveryActionText(action));
+
+        const int64_t height{sync["height"].isNum() ? sync["height"].getInt<int64_t>() : 0};
+        const int64_t target{sync["target_height"].isNum() ? sync["target_height"].getInt<int64_t>() : 0};
+        std::string progress_txt;
+        if (target > 0) progress_txt = strprintf(" of %d", target);
+        out += strprintf("Sync:      height %d%s, tip age %ds (expected block spacing %ds)\n",
+                         height, progress_txt,
+                         sync["tip_age_secs"].isNum() ? sync["tip_age_secs"].getInt<int64_t>() : 0,
+                         sync["expected_spacing_secs"].isNum() ? sync["expected_spacing_secs"].getInt<int64_t>() : 0);
+
+        out += strprintf("Self-heal: ladder stage %s, cycles used %s of %s\n",
+                         auto_block["ladder_stage"].getValStr(),
+                         auto_block["cycles_used"].getValStr(),
+                         auto_block["cycles_max"].getValStr());
+
+        const std::string phase{repair["phase"].isStr() ? repair["phase"].get_str() : "?"};
+        out += strprintf("Repair:    %s\n", RecoveryPhaseText(phase));
+        if (phase != "none" && phase != "done") {
+            // Witness counts of 0/0 mean "count unavailable" (the daemon never
+            // fabricates progress); render honestly, never as "0 of 0".
+            const int64_t w_done{repair["witnesses_rebuilt"].isNum() ? repair["witnesses_rebuilt"].getInt<int64_t>() : 0};
+            const int64_t w_total{repair["witnesses_total"].isNum() ? repair["witnesses_total"].getInt<int64_t>() : 0};
+            if (phase == "rebuilding_witnesses") {
+                if (w_total == 0) {
+                    out += "           witnesses: rebuilding (count unavailable)\n";
+                } else {
+                    out += strprintf("           witnesses: %d of %d rebuilt\n", w_done, w_total);
+                }
+            }
+            if (repair["eta_secs"].isNum()) {
+                out += strprintf("           eta: ~%ds\n", repair["eta_secs"].getInt<int64_t>());
+            }
+        }
+
+        out += strprintf("Guards:    repair attempts %s of %s (6h window), wipes %s of %s (7d window)",
+                         guards["attempts_used"].getValStr(), guards["attempts_max"].getValStr(),
+                         guards["wipes_in_window"].getValStr(), guards["wipes_max"].getValStr());
+
+        return JSONRPCReplyObj(UniValue{out}, NullUniValue, 1);
+    }
+};
+
 /** Process default single requests */
 class DefaultRequestHandler: public BaseRequestHandler {
 public:
@@ -918,10 +1106,190 @@ static void ParseError(const UniValue& error, std::string& strPrint, int& nRet)
         if (err_code.isNum() && err_code.getInt<int>() == RPC_WALLET_NOT_SPECIFIED) {
             strPrint += "\nTry adding \"-rpcwallet=<filename>\" option to kerrigan-cli command line.";
         }
+        if (err_code.isNum() && err_code.getInt<int>() == RPC_IN_QUARANTINE) {
+            strPrint += "\nThe node has paused itself after detecting a data problem. Inspect with \"kerrigan-cli doctor\" and fix with \"kerrigan-cli repair\".";
+        }
     } else {
         strPrint = "error: " + error.write();
     }
     nRet = abs(error["code"].getInt<int>());
+}
+
+/**
+ * `kerrigan-cli repair` (WS-HEAL v2 8.3): guided wipe+resync repair.
+ * Flow: repairnode dry-run -> print the wipe/preserve plan -> explicit typed
+ * confirmation (or -confirm) -> arm with the one-time token + shutdown:true
+ * (headless: the daemon shuts down and executes the wipe; restart to resync).
+ *
+ * The arm call races the daemon's own shutdown, so this verb always bounds
+ * any -rpcwait with -rpcwaittimeout=60 (the default of 0 waits forever) and
+ * treats a dropped connection on the arm call as an expected outcome, not an
+ * error.
+ */
+static int RepairCommand(const std::vector<std::string>& args, std::string& strPrint)
+{
+    std::string scope{"full"};
+    if (!args.empty()) {
+        if (args.size() > 1 || (args[0] != "full" && args[0] != "network")) {
+            throw std::runtime_error(
+                "usage: kerrigan-cli repair [full|network]\n"
+                "  full     wipe chain/derived data and resync from scratch (wallet preserved) - default\n"
+                "  network  reset peer/address data only (peers.dat, anchors.dat); no chain wipe\n"
+                "options: -confirm (skip the interactive prompt), -overrideratelimit");
+        }
+        scope = args[0];
+    }
+    const bool override_rate_limit{gArgs.GetBoolArg("-overrideratelimit", false)};
+
+    // Never hang against a daemon that is mid-wipe: DEFAULT_WAIT_CLIENT_TIMEOUT
+    // is 0 (= wait forever), so pair any -rpcwait with a bounded timeout.
+    if (!gArgs.IsArgSet("-rpcwaittimeout")) {
+        gArgs.ForceSetArg("-rpcwaittimeout", "60");
+    }
+
+    DefaultRequestHandler rh;
+
+    // Step 1: current diagnosis, so the operator sees WHY before wiping.
+    {
+        const UniValue reply{ConnectAndCallRPC(&rh, "getrecoverystatus", /*args=*/{})};
+        const UniValue& error{reply.find_value("error")};
+        if (!error.isNull()) {
+            if (error["code"].isNum() && error["code"].getInt<int>() == RPC_METHOD_NOT_FOUND) {
+                throw std::runtime_error("this kerrigand does not support guided recovery (getrecoverystatus not found) - upgrade the daemon");
+            }
+            int nRet{0};
+            ParseError(error, strPrint, nRet);
+            return nRet;
+        }
+        const UniValue& r{reply.find_value("result")};
+        tfm::format(std::cout, "Node state: %s\n", RecoveryModeText(r["daemon_mode"].getValStr()));
+        const UniValue& findings{r["findings"]};
+        if (findings.isArray() && !findings.empty()) {
+            for (const UniValue& finding : findings.getValues()) {
+                tfm::format(std::cout, "%s\n", FormatFindingLine(finding));
+            }
+        }
+        tfm::format(std::cout, "\n");
+    }
+
+    // Step 2: dry-run -> plan + one-time confirm token (5-minute TTL).
+    std::string token;
+    {
+        const UniValue reply{ConnectAndCallRPC(&rh, "repairnode", {"true", "", scope})};
+        const UniValue& error{reply.find_value("error")};
+        if (!error.isNull()) {
+            int nRet{0};
+            ParseError(error, strPrint, nRet);
+            return nRet;
+        }
+        const UniValue& plan{reply.find_value("result")};
+        const auto list_or_none = [](const UniValue& arr) {
+            if (!arr.isArray() || arr.empty()) return std::string{"(none)"};
+            std::string joined;
+            for (const UniValue& item : arr.getValues()) {
+                if (!joined.empty()) joined += ", ";
+                joined += item.getValStr();
+            }
+            return joined;
+        };
+        tfm::format(std::cout, "Repair plan (scope: %s)\n", scope);
+        tfm::format(std::cout, "  will delete:   %s\n", list_or_none(plan["wipe_dirs"]));
+        tfm::format(std::cout, "  will delete:   %s (files)\n", list_or_none(plan["wipe_files"]));
+        tfm::format(std::cout, "  preserved:     %s\n", list_or_none(plan["preserved"]));
+        tfm::format(std::cout, "  size estimate: %s\n",
+                    FormatByteCount(plan["bytes_total_est"].isNum() ? plan["bytes_total_est"].getInt<int64_t>() : -1));
+        if (scope == "full") {
+            tfm::format(std::cout,
+                        "\nYour wallet file is preserved and your funds are safe, but shielded (Sapling)\n"
+                        "balances will be TEMPORARILY UNSPENDABLE while note witnesses rebuild after the\n"
+                        "chain finishes resyncing. Transparent balances are usable as soon as sync completes.\n\n");
+        } else {
+            tfm::format(std::cout, "\nNo chain or wallet data is touched; only peer/address data is reset.\n\n");
+        }
+
+        const UniValue& guards{plan["guards"]};
+        const bool rate_limited{guards["rate_limited"].isBool() && guards["rate_limited"].get_bool()};
+        if (rate_limited && !override_rate_limit) {
+            tfm::format(std::cout,
+                        "This node already ran %s repair wipes in the last 7 days (limit %s). Repeated\n"
+                        "repairs usually mean failing hardware - check the disk before wiping again.\n"
+                        "To proceed anyway, re-run with -overrideratelimit (the override is recorded).\n",
+                        guards["wipes_in_window"].getValStr(), guards["wipes_max"].getValStr());
+            return EXIT_FAILURE;
+        }
+        token = plan["confirm_token"].getValStr();
+        if (token.empty()) {
+            throw std::runtime_error("the daemon did not return a confirm token - repair is unavailable right now");
+        }
+    }
+
+    // Step 3: explicit confirmation. The typed word is deliberately required
+    // (not just Enter): this deletes chain data.
+    if (!gArgs.GetBoolArg("-confirm", false)) {
+        tfm::format(std::cout, "Type REPAIR to proceed (anything else aborts): ");
+        fflush(stdout);
+        std::string line;
+        if (!std::getline(std::cin, line) || line != "REPAIR") {
+            tfm::format(std::cout, "Aborted. Nothing was changed.\n");
+            return EXIT_FAILURE;
+        }
+    }
+
+    // Step 4: arm with the token; shutdown:true so the (headless) daemon shuts
+    // down and executes the wipe now. The daemon may close the connection
+    // while the reply is in flight - that is expected, not an error.
+    try {
+        const UniValue reply{ConnectAndCallRPC(&rh, "repairnode",
+                                               {"false", token, scope,
+                                                override_rate_limit ? "true" : "false",
+                                                /*shutdown=*/"true"})};
+        const UniValue& error{reply.find_value("error")};
+        if (!error.isNull()) {
+            int nRet{0};
+            ParseError(error, strPrint, nRet);
+            return nRet;
+        }
+        const UniValue& r{reply.find_value("result")};
+        const std::string result{r["result"].getValStr()};
+        if (result == "ARMED") {
+            const bool shutdown_initiated{r["shutdown_initiated"].isBool() && r["shutdown_initiated"].get_bool()};
+            if (shutdown_initiated) {
+                tfm::format(std::cout,
+                            "Repair armed. The daemon is shutting down to wipe the damaged data.\n"
+                            "Restart kerrigand to resync; follow progress with: kerrigan-cli doctor\n");
+            } else {
+                // A GUI-build daemon refuses shutdown:true before arming, so
+                // this combination should not occur; handle it honestly anyway.
+                tfm::format(std::cout,
+                            "Repair armed, but the daemon did not begin shutting down.\n"
+                            "Restart the node yourself to execute the repair.\n");
+            }
+            return EXIT_SUCCESS;
+        }
+        if (result == "ALREADY_ARMED") {
+            tfm::format(std::cout, "A repair is already armed. Restart the node to execute it.\n");
+            return EXIT_SUCCESS;
+        }
+        if (result == "BAD_TOKEN") {
+            strPrint = "error: the confirmation token was rejected (tokens are one-time and expire after 5 minutes). Run kerrigan-cli repair again.";
+        } else if (result == "ATTEMPTS_EXHAUSTED") {
+            strPrint = "error: too many repair attempts in the last 6 hours (limit 3). The counter resets once a repair completes and verifies healthy; if repairs keep failing, check the disk.";
+        } else if (result == "REPAIR_RATE_LIMITED") {
+            strPrint = "error: repair wipe-rate guard tripped (2 wipes per 7 days). Check the disk; re-run with -overrideratelimit to proceed anyway (recorded).";
+        } else {
+            strPrint = strprintf("error: repair was not armed (daemon result: %s)", result);
+        }
+        return EXIT_FAILURE;
+    } catch (const CConnectionFailed&) {
+        // The shutting-down daemon dropped the connection before the reply
+        // arrived. Arming happens before the shutdown begins, so this is the
+        // expected success shape - but say exactly what is and isn't known.
+        tfm::format(std::cout,
+                    "The daemon closed the connection while shutting down (expected during repair).\n"
+                    "The arm result could not be read back; check debug.log in the data directory for\n"
+                    "\"repair marker\" or restart kerrigand and run: kerrigan-cli doctor\n");
+        return EXIT_SUCCESS;
+    }
 }
 
 /**
@@ -1208,8 +1576,16 @@ static int CommandLineRPC(int argc, char *argv[])
             }
             method = args[0];
             args.erase(args.begin()); // Remove trailing method name from arguments vector
+            if (method == "doctor") {
+                // Client-side formatted rendering of getrecoverystatus.
+                rh.reset(new DoctorRequestHandler());
+            }
         }
-        if (nRet == 0) {
+        if (nRet == 0 && method == "repair") {
+            // Client-side multi-step verb (dry-run -> confirm -> arm); prints
+            // its own progress, so bypass the single-request path.
+            nRet = RepairCommand(args, strPrint);
+        } else if (nRet == 0) {
             // Perform RPC call
             std::optional<std::string> wallet_name{};
             if (gArgs.IsArgSet("-rpcwallet")) wallet_name = gArgs.GetArg("-rpcwallet", "");

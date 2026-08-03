@@ -1287,6 +1287,21 @@ QString formatBytes(uint64_t bytes)
     return QObject::tr("%1 GB").arg(bytes / 1'000'000'000);
 }
 
+QStringList getRestartCommandLineArgs()
+{
+    QStringList args;
+    for (const auto& [key, values] : gArgs.GetCommandLineArgs()) {
+        for (const auto& value : values) {
+            if (value.getValStr().empty()) {
+                args << QString::fromStdString("-" + key);
+            } else {
+                args << QString::fromStdString("-" + key + "=" + value.getValStr());
+            }
+        }
+    }
+    return args;
+}
+
 qreal calculateIdealFontSize(int width, const QString& text, QFont font, qreal minPointSize, qreal font_size) {
     while(font_size >= minPointSize) {
         font.setPointSizeF(font_size);

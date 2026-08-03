@@ -57,6 +57,7 @@ class QComboBox;
 class QDateTime;
 class QProgressBar;
 class QProgressDialog;
+class QPushButton;
 class QToolButton;
 QT_END_NAMESPACE
 
@@ -184,6 +185,13 @@ private:
     QAction* m_close_all_wallets_action{nullptr};
     QAction* m_wallet_selector_action = nullptr;
     QAction* m_mask_values_action{nullptr};
+    QAction* repairNodeAction = nullptr;
+
+    /** Persistent recovery banner (WS-HEAL v2 8.2): shown above the central
+        widget while the node is degraded / quarantined / repairing. */
+    QWidget* m_recovery_banner = nullptr;
+    QLabel* m_recovery_banner_label = nullptr;
+    QPushButton* m_recovery_banner_button = nullptr;
 
     QComboBox* m_wallet_selector = nullptr;
 
@@ -277,6 +285,9 @@ private:
 
     /** Open the OptionsDialog on the specified tab index */
     void openOptionsDialogWithTab(OptionsDialog::Tab tab);
+
+    /** Build the (initially hidden) recovery banner widget. */
+    QWidget* createRecoveryBanner();
 
 Q_SIGNALS:
     void quitRequested();
@@ -412,6 +423,15 @@ public Q_SLOTS:
     void updateMasternodesVisibility();
 
     void updateWidth();
+
+    /** Re-render the recovery banner from the client model's latest
+        recovery snapshot (connected to ClientModel::recoveryStatusChanged). */
+    void updateRecoveryStatus();
+
+    /** Open the guided-repair dialog; on a successful arm, drive the
+        existing clean restart chain (handleRestart -> InitExecutor::restart).
+        Never requests shutdown before the restart chain runs. */
+    void showRepairNodeDialog();
 };
 
 class UnitDisplayStatusBarControl : public QLabel

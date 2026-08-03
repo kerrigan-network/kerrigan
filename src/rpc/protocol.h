@@ -48,7 +48,10 @@ enum RPCErrorCode
     RPC_VERIFY_ALREADY_IN_CHAIN     = -27, //!< Transaction already in chain
     RPC_IN_WARMUP                   = -28, //!< Client still warming up
     RPC_METHOD_DEPRECATED           = -32, //!< RPC method is deprecated
-    RPC_IN_QUARANTINE               = -35, //!< Node quarantined after detecting chain-state inconsistency (see getrecoverystatus)
+    // -37: first free negative code. MUST NOT collide with any code below --
+    // -35 is RPC_WALLET_ALREADY_LOADED, and a collision makes CLIs render
+    // repair guidance on a benign already-loaded-wallet error.
+    RPC_IN_QUARANTINE               = -37, //!< Node quarantined after detecting chain-state inconsistency (see getrecoverystatus)
 
     //! Aliases for backward compatibility
     RPC_TRANSACTION_ERROR           = RPC_VERIFY_ERROR,

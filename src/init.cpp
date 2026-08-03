@@ -781,6 +781,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-persistmempool", strprintf("Whether to save the mempool on shutdown and load on restart (default: %u)", DEFAULT_PERSIST_MEMPOOL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-recoverytickinterval=<n>", strprintf("Interval in seconds between self-heal diagnosis ticks (regression testing only; default: %u)", 30), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-selfheal", "Enable the automatic (non-destructive) network self-heal engine: peer rotation and DNS/fixed-seed re-seeding when the node loses all peers. Inferred off when connectivity is operator-pinned (-connect) or networking is disabled; set explicitly to override the inference. Diagnosis and the getrecoverystatus RPC stay active either way (default: 1)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-parkonfault", "On a self-heal fault (chainstate load failure, consistency drift or a persisted quarantine), PARK the node (crippled_wait/quarantine: process stays up with RPC in warmup and P2P off) instead of exiting. The desktop wallet sets this itself so it can offer a one-click Repair; a headless daemon defaults to exiting non-zero so systemd/monitoring catches the fault (regression testing only; default: 0)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-pid=<file>", strprintf("Specify pid file. Relative paths will be prefixed by a net-specific datadir location. (default: %s)", BITCOIN_PID_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-saplingparamdir=<dir>", "Specify directory containing Sapling zk-SNARK parameter files (sapling-spend.params and sapling-output.params). (default: ~/.zcash-params/)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-prune=<n>", strprintf("Reduce storage requirements by enabling pruning (deleting) of old blocks. This allows the pruneblockchain RPC to be called to delete specific blocks, and enables automatic pruning of old blocks if a target size in MiB is provided. This mode is incompatible with -txindex, -rescan and -disablegovernance=false. "
@@ -1956,6 +1957,40 @@ static void RecordResetChainstate()
               "config file (it would wipe on every restart).\n");
 }
 
+//! PARK-VS-EXIT (owner decision, 2026-07-31): the headless terminal path for a
+//! STARTUP self-heal fault. When ParkOnFault() is false (kerrigand default), the
+//! three startup park sites do NOT enter crippled_wait; instead they emit this
+//! distinct, greppable diagnostic to the log AND stderr -- naming the condition,
+//! the disk-class-vs-corruption distinction, and the recovery route -- and the
+//! caller returns false from AppInitMain, which yields a NON-ZERO process exit
+//! (the pre-recovery behaviour). systemd/monitoring/MN-alerting then see a real
+//! failure rather than a node silently parked forever (a parked masternode
+//! drifts toward a PoSe ban invisibly). disk_class true means a disk/IO/
+//! permissions/clock fault: the user is told to check the disk, NOT to wipe.
+static void EmitHeadlessFaultDiagnostic(const std::string& condition,
+                                        const std::string& detail,
+                                        bool disk_class)
+{
+    const std::string route = disk_class
+        ? "this looks like a DISK / IO / permissions / clock class fault, NOT logical "
+          "corruption -- do NOT wipe the chainstate. Check disk health, free space, "
+          "permissions, the mount and the system clock, then restart. If a Kerrigan "
+          "desktop wallet manages this node it can guide recovery."
+        : "the chainstate is inconsistent and must be rebuilt -- use the Kerrigan desktop "
+          "wallet's one-click Repair, or `kerrigan-cli repair` (guided wipe + resync), or "
+          "restart with -resetchainstate.";
+    LogPrintf("*** recovery: HEADLESS FAULT EXIT (%s): %s | recovery route: %s | this headless "
+              "node is EXITING with a NON-ZERO status (it did NOT park) so systemd/monitoring "
+              "sees the failure\n",
+              condition, detail, route);
+    fprintf(stderr,
+            "Error: recovery: HEADLESS FAULT EXIT (%s): %s\n"
+            "Recovery route: %s\n"
+            "This headless node is exiting with a non-zero status (it did NOT park); a parked, "
+            "repairable node is offered only under the Kerrigan desktop wallet.\n",
+            condition.c_str(), detail.c_str(), route.c_str());
+}
+
 /**
  * Detect a post-Plan-X-rollback derived-cache mismatch and refuse to start if
  * one is found.
@@ -2521,6 +2556,18 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             return InitError(_("Unable to start HTTP server. See debug log for details."));
     }
 
+    // PARK-VS-EXIT (owner decision): kerrigan-qt's GuiMain already set
+    // ParkOnFault() true. For the headless binary the hidden -parkonfault arg
+    // can force the park path on (regression tests that exercise crippled_wait
+    // under kerrigand); absent the arg, a headless fault EXITS non-zero. Set
+    // before the first fault site (load-failure / drift / persisted-quarantine
+    // checks below) can run.
+    if (args.GetBoolArg("-parkonfault", false)) {
+        recovery::SetParkOnFault(true);
+        LogPrintf("recovery: -parkonfault set -- this headless node will PARK on a fault "
+                  "(crippled_wait/quarantine) instead of exiting\n");
+    }
+
     // Recovery manager (WS-HEAL v2 2): constructed before the chainstate
     // loads so startup drift/load-failure diagnosis has somewhere to live and
     // the warmup-callable getrecoverystatus/repairnode RPCs can serve it.
@@ -3016,6 +3063,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
         const bool fReset = fReindex;
         bilingual_str strLoadError;
+        // NF-3: classify the load/verify failure. Disk/IO/permission/open
+        // faults (and clock faults) route to ACTION_CHECK_DISK -- a wipe cannot
+        // fix a bad disk. Only GENUINE logical corruption (default: false)
+        // routes to the guided wipe. Set true in the disk-class switch arms.
+        bool load_error_disk_class = false;
 
         uiInterface.InitMessage(_("Loading block index…").translated);
         const auto load_block_index_start_time{SteadyClock::now()};
@@ -3071,6 +3123,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             switch (maybe_load_error.value()) {
             case ChainstateLoadingError::ERROR_LOADING_BLOCK_DB:
                 strLoadError = _("Error loading block database");
+                load_error_disk_class = true; // IO/open fault -> CHECK_DISK, not wipe (NF-3)
                 break;
             case ChainstateLoadingError::ERROR_BAD_GENESIS_BLOCK:
                 // If the loaded chain has a wrong genesis, bail out immediately
@@ -3105,15 +3158,19 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 break;
             case ChainstateLoadingError::ERROR_GENERIC_BLOCKDB_OPEN_FAILED:
                 strLoadError = _("Error opening block database");
+                load_error_disk_class = true; // open/IO fault (also the exception catch-all) -> CHECK_DISK (NF-3)
                 break;
             case ChainstateLoadingError::ERROR_COMMITING_EVO_DB:
                 strLoadError = _("Failed to commit Evo database");
+                load_error_disk_class = true; // write/IO fault -> CHECK_DISK (NF-3)
                 break;
             case ChainstateLoadingError::ERROR_UPGRADING_EVO_DB:
                 strLoadError = _("Failed to upgrade Evo database");
+                load_error_disk_class = true; // IO fault -> CHECK_DISK (NF-3)
                 break;
             case ChainstateLoadingError::ERROR_UPGRADING_SIGNALS_DB:
                 strLoadError = _("Error upgrading evo database for EHF");
+                load_error_disk_class = true; // IO fault -> CHECK_DISK (NF-3)
                 break;
             case ChainstateLoadingError::SHUTDOWN_PROBED:
                 break;
@@ -3152,6 +3209,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     strLoadError = _("The block database contains a block which appears to be from the future. "
                                      "This may be due to your computer's date and time being set incorrectly. "
                                      "Only rebuild the block database if you are sure that your computer's date and time are correct");
+                    // Clock/config fault, not logical corruption: must NOT
+                    // auto-recommend a destructive wipe (NF-3).
+                    load_error_disk_class = true;
                     break;
                 case ChainstateLoadVerifyError::ERROR_CORRUPTED_BLOCK_DB:
                     strLoadError = _("Corrupted block database detected");
@@ -3161,6 +3221,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     break;
                 case ChainstateLoadVerifyError::ERROR_GENERIC_FAILURE:
                     strLoadError = _("Error opening block database");
+                    load_error_disk_class = true; // exception/IO during verify -> CHECK_DISK (NF-3)
                     break;
                 }
             } else {
@@ -3181,15 +3242,33 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     fReindex = true;
                     AbortShutdown();
                 } else {
-                    // WS-HEAL v2 5.3: when the load failure is a recorded
-                    // consistency drift (the converted DisconnectBlock /
-                    // ConnectBlock drift checks fired during load/VerifyDB),
-                    // park in crippled_wait instead of exiting: RPC stays up
-                    // in warmup, the warmup-callable recovery RPCs serve the
-                    // diagnosis, and `repairnode` (+ shutdown:true headless)
-                    // arms the guided wipe+resync. Every other load failure
-                    // keeps the historical abort (C2 disk-class failures must
-                    // halt, 5.1).
+                    // PARK-VS-EXIT (owner decision): a headless node must NOT
+                    // park on an unloadable chainstate -- it exits non-zero with
+                    // a clear diagnostic so systemd/monitoring catches the fault
+                    // (the pre-recovery behaviour), preserving the disk-class vs
+                    // logical-corruption distinction so a disk-fault user is not
+                    // told to wipe. A GUI/wallet-managed node keeps the park path
+                    // below so the wallet can offer a one-click Repair.
+                    if (!recovery::ParkOnFault()) {
+                        EmitHeadlessFaultDiagnostic(
+                            "CHAINSTATE_LOAD_FAILED: " + strLoadError.original,
+                            strLoadError.original, load_error_disk_class);
+                        return false;
+                    }
+                    // WS-HEAL v2 5.3: a declined rebuild parks in
+                    // crippled_wait instead of exiting: RPC stays up in
+                    // warmup, the warmup-callable recovery RPCs serve the
+                    // diagnosis, and `repairnode` arms the guided
+                    // wipe+resync (`stop` exits without repairing). When no
+                    // drift diagnosis was recorded during load/VerifyDB,
+                    // the load failure itself is recorded so
+                    // CHAINSTATE_LOAD_FAILED / ACTION_GUIDED_REPAIR reach
+                    // the user (previously this finding was unreachable and
+                    // a pure load failure just exited).
+                    if (recovery::g_recovery && !recovery::g_recovery->StartupDiagnosisPending()) {
+                        recovery::g_recovery->RecordStartupLoadFailure(
+                            "chainstate_load_failed", strLoadError.original, load_error_disk_class);
+                    }
                     if (recovery::g_recovery && recovery::g_recovery->StartupDiagnosisPending()) {
                         recovery::g_recovery->RunCrippledWait();
                         return false;
@@ -3229,6 +3308,43 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     // drift too, since VerifyDB skips the SaplingDB check in verify-only
     // mode. On drift: crippled_wait (diagnosis over warmup RPC), not exit.
     if (!recovery::StartupDriftCheck(node)) {
+        // PARK-VS-EXIT: a headless node exits non-zero with a clear diagnostic
+        // (startup drift is logical inconsistency, never a disk fault, so the
+        // route is guided-repair/-resetchainstate); a GUI node parks.
+        if (!recovery::ParkOnFault()) {
+            EmitHeadlessFaultDiagnostic(
+                "STARTUP_DRIFT: chainstate/derived-cache (evodb/sapling) best-block mismatch",
+                "startup drift check failed -- a derived cache disagrees with the chain tip",
+                /*disk_class=*/false);
+            return false;
+        }
+        recovery::g_recovery->RunCrippledWait();
+        return false;
+    }
+
+    // WS-HEAL v2 B2: a quarantine sentinel from a PREVIOUS run means that
+    // run proved its own state inconsistent at runtime -- conditions the
+    // startup tip check above cannot reproduce (the DisconnectBlock drift
+    // classes compare against the block being disconnected, not the tip).
+    // A plain restart must NOT return such a node to full duty: park in
+    // crippled_wait (P2P never starts) serving diagnosis over warmup RPC.
+    // Exits: guided repair (wipe clears the sentinel), `stop`, or an
+    // explicit -reindex/-resetchainstate rebuild.
+    if (recovery::g_recovery->PersistedQuarantinePending()) {
+        // PARK-VS-EXIT: a headless node that boots to a quarantine sentinel from
+        // a previous run must NOT silently park (invisible PoSe-ban drift for a
+        // masternode) -- it exits non-zero with a clear diagnostic. P2P has not
+        // started at this point (this runs before AttachNode/connman->Start), so
+        // nothing is served on the way out; the ctor already set g_quarantined,
+        // keeping the serving gates closed during teardown. A GUI/wallet-managed
+        // node parks so the wallet can offer a one-click Repair.
+        if (!recovery::ParkOnFault()) {
+            EmitHeadlessFaultDiagnostic(
+                "PERSISTED_QUARANTINE: a previous run quarantined itself (runtime consistency drift)",
+                "quarantine sentinel present from a previous run",
+                /*disk_class=*/false);
+            return false;
+        }
         recovery::g_recovery->RunCrippledWait();
         return false;
     }

@@ -364,6 +364,11 @@ namespace GUIUtil
 
     QString formatBytes(uint64_t bytes);
 
+    /** Rebuild the current process's command-line argument list (application
+     *  name removed), for a clean self-relaunch through the InitExecutor
+     *  restart chain. Mirrors RPCConsole::buildParameterlist(). */
+    QStringList getRestartCommandLineArgs();
+
     qreal calculateIdealFontSize(int width, const QString& text, QFont font, qreal minPointSize = 4, qreal startPointSize = 14);
 
     class ClickableLabel : public QLabel

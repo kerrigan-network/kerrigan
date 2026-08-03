@@ -2250,6 +2250,10 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
  * to compatible peers.
  */
 void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock) {
+    // Quarantine gate (B3): no compact-block fast-announce from quarantined
+    // state (block processing itself keeps running; only serving is gated).
+    if (recovery::IsQuarantined()) return;
+
     auto pcmpctblock = std::make_shared<const CBlockHeaderAndShortTxIDs>(*pblock);
     const CNetMsgMaker msgMaker(PROTOCOL_VERSION);
 
@@ -2853,6 +2857,14 @@ CTransactionRef PeerManagerImpl::FindTxForGetData(const CNode* peer, const uint2
 void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
 {
     AssertLockNotHeld(cs_main);
+
+    // Quarantine gate (WS-HEAL v2 5.2 / B3): serve no blocks, compact
+    // blocks, headers-derived data or transactions from state this node
+    // proved inconsistent. Requests are dropped, not queued.
+    if (recovery::IsQuarantined()) {
+        peer.m_getdata_requests.clear();
+        return;
+    }
 
     auto tx_relay = peer.GetTxRelay();
 
@@ -4000,7 +4012,8 @@ void PeerManagerImpl::ProcessMessage(
         // that post-V19 peers can't deserialize.
         if (!pfrom.IsInboundConn() && !pfrom.IsBlockOnlyConn() && g_hmp_commit_pool && m_chainparams.GetConsensus().nHMPCommitmentOffset > 0
             && g_sporkman && g_sporkman->IsSporkActive(SPORK_25_HMP_ENABLED)
-            && !m_chainman.ActiveChainstate().IsInitialBlockDownload()) {
+            && !m_chainman.ActiveChainstate().IsInitialBlockDownload()
+            && !recovery::IsQuarantined()) { // B3/NF-2: don't push HMP commits while quarantined
             auto commits = g_hmp_commit_pool->GetPendingCommits(16);
             for (const auto& commit : commits) {
                 m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::PUBKEYCOMMIT, commit));
@@ -4382,6 +4395,10 @@ void PeerManagerImpl::ProcessMessage(
     }
 
     if (msg_type == NetMsgType::GETBLOCKS) {
+        // Quarantine gate (B3): no block inventory is served from
+        // quarantined state.
+        if (recovery::IsQuarantined()) return;
+
         CBlockLocator locator;
         uint256 hashStop;
         vRecv >> locator >> hashStop;
@@ -4459,6 +4476,9 @@ void PeerManagerImpl::ProcessMessage(
     }
 
     if (msg_type == NetMsgType::GETBLOCKTXN) {
+        // Quarantine gate (B3): the compact-block responder serves nothing.
+        if (recovery::IsQuarantined()) return;
+
         BlockTransactionsRequest req;
         vRecv >> req;
 
@@ -4520,6 +4540,12 @@ void PeerManagerImpl::ProcessMessage(
 
         if (fImporting || fReindex) {
             LogPrint(BCLog::NET, "Ignoring %s from peer=%d while importing/reindexing\n", msg_type, pfrom.GetId());
+            return;
+        }
+
+        // Quarantine gate (B3): serve no headers from quarantined state.
+        if (recovery::IsQuarantined()) {
+            LogPrint(BCLog::NET, "Ignoring %s from peer=%d while quarantined\n", msg_type, pfrom.GetId());
             return;
         }
 
@@ -5143,6 +5169,9 @@ void PeerManagerImpl::ProcessMessage(
     }
 
     if (msg_type == NetMsgType::MEMPOOL) {
+        // Quarantine gate (B3): mempool contents are not served.
+        if (recovery::IsQuarantined()) return;
+
         // Only process received mempool messages if we advertise NODE_BLOOM
         // or if the peer has mempool permissions.
         if (!(peer->m_our_services & NODE_BLOOM) && !pfrom.HasPermission(NetPermissionFlags::Mempool))
@@ -5318,6 +5347,11 @@ void PeerManagerImpl::ProcessMessage(
     }
 
     if (msg_type == NetMsgType::GETMNLISTDIFF) {
+        // Quarantine gate (B3/NF-2): the MN-list diff is built directly from
+        // the evodb/quorum state whose drift triggered the quarantine. A
+        // quarantined node must not hand a peer a diff derived from state it
+        // has declared inconsistent. Drop/ignore (no Misbehaving).
+        if (recovery::IsQuarantined()) return;
         CGetSimplifiedMNListDiff cmd;
         vRecv >> cmd;
 
@@ -5348,16 +5382,21 @@ void PeerManagerImpl::ProcessMessage(
     }
 
     if (msg_type == NetMsgType::GETCFILTERS) {
+        // Quarantine gate (B3/NF-2): compact filters are derived from the
+        // possibly-drifted block/index state. Do not serve while quarantined.
+        if (recovery::IsQuarantined()) return;
         ProcessGetCFilters(pfrom, *peer, vRecv);
         return;
     }
 
     if (msg_type == NetMsgType::GETCFHEADERS) {
+        if (recovery::IsQuarantined()) return; // B3/NF-2: no filter-header serving while quarantined
         ProcessGetCFHeaders(pfrom, *peer, vRecv);
         return;
     }
 
     if (msg_type == NetMsgType::GETCFCHECKPT) {
+        if (recovery::IsQuarantined()) return; // B3/NF-2: no filter-checkpoint serving while quarantined
         ProcessGetCFCheckPt(pfrom, *peer, vRecv);
         return;
     }
@@ -5370,6 +5409,9 @@ void PeerManagerImpl::ProcessMessage(
     }
 
     if (msg_type == NetMsgType::GETQUORUMROTATIONINFO) {
+        // Quarantine gate (B3/NF-2): quorum-rotation info is built from the
+        // same drifted evodb/quorum state as the MN-list diff. Drop/ignore.
+        if (recovery::IsQuarantined()) return;
         llmq::CGetQuorumRotationInfo cmd;
         vRecv >> cmd;
 
@@ -5501,6 +5543,10 @@ void PeerManagerImpl::ProcessMessage(
 
         // Hivemind HMP seal share
         if (msg_type == NetMsgType::SEALSHARE) {
+            // Quarantine gate (B3): a quarantined node must not aggregate or
+            // re-broadcast HMP seal shares (only its OWN SignBlock was gated
+            // before; the relay path must be suppressed too).
+            if (recovery::IsQuarantined()) return;
             // Skip HMP messages during IBD; state depends on chain tip context.
             if (m_chainman.ActiveChainstate().IsInitialBlockDownload()) return;
             // Skip before Stage 3 -- seals are not embedded in blocks yet (#1084)
@@ -5635,6 +5681,9 @@ void PeerManagerImpl::ProcessMessage(
 
         // Hivemind HMP Phase 1 pubkey commitment
         if (msg_type == NetMsgType::PUBKEYCOMMIT) {
+            // Quarantine gate (B3/NF-2): a quarantined node must not ingest or
+            // re-relay HMP pubkey commitments (mirrors the SEALSHARE gate).
+            if (recovery::IsQuarantined()) return;
             // Skip HMP messages during IBD.
             if (m_chainman.ActiveChainstate().IsInitialBlockDownload()) return;
             // Require active SPORK_25 and spork manager (#1069)
@@ -5678,6 +5727,16 @@ void PeerManagerImpl::ProcessMessage(
             return;
         }
 
+        // Quarantine gate (B3/NF-2 sweep): the subsystem NetHandlers (llmq
+        // DKG/quorum, chainlocks, InstantSend) are dispatched here. The
+        // quorum-data responder (QGETDATA -> QDATA, quorumsman.cpp) serves
+        // directly from the possibly-drifted evodb/quorum state, and the
+        // DKG/ChainLock/InstantSend handlers both ingest and re-relay
+        // consensus messages. A quarantined node must not participate in or
+        // serve any of them -- drop the whole subsystem dispatch. (Own signing
+        // is separately gated at the signing sites; GETDATA-based quorum
+        // serving is gated in ProcessGetData.)
+        if (recovery::IsQuarantined()) return;
         for (const auto& handler : m_handlers) {
             handler->ProcessMessage(pfrom, msg_type, vRecv);
         }
@@ -6200,6 +6259,13 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
     AssertLockHeld(g_msgproc_mutex);
 
     assert(m_llmq_ctx);
+
+    // Quarantine gate (WS-HEAL v2 5.2 / B3): a quarantined node must not
+    // announce, serve or relay ANYTHING -- blocks, headers, transactions,
+    // addrs. Checked at the serving point itself so suppression holds even
+    // if networking is re-enabled out-of-band, and during the init window
+    // before SetInitComplete (B4).
+    if (recovery::IsQuarantined()) return true;
 
     const bool is_masternode = m_active_ctx != nullptr;
 

@@ -2205,9 +2205,19 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
         // just proved inconsistent, while RPC keeps serving the diagnosis
         // and the guided-repair path (getrecoverystatus / repairnode).
         // Disk/IO failures still AbortNode (see FlushStateToDisk et al.).
-        recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_EVODB_DISCONNECT,
-                                  strprintf("EvoDB best-block mismatch disconnecting %s (height %d)",
-                                            pindex->GetBlockHash().ToString(), pindex->nHeight));
+        const std::string detail = strprintf("EvoDB best-block mismatch disconnecting %s (height %d)",
+                                             pindex->GetBlockHash().ToString(), pindex->nHeight);
+        // PARK-VS-EXIT: a GUI/wallet-managed node parks (quarantine) so the
+        // wallet can offer a one-click Repair; a headless node goes DOWN via
+        // the original AbortNode semantics (non-zero exit) rather than sitting
+        // alive-and-quarantined, so monitoring catches the fault. The B3
+        // serving gates still apply on the way down (NoteHeadlessFaultShutdown
+        // engages IsQuarantined()).
+        if (recovery::ParkOnFault()) {
+            recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_EVODB_DISCONNECT, detail);
+        } else {
+            recovery::NoteHeadlessFaultShutdown("DRIFT_EVODB (DisconnectBlock)", detail);
+        }
         return DISCONNECT_FAILED;
     }
 
@@ -2224,11 +2234,16 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
         // handles this idempotently (mirrors connect-path fix).
         int saplingHeight = m_chain_helper->sapling_state->GetBestBlockHeight();
         if (saplingHeight <= pindex->nHeight) {
-            // Same consistency-drift class as the EvoDB check above:
-            // quarantine, never AbortNode (WS-HEAL v2 5).
-            recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_SAPLING_DISCONNECT,
-                                      strprintf("SaplingDB best-block mismatch disconnecting %s (height %d, sapling height %d)",
-                                                pindex->GetBlockHash().ToString(), pindex->nHeight, saplingHeight));
+            // Same consistency-drift class as the EvoDB check above.
+            // PARK-VS-EXIT: GUI parks (quarantine); headless goes DOWN via the
+            // original AbortNode semantics (non-zero exit).
+            const std::string detail = strprintf("SaplingDB best-block mismatch disconnecting %s (height %d, sapling height %d)",
+                                                 pindex->GetBlockHash().ToString(), pindex->nHeight, saplingHeight);
+            if (recovery::ParkOnFault()) {
+                recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_SAPLING_DISCONNECT, detail);
+            } else {
+                recovery::NoteHeadlessFaultShutdown("DRIFT_SAPLING (DisconnectBlock)", detail);
+            }
             return DISCONNECT_FAILED;
         }
     }
@@ -2890,12 +2905,19 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     if (pindex->pprev) {
         bool fDIP0003Active = DeploymentActiveAt(*pindex, m_params.GetConsensus(), Consensus::DEPLOYMENT_DIP0003);
         if (fDIP0003Active && !m_evoDb.VerifyBestBlock(pindex->pprev->GetBlockHash())) {
-            // Consistency-drift class: QUARANTINE instead of AbortNode
-            // (WS-HEAL v2 5). Block connection fails exactly as before; the
-            // node stays up for diagnosis with all duties gated off.
-            recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_EVODB_CONNECT,
-                                      strprintf("EvoDB best-block mismatch connecting %s (height %d)",
-                                                pindex->GetBlockHash().ToString(), pindex->nHeight));
+            // Consistency-drift class. PARK-VS-EXIT: a GUI/wallet-managed node
+            // parks (quarantine, stays up for diagnosis with all duties gated
+            // off) so the wallet can offer a one-click Repair; a headless node
+            // goes DOWN via the original AbortNode semantics (non-zero exit) so
+            // monitoring catches the fault. Block connection fails exactly as
+            // before either way.
+            const std::string detail = strprintf("EvoDB best-block mismatch connecting %s (height %d)",
+                                                 pindex->GetBlockHash().ToString(), pindex->nHeight);
+            if (recovery::ParkOnFault()) {
+                recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_EVODB_CONNECT, detail);
+            } else {
+                recovery::NoteHeadlessFaultShutdown("DRIFT_EVODB (ConnectBlock)", detail);
+            }
             return state.Error("Found EvoDB inconsistency, node quarantined");
         }
     }

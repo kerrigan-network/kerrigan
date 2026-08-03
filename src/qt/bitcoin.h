@@ -73,6 +73,11 @@ public Q_SLOTS:
     void initializeResult(bool success, interfaces::BlockAndHeaderTipInfo tip_info);
     /// Request core shutdown
     void requestShutdown();
+    /// Startup recovery poll (WS-HEAL v2 8.2): while the init thread runs,
+    /// watch for the daemon parking in crippled_wait (pre-init corruption
+    /// diagnosis) and offer the repair dialog - the init thread is blocked
+    /// and cannot surface it itself.
+    void pollStartupRecovery();
     /// Handle runaway exceptions. Shows a message box with the problem and quits the program.
     void handleRunawayException(const QString &message);
 
@@ -105,6 +110,15 @@ private:
     std::unique_ptr<QWidget> shutdownWindow;
     SplashScreen* m_splash = nullptr;
     std::unique_ptr<interfaces::Node> m_node;
+
+    //! Startup recovery poll timer (runs only between requestInitialize()
+    //! and initializeResult()).
+    QTimer* m_startup_recovery_timer{nullptr};
+    //! The crippled_wait repair dialog was already offered this run.
+    bool m_startup_repair_prompted{false};
+    //! A startup repair was armed: initializeResult(false) must relaunch
+    //! through InitExecutor::restart instead of quitting.
+    bool m_repair_relaunch{false};
 
     void startThread();
 };
