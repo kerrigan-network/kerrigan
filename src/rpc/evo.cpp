@@ -137,7 +137,7 @@ static RPCArg GetRpcArg(const std::string& strParamName)
         },
         {"operatorReward",
             {"operatorReward", RPCArg::Type::STR, RPCArg::Optional::NO,
-                "The fraction in %% to share with the operator.\n"
+                "The fraction in % to share with the operator.\n"
                 "The value must be between 0 and 10000."}
         },
         {"ownerAddress",
@@ -2049,7 +2049,7 @@ static RPCHelpMan getdronelist()
 {
     return RPCHelpMan{"getdronelist",
         "\nReturns the deterministic inference-drone list as of a block (the consensus registry that\n"
-        "selects the 40%% coinbase-slot payee from nDronePayoutHeight; see the drone-payout hard fork).\n"
+        "selects the 40% coinbase-slot payee from nDronePayoutHeight; see the drone-payout hard fork).\n"
         "Eligibility and the projected payees are evaluated for the NEXT block on top of the queried one,\n"
         "which is exactly how payee selection consumes the list. The coordinator's off-chain roster can\n"
         "use this to reconcile against consensus.\n",
