@@ -46,10 +46,13 @@ NO_NATPMP ?=
 MULTIPROCESS ?=
 LTO ?=
 NO_HARDEN ?=
-# No fallback mirror: primary URLs are SHA256-verified and an insecure
-# plaintext-HTTP fallback would only add attack surface. Packages that
-# need an alternate source should list it in their own *_download_path.
-FALLBACK_DOWNLOAD_PATH ?=
+# Fallback mirror: primary URLs are SHA256-verified, so an HTTPS fallback that is
+# itself hash-checked adds no attack surface -- a wrong or tampered file fails the
+# pin. The original concern was an INSECURE plaintext-HTTP fallback; bitcoincore.org
+# is HTTPS. Set so a single upstream mirror outage (e.g. savannah returning 502 on
+# freetype) doesn't fail the whole build -- matters with a hard activation-height
+# deadline. Per-package alternates still go in their own *_download_path.
+FALLBACK_DOWNLOAD_PATH ?= https://bitcoincore.org/depends-sources
 
 C_STANDARD ?= c11
 CXX_STANDARD ?= c++20
