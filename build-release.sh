@@ -155,7 +155,7 @@ for name in os.listdir(bindir):
 
     # Identity-shield hard gate: no /home/<user>/ path may survive in ANY binary.
     # Belt-and-suspenders behind the qt_prfxpath sanitize + --remap flags: turns a
-    # silent qmake/DWARF leak into a build failure (cf. v1.0.x /home/raw, v1.1.2 /home/andrew).
+    # silent qmake/DWARF leak into a build failure (past releases leaked operator home paths this way).
     for _b in "$outdir/bin/"*; do
         if LC_ALL=C strings "$_b" 2>/dev/null | grep -qE '/home/[a-z]'; then
             error "$tag: /home/ path leaked in $(basename "$_b") after sanitize (identity-shield gate)"
