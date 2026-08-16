@@ -10,6 +10,14 @@ define $(package)_set_vars
 $(package)_config_opts=--disable-shared --enable-cxx --disable-replication --enable-option-checking
 $(package)_config_opts_mingw32=--enable-mingw
 $(package)_cflags+=-Wno-error=implicit-function-declaration -Wno-error=format-security -Wno-error=implicit-int
+# glibc 2.34+ dropped pthread_yield to a non-default compat version, so BDB's
+# os/os_yield.c pthread_yield() branch (configure detects HAVE_PTHREAD_YIELD
+# because libc still exports the compat symbol) leaves an unresolvable
+# reference at the final static link of kerrigand. Rewrite the call token to
+# sched_yield (identical int f(void) semantics; <sched.h> is already included
+# on Linux) so libdb never references the dropped symbol. Only the function
+# identifier is affected -- the HAVE_PTHREAD_YIELD macro token is untouched.
+$(package)_cflags+=-Dpthread_yield=sched_yield
 $(package)_cppflags_freebsd=-D_XOPEN_SOURCE=600 -D__BSD_VISIBLE=1
 $(package)_cppflags_netbsd=-D_XOPEN_SOURCE=600
 $(package)_cppflags_mingw32=-DUNICODE -D_UNICODE
