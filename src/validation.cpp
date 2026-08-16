@@ -2546,6 +2546,50 @@ static int64_t nTimeIndexWrite = 0;
 static int64_t nTimeTotal = 0;
 static int64_t nBlocksTotal = 0;
 
+/** A "pure escrow burn" (see Consensus::Params::nEscrowBurnHeight).
+ *
+ *  Returns true iff `tx` spends ONLY growth-escrow coins and destroys their ENTIRE
+ *  value to OP_RETURN with zero fee, i.e.:
+ *    - not a coinbase, and has >=1 input and >=1 output;
+ *    - EVERY input is an unspent IsGrowthEscrowScript coin (current or legacy script);
+ *    - EVERY output is a bare OP_RETURN (provably unspendable -- AddCoin drops these,
+ *      so the value leaves the UTXO set entirely: a real supply-reducing burn);
+ *    - sum(outputs) == sum(inputs)  -> zero fee, so NOT one satoshi can leak to the
+ *      miner. Combined with "all outputs OP_RETURN", the tx can ONLY destroy escrow
+ *      value -- it can never redirect it to a spendable address.
+ *  Because of those invariants, accepting such a tx WITHOUT a signature and WITHOUT a
+ *  governance proposal is safe (griefing-proof: any deviation makes it not-a-burn and
+ *  the tx is invalid). Coinbase maturity is still enforced by CheckTxInputs, so only
+ *  mature escrow coins can be burned. Inert unless nEscrowBurnHeight is configured and
+ *  reached (checked by the caller). */
+static bool IsPureEscrowBurn(const CTransaction& tx, const CCoinsViewCache& view,
+                             const Consensus::Params& consensus)
+{
+    if (tx.IsCoinBase()) return false;
+    if (tx.vin.empty() || tx.vout.empty()) return false;
+
+    CAmount inSum = 0;
+    for (const auto& txin : tx.vin) {
+        const Coin& coin = view.AccessCoin(txin.prevout);
+        if (coin.IsSpent()) return false; // missing/spent input -> not a valid burn
+        const std::vector<unsigned char> spk(coin.out.scriptPubKey.begin(),
+                                             coin.out.scriptPubKey.end());
+        if (!consensus.IsGrowthEscrowScript(spk)) return false; // every input MUST be escrow
+        inSum += coin.out.nValue;
+        if (!MoneyRange(inSum)) return false;
+    }
+
+    CAmount outSum = 0;
+    for (const auto& txout : tx.vout) {
+        if (txout.scriptPubKey.empty() || txout.scriptPubKey[0] != OP_RETURN) return false; // every output MUST burn
+        if (txout.nValue < 0) return false;
+        outSum += txout.nValue;
+        if (!MoneyRange(outSum)) return false;
+    }
+
+    return inSum == outSum; // value-conserving: full burn, zero fee to the miner
+}
+
 /** Validate a governance-approved escrow release spend.
  *  Checks the OP_RETURN marker, governance proposal funding, output matching, and anti-replay.
  *
@@ -3478,6 +3522,19 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
         nInputs += tx.vin.size();
 
+        // Growth-escrow BURN carve-out (nEscrowBurnHeight). A "pure escrow burn"
+        // (every input an escrow coin, every output OP_RETURN, zero fee) may destroy
+        // escrow value with NO signature and NO governance proposal -- it can only burn,
+        // never redirect or leak to fees (see IsPureEscrowBurn). Decided ONCE here from
+        // block-local inputs (height + this tx's coins), so the verdict is identical on
+        // every node, and consulted at BOTH the escrow gate and the input-script check
+        // below. Coinbase maturity is still enforced by CheckTxInputs. Inert unless the
+        // height is configured + reached.
+        const Consensus::Params& escrowConsensus = m_params.GetConsensus();
+        const bool isEscrowBurn = escrowConsensus.nEscrowBurnHeight > 0 &&
+                                  pindex->nHeight >= escrowConsensus.nEscrowBurnHeight &&
+                                  IsPureEscrowBurn(tx, view, escrowConsensus);
+
         if (!tx.IsCoinBase())
         {
             CAmount txfee = 0;
@@ -3520,7 +3577,9 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                         }
                     }
                 }
-                if (spendsFromEscrow) {
+                // A pure escrow burn (isEscrowBurn) bypasses the governance-release
+                // requirement: it can only destroy the escrow, never redirect it.
+                if (spendsFromEscrow && !isEscrowBurn) {
                     CGovernanceManager* pGovMan = m_chain_helper ? &m_chain_helper->GetGovernanceManager() : nullptr;
                     // The escrow gate's verdict depends ONLY on the
                     // block's own height versus the baked consensus floor
@@ -3687,7 +3746,11 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
             std::vector<CScriptCheck> vChecks;
             bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks (still consult the cache, though) */
             TxValidationState tx_state;
-            if (fScriptChecks && !CheckInputScripts(tx, tx_state, view, flags, fCacheResults, fCacheResults, txsdata[i], g_parallel_script_checks ? &vChecks : nullptr)) {
+            // A pure escrow burn is keyless (its escrow inputs carry no signature), so it
+            // MUST bypass input-script verification. Safe by construction: IsPureEscrowBurn
+            // guarantees the tx can only destroy escrow value, so there is nothing a
+            // signature would protect. Every other tx is verified normally.
+            if (!isEscrowBurn && fScriptChecks && !CheckInputScripts(tx, tx_state, view, flags, fCacheResults, fCacheResults, txsdata[i], g_parallel_script_checks ? &vChecks : nullptr)) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                               tx_state.GetRejectReason(), tx_state.GetDebugMessage());

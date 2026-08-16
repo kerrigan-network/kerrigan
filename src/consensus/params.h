@@ -483,6 +483,21 @@ struct Params {
     int nGrowthEscrowEndHeight{0};
 
     /**
+     * Growth-escrow BURN activation height. At/after this block a transaction may
+     * spend growth-escrow coins (current growthEscrowScript OR any legacyEscrowScripts
+     * entry, via IsGrowthEscrowScript) WITHOUT a signature and WITHOUT a governance
+     * proposal, but ONLY if it is a "pure escrow burn": every input is an escrow coin,
+     * every output is OP_RETURN, and the output value equals the input value (zero fee).
+     * Such a tx can therefore only DESTROY escrow value -- it can never redirect it to a
+     * spendable address, and no value can leak to the miner as fees -- so bypassing the
+     * signature + governance checks is safe (see IsPureEscrowBurn in validation.cpp).
+     * This lets the accumulated escrow be permanently burned to OP_RETURN even though the
+     * governance-release path is unusable and the rotated pre-Plan-X keys are gone. 0 =
+     * disabled (escrow stays governance-gated, no burn carve-out).
+     */
+    int nEscrowBurnHeight{0};
+
+    /**
      * DETERMINISTIC TAINT-ROOT FREEZE (incident 2026-05).
      *
      * nFreezeActivationHeight (H): the consensus activation height for the

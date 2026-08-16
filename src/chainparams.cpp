@@ -530,7 +530,14 @@ public:
         // so the unlock floor needs no node-state-dependent branch.
         consensus.nEscrowUnlockHeight = 60000;
 
-        consensus.nGrowthEscrowEndHeight = 262800; // ~12 months, 40% burns via OP_RETURN after this
+        // Growth-treasury retirement at the v1.3.0 fork (h130000): from this height the
+        // 40% coinbase slot BURNS via OP_RETURN instead of funding the escrow (emission
+        // burn, nGrowthEscrowEndHeight), AND the already-accumulated escrow becomes
+        // burnable to OP_RETURN via the keyless value-conserving carve-out
+        // (nEscrowBurnHeight). Together: no growth treasury remains -- past accumulation
+        // is burned by dedicated burn txs, future 40% is burned at the source.
+        consensus.nGrowthEscrowEndHeight = 129999; // was 262800; emission burns from h130000 (height > 129999)
+        consensus.nEscrowBurnHeight = 130000;      // accumulated escrow burnable from h130000
 
         // Deterministic taint-root freeze (incident 2026-05). MAINNET ONLY.
         //
@@ -1411,6 +1418,7 @@ public:
         consensus.devFundPaymentScript = BuildTreasuryScript("5d9f2310a8602b46e6e93c8277a8c9e8ea7c7ee6");
         consensus.growthEscrowScript = BuildTreasuryScript("b0841b8f59f554fb92c7951ed9f890faba8e8f89");
         consensus.nGrowthEscrowEndHeight = 500; // Short for regtest
+        consensus.nEscrowBurnHeight = 500;      // burn carve-out active from 500 (override via -testactivationheight=escrowburn@N)
 
         // Taint-root freeze: REGTEST activates at height 1 so unit/functional
         // tests can exercise the consensus path deterministically.
@@ -1644,6 +1652,11 @@ static void MaybeUpdateHeights(const ArgsManager& args, Consensus::Params& conse
             // pre-fork (escrow slot) and post-fork (drone payee slot) blocks
             // in the same run.
             consensus.nDronePayoutHeight = int{height};
+        } else if (name == "escrowburn") {
+            // Growth-escrow burn carve-out activation (nEscrowBurnHeight). Lets regtest
+            // tests mine pre-activation (escrow governance-locked) and post-activation
+            // (keyless pure-burn allowed) blocks in the same run.
+            consensus.nEscrowBurnHeight = int{height};
         } else if (name == "withdrawals") {
             consensus.WithdrawalsHeight = int{height};
         } else {
@@ -2018,7 +2031,7 @@ void SetupChainParamsOptions(ArgsManager& argsman)
     argsman.AddArg("-llmqtestplatformparams=<size>:<threshold>", "Override the default LLMQ size for the LLMQ_TEST_PLATFORM quorum (default: 3:2, regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-minimumdifficultyblocks=<n>", "The number of blocks that can be mined with the minimum difficulty at the start of a chain (default: 0, devnet-only)", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-powtargetspacing=<n>", "Override the default PowTargetSpacing value in seconds (default: 120s, devnet-only)", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::CHAINPARAMS);
-    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (bip147, bip34, dersig, cltv, csv, brr, dip0001, dip0008, dip0024, v19, v20, mn_rr, sapling, hmp, hmp_seal_algo, hmp_prevseal_fix, hmp_deterministic_seal, daa_retarget_fix, withdrawals, dronepayout). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-testactivationheight=name@height.", "Set the activation height of 'name' (bip147, bip34, dersig, cltv, csv, brr, dip0001, dip0008, dip0024, v19, v20, mn_rr, sapling, hmp, hmp_seal_algo, hmp_prevseal_fix, hmp_deterministic_seal, daa_retarget_fix, withdrawals, dronepayout, escrowburn). (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-dronesnapshotperiod=<n>", "Override the drone-list full-snapshot interval in blocks (default: 576). Local storage layout only, never consensus. (regtest-only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-vbparams=<deployment>:<start>:<end>(:min_activation_height(:<window>:<threshold/thresholdstart>(:<thresholdmin>:<falloffcoeff>:<mnactivation>)))",
                  "Use given start/end times and min_activation_height for specified version bits deployment (regtest-only). "
