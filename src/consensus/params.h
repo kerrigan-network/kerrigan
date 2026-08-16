@@ -477,8 +477,10 @@ struct Params {
 
     /**
      * Growth escrow sunset height. After this block, the 40% coinbase allocation
-     * burns via OP_RETURN instead of entering the escrow. Existing escrow UTXOs
-     * become permanently unspendable. Set to 0 to disable (no sunset).
+     * burns via OP_RETURN instead of entering the escrow. Existing escrow UTXOs stay
+     * consensus-locked (governance-gated), and -- at/after nEscrowBurnHeight -- become
+     * burnable to OP_RETURN via the keyless value-conserving carve-out (they can be
+     * DESTROYED but never redirected to a spendable address). Set to 0 to disable.
      */
     int nGrowthEscrowEndHeight{0};
 

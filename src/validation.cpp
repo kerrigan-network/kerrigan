@@ -2567,6 +2567,13 @@ static bool IsPureEscrowBurn(const CTransaction& tx, const CCoinsViewCache& view
 {
     if (tx.IsCoinBase()) return false;
     if (tx.vin.empty() || tx.vout.empty()) return false;
+    // A burn is a PLAIN transparent spend only. Reject any special-tx / Sapling-typed tx
+    // (nType != NORMAL): a TRANSACTION_SAPLING burn could carry a positive Sapling
+    // valueBalance (shielded->transparent) that CheckTxInputs counts as fee, leaking the
+    // spender's own shielded value to the miner -- not a pure escrow burn. Requiring
+    // TRANSACTION_NORMAL keeps the "zero fee, nothing leaks" invariant literally true and
+    // avoids any coupling with special-tx payloads.
+    if (tx.nType != TRANSACTION_NORMAL) return false;
 
     CAmount inSum = 0;
     for (const auto& txin : tx.vin) {

@@ -1417,7 +1417,11 @@ public:
         consensus.foundersPaymentScript = BuildTreasuryScript("fd264480b44878cdf763c9cf4daa354bbb87a4e8");
         consensus.devFundPaymentScript = BuildTreasuryScript("5d9f2310a8602b46e6e93c8277a8c9e8ea7c7ee6");
         consensus.growthEscrowScript = BuildTreasuryScript("b0841b8f59f554fb92c7951ed9f890faba8e8f89");
-        consensus.nGrowthEscrowEndHeight = 500; // Short for regtest
+        // Mirror mainnet's boundary relationship end == burn-1 (mainnet 129999/130000) so
+        // the functional test exercises the REAL composition: at height 500 the coinbase
+        // burns emission at source (500 > 499) AND accumulated escrow becomes burnable
+        // (500 >= 500), both firing on the same block -- exactly as at h130000 on mainnet.
+        consensus.nGrowthEscrowEndHeight = 499; // = nEscrowBurnHeight - 1
         consensus.nEscrowBurnHeight = 500;      // burn carve-out active from 500 (override via -testactivationheight=escrowburn@N)
 
         // Taint-root freeze: REGTEST activates at height 1 so unit/functional
