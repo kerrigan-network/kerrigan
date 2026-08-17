@@ -160,6 +160,13 @@ src/qt/qrc_*.cpp
 src/qt/*/qrc_*.cpp
 src/qt/locale/*.qm
 
+# Generated installer/bundle templates. configure substitutes @abs_top_srcdir@ from
+# the tracked .in files at build time, baking the build host's ABSOLUTE path into
+# setup.nsi (an identity/path leak if committed). The build regenerates both from
+# their .in; only the .in templates are tracked (upstream ignores these too).
+/share/setup.nsi
+/share/qt/Info.plist
+
 # Host-local release-builder script (not part of the release; may reference
 # machine-specific paths).
 /.lair-build-release.sh
