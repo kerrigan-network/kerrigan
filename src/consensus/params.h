@@ -262,6 +262,32 @@ struct Params {
         return nDaaRetargetFixHeight > 0 && height >= nDaaRetargetFixHeight;
     }
 
+    /** Hard-fork activation height for the per-algo LWMA difficulty retarget (v1.3.1).
+     *  The Hivemind DAA (nDaaRetargetFixHeight) still retargets each algo off a
+     *  40-block ALL-ALGO averaging window plus a per-algo "rebalance" count term.
+     *  Both are exploited by profit-hopping multipools: a burst-then-abandon on
+     *  one algo contaminates the shared window (the DAA reads "fast" and tightens)
+     *  while the count term pins a +12.5%/block ratchet on whichever algo is left
+     *  carrying the chain -- difficulty strands high, blocks stall, until the burst
+     *  ages out ~40 blocks later (hours, at the resulting slow rate). Reproduced by
+     *  a byte-exact port of the live DAA and simulated across steady/burst-abandon/
+     *  continuous-hop/timestamp-attack scenarios (see the v1.3.1 DAA sim).
+     *  From this height each algo retargets independently with a zawy12 LWMA-1 over
+     *  its own last-60 same-algo blocks (per-algo target spacing = nPowTargetSpacing
+     *  * NUM_ALGOS = 480s), decoupling the algos entirely and eliminating both the
+     *  window contamination and the sole-survivor ratchet. Below this height the
+     *  retarget is bit-identical to the Hivemind path, so pre-fork block validity is
+     *  unchanged; behaviour only diverges at the flag day.
+     *  Consensus: every node must switch at the same height.
+     *  0 = never activate (safe default). Set per-network in chainparams.cpp. */
+    int nDaaLwmaHeight{0};
+
+    /** Whether the per-algo LWMA retarget is active at a given height. */
+    bool IsDaaLwmaActive(int height) const
+    {
+        return nDaaLwmaHeight > 0 && height >= nDaaLwmaHeight;
+    }
+
     /** Hard-fork activation height for the LLMQ_60_60 small-network quorum.
      *  The Dash-inherited quorum roles (ChainLocks on LLMQ_400_60, EHF on
      *  LLMQ_400_85, InstantSend on the DIP0024-rotated LLMQ_60_75) can never

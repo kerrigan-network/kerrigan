@@ -322,6 +322,25 @@ public:
         // (+-16%) and bounds the stale-algo gap reset, bringing block time back from
         // ~58-64s toward 120s. Same height as the seal fix so operators hit one fork.
         consensus.nDaaRetargetFixHeight = 130000;
+        // Per-algo LWMA difficulty retarget hard-fork (v1.3.1). Replaces the
+        // Hivemind all-algo averaging window + per-algo rebalance term (both
+        // exploited by profit-hopping multipools: a burst-then-abandon on one
+        // algo strands another algo's difficulty and stalls the chain) with an
+        // independent zawy12 LWMA-1 per algo. Bit-identical to the Hivemind path
+        // below this height.
+        //
+        // This is a hard consensus fork: every node still on the Hivemind DAA at
+        // this height forks off the chain. Value LOCKED for the v1.3.1 tag as
+        // tip + 15,000 (~3 weeks), covering the coordinated fleet upgrade (80 MNs +
+        // seeds + pools + exchanges, mostly third-party community operators on a
+        // small chain, where a 2-week window proved too tight): tip 135260 on
+        // 2026-08-28 -> 150260, rounded up to 151000 (~21.9 days runway). Sits well
+        // under nDeprecationHeight=184000.
+        // ***AT PUBLISH TIME reconfirm runway >= 15,000 blocks against the live tip;
+        // if the build/publish slipped so far that (151000 - tip) < 15,000, bump
+        // this and rebuild before releasing — the runway anchors on binary
+        // availability, not the code-freeze date.***
+        consensus.nDaaLwmaHeight = 151000;
         // LLMQ_60_60 small-network quorum hard-fork. Enables the DKG for the
         // 60-member quorum type that takes over the ChainLocks / InstantSend /
         // EHF roles from the unformable Dash-sized types (see the long living
@@ -834,6 +853,12 @@ public:
         consensus.nHMPDeterministicSealHeight = 0;
         // DAA retarget symmetry fix: off until scheduled.
         consensus.nDaaRetargetFixHeight = 0;
+        // Per-algo LWMA retarget (v1.3.1): active early on testnet so the
+        // public/CI testnet always crosses the Hivemind->LWMA fork and
+        // continuously exercises the DAA off-mainnet. Set low (500) to leave
+        // a settled multi-algo Hivemind history (>N same-algo blocks) before
+        // the boundary. Mainnet activates at its own scheduled height.
+        consensus.nDaaLwmaHeight = 500;
         // LLMQ_60_60 small-network quorum: mainnet-only; testnet keeps its
         // LLMQ_50_60-based roles (that type stays enabled on testnet).
         consensus.nLLMQ6060Height = 0;
@@ -1060,6 +1085,8 @@ public:
         // via -testactivationheight).
         consensus.nHMPDeterministicSealHeight = 0;
         consensus.nDaaRetargetFixHeight = 0;
+        // Per-algo LWMA retarget (v1.3.1): off until scheduled.
+        consensus.nDaaLwmaHeight = 0;
         // LLMQ_60_60 small-network quorum: mainnet-only; devnets use the LLMQ_DEVNET types.
         consensus.nLLMQ6060Height = 0;
         // Drone coinbase payouts: off until scheduled (mirrors the other
@@ -1352,6 +1379,9 @@ public:
         // covered by pow_tests in-process. The -testactivationheight override
         // exists for parity but does not exercise retargeting on regtest.
         consensus.nDaaRetargetFixHeight = 0;
+        // Per-algo LWMA retarget (v1.3.1): off by default; pow_tests set it
+        // in-process via the "lwma" -testactivationheight override below.
+        consensus.nDaaLwmaHeight = 0;
         // LLMQ_60_60 small-network quorum: mainnet-only; regtest uses the LLMQ_TEST types.
         consensus.nLLMQ6060Height = 0;
         // Drone coinbase payouts: active at a low height so functional tests
@@ -1651,6 +1681,11 @@ static void MaybeUpdateHeights(const ArgsManager& args, Consensus::Params& conse
             // (asymmetric clamp, floor-jump reset) and post-fix (symmetric
             // clamp, bounded reset) blocks in the same run.
             consensus.nDaaRetargetFixHeight = int{height};
+        } else if (name == "daa_lwma") {
+            // v1.3.1 per-algo LWMA retarget. Lets pow_tests mine pre-fork
+            // (Hivemind window + rebalance) and post-fork (per-algo LWMA)
+            // blocks in the same run.
+            consensus.nDaaLwmaHeight = int{height};
         } else if (name == "dronepayout") {
             // Inference-drone coinbase payout fork. Lets regtest tests mine
             // pre-fork (escrow slot) and post-fork (drone payee slot) blocks

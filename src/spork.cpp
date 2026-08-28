@@ -320,14 +320,23 @@ SporkValue CSporkManager::GetSporkValue(SporkId nSporkID) const
                 // existing spork key so the fork can be armed when the
                 // ecosystem is ready. See IsDronePayoutEffective (evo/dronelist.h).
                 break; // fall through to normal spork lookup
-            // IS/CL must stay OFF at genesis; LLMQ needs masternodes registered first.
-            // Superblocks OFF at genesis, no governance without meaningful MN participation.
-            // Return 4070908800 (far-future disabled sentinel) so IsSporkActive() returns false.
+            // IS/CL/DKG were force-disabled at genesis because LLMQ quorums
+            // cannot form without registered masternodes. That precondition is
+            // now met (80 ENABLED MNs > the 60-member llmq_60_60 threshold), so
+            // these fall through to the normal signed-spork lookup and are armed
+            // via the Set-C spork key when the operator is ready. Enable order:
+            // SPORK_17 (DKG) first -> quorum forms -> SPORK_2/SPORK_3 (IS) +
+            // SPORK_19 (ChainLocks). Defaults remain OFF via sporkDefs.
             case SPORK_2_INSTANTSEND_ENABLED:
             case SPORK_3_INSTANTSEND_BLOCK_FILTERING:
-            case SPORK_9_SUPERBLOCKS_ENABLED:
             case SPORK_17_QUORUM_DKG_ENABLED:
             case SPORK_19_CHAINLOCKS_ENABLED:
+                break; // fall through to normal spork lookup
+            // Superblocks + quorum-PoSe stay hardened OFF on mainnet: no
+            // governance without meaningful MN participation, and PoSe penalties
+            // should wait until quorums are stable. Return the far-future
+            // disabled sentinel so IsSporkActive() returns false.
+            case SPORK_9_SUPERBLOCKS_ENABLED:
             case SPORK_23_QUORUM_POSE:
                 return 4070908800ULL;
             default:

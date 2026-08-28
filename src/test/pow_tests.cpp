@@ -734,4 +734,244 @@ BOOST_AUTO_TEST_CASE(kawpow_test_vectors_epoch0)
     }
 }
 
+/* ======================================================================
+ * Per-algo LWMA-1 DAA tests (v1.3.1, LwmaPerAlgo)
+ *
+ * The retarget is exercised through GetNextWorkRequired() with the LWMA
+ * activation height (nDaaLwmaHeight) lowered so the dispatch reaches
+ * LwmaPerAlgo -- the same override pattern the daa_retarget_fix_* cases use
+ * for nDiffFloorHeight. Mainnet chainparams are used unchanged, so the
+ * per-algo powLimit / floor constants the function sees are the real mainnet
+ * values (X11/KawPoW/Equihash200/Equihash192).
+ *
+ * Every expected nBits below was produced by a byte-exact standalone port of
+ * LwmaPerAlgo built against the real arith_uint256, cross-checked bit-for-bit
+ * against an independent zawy12 LWMA-1 reference over 68 generated scenarios
+ * (all four algos, steady / clamp / collapse / bootstrap edge cases). The
+ * golden generator builds the identical synthetic chain each case builds here.
+ * ====================================================================== */
+
+// Input targets used by the LWMA cases (compact nBits), all for the KawPoW algo
+// unless noted. Chosen relative to the mainnet per-algo floor/powLimit so the
+// scenarios land in the intended branch.
+static constexpr unsigned int LWMA_KHARD    = 0x1c07f420U; // KawPoW, 16x harder than the KawPoW floor
+static constexpr unsigned int LWMA_KMED     = 0x1c3fa100U; // KawPoW, 2x harder than the KawPoW floor
+static constexpr unsigned int LWMA_EQ192POW = 0x1f100000U; // Equihash(192,7) powLimit
+
+// Build a single-algo synthetic chain: block i at height (baseHeight + i), the
+// given algo (encoded into nVersion), nTime = times[i], nBits = bits. The vector
+// is fill-constructed (CBlockIndex is non-movable) and returned by value; moving
+// a std::vector transfers its buffer, so the pprev addresses stay valid.
+static std::vector<CBlockIndex> BuildLwmaChain(int baseHeight, int algo,
+                                               const std::vector<int64_t>& times, unsigned int bits)
+{
+    std::vector<CBlockIndex> blocks(times.size());
+    for (size_t i = 0; i < times.size(); ++i) {
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+        blocks[i].nHeight = baseHeight + static_cast<int>(i);
+        blocks[i].nTime = static_cast<uint32_t>(times[i]);
+        blocks[i].nBits = bits;
+        blocks[i].nVersion = BLOCK_VERSION_DEFAULT | GetVersionForAlgo(algo);
+    }
+    return blocks;
+}
+
+/* (a) GOLDEN REGRESSION: a steady 65-block KawPoW chain at the 480s per-algo
+ * spacing must reproduce the oracle's exact nBits. Note the result is one ULP
+ * below the input target (0x1c07f41f vs 0x1c07f420): the div-before-multiply
+ * (sumTarget/Neff/k)*weightedSolvetimes drops sub-compact-precision low bits,
+ * which the oracle also drops -- hence a golden value, not the input. */
+BOOST_AUTO_TEST_CASE(daa_lwma_golden_steady_retarget)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDaaLwmaHeight = 1; // activate LWMA at the test heights
+
+    std::vector<int64_t> times;
+    for (int i = 0; i < 65; ++i) times.push_back(1700000000LL + static_cast<int64_t>(i) * 480);
+    std::vector<CBlockIndex> blocks = BuildLwmaChain(/*baseHeight=*/0, ALGO_KAWPOW, times, LWMA_KHARD);
+
+    CBlockHeader hdr;
+    hdr.nTime = blocks.back().nTime + 480;
+
+    // Cross-checked zawy12 LWMA-1 oracle, identical 65-block steady chain.
+    const unsigned int kGolden = 0x1c07f41fU;
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW), kGolden);
+}
+
+/* (b) BOOTSTRAP: fewer than two same-algo blocks -> EffectivePowLimitForAlgo.
+ * Below nDiffFloorHeight that is the permissive per-algo genesis powLimit. */
+BOOST_AUTO_TEST_CASE(daa_lwma_bootstrap_insufficient_history)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDaaLwmaHeight = 1;
+
+    for (int algo = 0; algo < NUM_ALGOS; ++algo) {
+        // Single same-algo block: a.size() == 1 < 2 -> bootstrap branch.
+        std::vector<int64_t> times{1700000000LL};
+        std::vector<CBlockIndex> blocks = BuildLwmaChain(/*baseHeight=*/0, algo, times, LWMA_KHARD);
+        CBlockHeader hdr;
+        hdr.nTime = blocks.back().nTime + 480;
+        // nNextHeight (=1) < nDiffFloorHeight, so the effective limit is powLimitAlgo.
+        BOOST_CHECK_EQUAL(
+            GetNextWorkRequired(&blocks.back(), &hdr, consensus, algo),
+            UintToArith256(consensus.powLimitAlgo[algo]).GetCompact());
+    }
+}
+
+/* (c) SOLVETIME CLAMPS: one gap > 6T and one gap < -5T in the window. The
+ * clamped result matches the oracle and differs from the unclamped value,
+ * proving the [-5T, +6T] bounds actually bind. */
+BOOST_AUTO_TEST_CASE(daa_lwma_solvetime_clamps)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDaaLwmaHeight = 1;
+
+    std::vector<int64_t> times;
+    int64_t cur = 1700000000LL;
+    times.push_back(cur);
+    for (int i = 1; i < 80; ++i) {
+        int64_t d = 480;         // T = 480
+        if (i == 77) d = 999999; // >> 6T (2880): high-outlier clamp
+        if (i == 79) d = -4000;  // < -5T (-2400): out-of-order clamp
+        cur += d;
+        times.push_back(cur);
+    }
+    std::vector<CBlockIndex> blocks = BuildLwmaChain(/*baseHeight=*/0, ALGO_KAWPOW, times, LWMA_KHARD);
+    CBlockHeader hdr;
+    hdr.nTime = blocks.back().nTime + 480;
+
+    // Cross-checked zawy12 LWMA-1 oracle, same chain, clamps applied.
+    const unsigned int kClamped   = 0x1c07a63dU;
+    // Same oracle mirror with the solvetime clamps removed.
+    const unsigned int kUnclamped = 0x1d010000U;
+    const unsigned int got = GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW);
+    BOOST_CHECK_EQUAL(got, kClamped);
+    BOOST_CHECK(got != kUnclamped); // the clamp changed the result
+}
+
+/* (d) ANTI-TIMEWARP FLOOR: a descending-timestamp chain drives every in-window
+ * solvetime to the -5T clamp, so the weighted sum would go negative; the k/20
+ * floor rescues it. Without the floor the negative weighted sum wraps (the
+ * uint32_t cast) and pins the result at powLimit; with it the result is a
+ * bounded, harder-than-input target matching the oracle. */
+BOOST_AUTO_TEST_CASE(daa_lwma_anti_timewarp_floor)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDaaLwmaHeight = 1;
+
+    std::vector<int64_t> times;
+    for (int i = 0; i < 80; ++i) times.push_back(1700000000LL + static_cast<int64_t>(79 - i) * 3000);
+    std::vector<CBlockIndex> blocks = BuildLwmaChain(/*baseHeight=*/0, ALGO_KAWPOW, times, LWMA_KHARD);
+    CBlockHeader hdr;
+    hdr.nTime = blocks.back().nTime + 480;
+
+    // Cross-checked zawy12 LWMA-1 oracle, weightedSolvetimes floored at k/20.
+    const unsigned int kFloored = 0x1b65ce66U;
+    // Same oracle mirror without the k/20 floor: wraps and pins at powLimit.
+    const unsigned int kNoFloor = 0x1d010000U;
+    const unsigned int got = GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW);
+    BOOST_CHECK_EQUAL(got, kFloored);
+    BOOST_CHECK(got != kNoFloor);
+
+    // The floored path yields a bounded, non-zero target strictly harder than
+    // the input (a spike, but not the wrapped powLimit blow-up).
+    arith_uint256 gotTarget;  gotTarget.SetCompact(got);
+    arith_uint256 inTarget;   inTarget.SetCompact(LWMA_KHARD);
+    BOOST_CHECK(gotTarget > arith_uint256(0));
+    BOOST_CHECK(gotTarget < inTarget);
+}
+
+/* (e) DIFFICULTY FLOOR CAP: above nDiffFloorHeight a slow chain (max +6T
+ * spacing) wants to ease past the KawPoW floor; the cap holds it at the floor
+ * and the result is never easier (never a larger target) than the floor. */
+BOOST_AUTO_TEST_CASE(daa_lwma_difficulty_floor_cap)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDaaLwmaHeight = 1;
+    // Keep mainnet nDiffFloorHeight (14000); build the chain above it.
+    BOOST_REQUIRE(consensus.nDiffFloorHeight > 0);
+
+    std::vector<int64_t> times;
+    for (int i = 0; i < 65; ++i) times.push_back(1700000000LL + static_cast<int64_t>(i) * 2880); // 6T spacing
+    std::vector<CBlockIndex> blocks = BuildLwmaChain(/*baseHeight=*/consensus.nDiffFloorHeight, ALGO_KAWPOW, times, LWMA_KMED);
+    CBlockHeader hdr;
+    hdr.nTime = blocks.back().nTime + 2880;
+
+    // Cross-checked oracle: capped at the KawPoW floor.
+    const unsigned int kFloorCompact = UintToArith256(consensus.powLimitFloorAlgo[ALGO_KAWPOW]).GetCompact();
+    const unsigned int got = GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_KAWPOW);
+    BOOST_CHECK_EQUAL(got, kFloorCompact); // oracle golden == floor
+    BOOST_CHECK_EQUAL(got, 0x1c7f4200U);
+
+    // Never easier (never a larger target) than the per-algo floor.
+    arith_uint256 gotTarget;  gotTarget.SetCompact(got);
+    BOOST_CHECK(gotTarget <= UintToArith256(consensus.powLimitFloorAlgo[ALGO_KAWPOW]));
+}
+
+/* (f) OVERFLOW SAFETY: the easiest algo (Equihash-192) at its powLimit for the
+ * full 60-block window. sumTarget accumulates 60 near-2^244 targets (~2^250, no
+ * 256-bit wrap); the result stays a sane non-zero target at/under powLimit. */
+BOOST_AUTO_TEST_CASE(daa_lwma_overflow_safety_at_powlimit)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    Consensus::Params consensus = chainParams->GetConsensus();
+    consensus.nDaaLwmaHeight = 1;
+
+    std::vector<int64_t> times;
+    for (int i = 0; i < 62; ++i) times.push_back(1700000000LL + static_cast<int64_t>(i) * 480);
+    // Below nDiffFloorHeight so the cap is the (easiest) powLimitAlgo, not the floor.
+    std::vector<CBlockIndex> blocks = BuildLwmaChain(/*baseHeight=*/0, ALGO_EQUIHASH_192, times, LWMA_EQ192POW);
+    CBlockHeader hdr;
+    hdr.nTime = blocks.back().nTime + 480;
+
+    // Cross-checked oracle: one ULP below powLimit (div rounding), NOT wrapped.
+    const unsigned int kGolden = 0x1f0fffffU;
+    const unsigned int got = GetNextWorkRequired(&blocks.back(), &hdr, consensus, ALGO_EQUIHASH_192);
+    BOOST_CHECK_EQUAL(got, kGolden);
+
+    arith_uint256 gotTarget;  gotTarget.SetCompact(got);
+    BOOST_CHECK(gotTarget > arith_uint256(0));                                        // no wrap-to-zero
+    BOOST_CHECK(gotTarget <= UintToArith256(consensus.powLimitAlgo[ALGO_EQUIHASH_192])); // capped
+}
+
+/* (g) ACTIVATION DISPATCH: GetNextWorkRequired must take the Hivemind path
+ * below nDaaLwmaHeight and LwmaPerAlgo at/above it, for the identical chain. */
+BOOST_AUTO_TEST_CASE(daa_lwma_activation_dispatch)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, CBaseChainParams::MAIN);
+    const Consensus::Params base = chainParams->GetConsensus();
+
+    // Steady 65-block KawPoW chain (same as the golden-steady case).
+    std::vector<int64_t> times;
+    for (int i = 0; i < 65; ++i) times.push_back(1700000000LL + static_cast<int64_t>(i) * 480);
+    std::vector<CBlockIndex> blocks = BuildLwmaChain(/*baseHeight=*/0, ALGO_KAWPOW, times, LWMA_KHARD);
+    CBlockHeader hdr;
+    hdr.nTime = blocks.back().nTime + 480;
+    const int nNext = blocks.back().nHeight + 1; // = 65
+
+    // LWMA active exactly at nNext: dispatch -> LwmaPerAlgo -> oracle golden.
+    Consensus::Params active = base;
+    active.nDaaLwmaHeight = nNext;
+    BOOST_CHECK(active.IsDaaLwmaActive(nNext));
+    BOOST_CHECK(!active.IsDaaLwmaActive(nNext - 1)); // height-gate boundary
+    const unsigned int kLwmaGolden = 0x1c07f41fU;
+    const unsigned int gotLwma = GetNextWorkRequired(&blocks.back(), &hdr, active, ALGO_KAWPOW);
+    BOOST_CHECK_EQUAL(gotLwma, kLwmaGolden);
+
+    // One block higher: LWMA inactive at nNext -> dispatch -> Hivemind path.
+    Consensus::Params inactive = base;
+    inactive.nDaaLwmaHeight = nNext + 1;
+    BOOST_CHECK(!inactive.IsDaaLwmaActive(nNext));
+    const unsigned int gotHivemind = GetNextWorkRequired(&blocks.back(), &hdr, inactive, ALGO_KAWPOW);
+
+    // The two DAAs compute the retarget differently, so switching the gate must
+    // change the emitted nBits -- proof the height gate selects the right path.
+    BOOST_CHECK(gotHivemind != gotLwma);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

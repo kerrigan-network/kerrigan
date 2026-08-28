@@ -12,6 +12,9 @@
 #include <primitives/block.h>
 #include <uint256.h>
 
+#include <algorithm>
+#include <vector>
+
 static inline unsigned int PowLimit(const Consensus::Params& params)
 {
     return UintToArith256(params.powLimit).GetCompact();
@@ -197,6 +200,90 @@ unsigned int Hivemind(const CBlockIndex* pindexLast, const Consensus::Params& pa
     return bnNew.GetCompact();
 }
 
+// Per-algo LWMA-1 difficulty retarget (zawy12), v1.3.1 anti-hop DAA.
+//
+// Each algo retargets on its OWN last-N same-algo blocks, fully decoupled from the
+// other algos' timing. This removes the two defects that let profit-hopping
+// multipools stall the chain under the legacy Hivemind DAA:
+//   (1) the 40-block ALL-ALGO averaging window -- a burst-then-abandon on one algo
+//       contaminated the shared window so the DAA read "fast" and tightened even
+//       while the chain was objectively slow; and
+//   (2) the per-algo "rebalance" count term -- pinned a +12.5%/block ratchet on
+//       whichever algo was left carrying the chain (sole survivor).
+// Both are dropped here: LWMA measures each algo against its own spacing.
+//
+// Validated by a byte-exact port of the legacy DAA plus a stochastic multi-algo
+// simulation across steady / burst-then-abandon / continuous-hop / sole-survivor /
+// legit-hashrate-step / timestamp-attack scenarios. Config (N=60, T=480s, solvetime
+// clamp [-5T,+6T], weighted-sum floor k/20) is the simulated optimum.
+unsigned int LwmaPerAlgo(const CBlockIndex* pindexLast, const Consensus::Params& params, int algo)
+{
+    const int nNextHeight = pindexLast->nHeight + 1;
+    const int64_t T = (int64_t)params.nPowTargetSpacing * NUM_ALGOS; // per-algo spacing = 480s
+    const int N = 60;                                                 // averaging window (same-algo blocks)
+
+    // Collect up to N+1 most-recent same-algo blocks (newest first). Bounded walk so a
+    // very sparse algo cannot force a full-chain scan.
+    std::vector<const CBlockIndex*> a;
+    a.reserve(N + 1);
+    const int maxDepth = (N + 1) * NUM_ALGOS * 8;
+    int depth = 0;
+    for (const CBlockIndex* p = pindexLast;
+         p != nullptr && (int)a.size() < N + 1 && depth < maxDepth;
+         p = p->pprev, ++depth) {
+        if (p->GetAlgo() == algo) a.push_back(p);
+    }
+
+    // Bootstrap: need at least two same-algo blocks for one solvetime. On the v1.3.1
+    // fork this never fires (pre-fork history holds > N same-algo blocks); it only
+    // matters on a fresh chain.
+    if (a.size() < 2) {
+        return EffectivePowLimitForAlgo(params, algo, nNextHeight);
+    }
+
+    // Progressive window: use all available same-algo history, up to N.
+    const int Neff = std::min<int>(N, (int)a.size() - 1);
+    const int64_t k = (int64_t)Neff * (Neff + 1) / 2 * T;
+
+    // a[0] = newest ... a[Neff] = oldest of the window. Iterate oldest->newest so the
+    // linear weight i (1..Neff) gives the most recent block the highest weight.
+    int64_t weightedSolvetimes = 0;
+    arith_uint256 sumTarget;
+    for (int i = 1; i <= Neff; ++i) {
+        const CBlockIndex* cur  = a[Neff - i];       // i-th oldest block in the window
+        const CBlockIndex* prev = a[Neff - i + 1];   // its same-algo predecessor
+        int64_t st = (int64_t)cur->GetBlockTime() - (int64_t)prev->GetBlockTime();
+        if (st > 6 * T)  st = 6 * T;                  // cap high outliers (timestamp attack)
+        if (st < -5 * T) st = -5 * T;                 // bound out-of-order timestamps
+        weightedSolvetimes += st * i;
+        arith_uint256 tcur;
+        tcur.SetCompact(cur->nBits);
+        sumTarget += tcur;
+    }
+
+    // Anti-timewarp: never let the weighted solvetime collapse (would spike difficulty).
+    if (weightedSolvetimes < k / 20) weightedSolvetimes = k / 20;
+
+    // next_target = avg(target over window) * weightedSolvetimes / k.
+    // Divide before the multiply to stay within 256 bits for the easiest algos; the
+    // dropped low bits are far below compact-nBits precision (checked vs the oracle).
+    arith_uint256 bnNew = sumTarget;
+    bnNew /= (uint32_t)Neff;                 // average target over the window
+    bnNew /= (uint32_t)k;                    // pre-divide by k (overflow-safe)
+    bnNew *= (uint32_t)weightedSolvetimes;   // apply weighted solvetimes
+
+    // Cap at the per-algo powLimit, then the tighter hardware floor (post nDiffFloorHeight).
+    const arith_uint256 bnPowLimit = UintToArith256(params.powLimitAlgo[algo]);
+    if (bnNew > bnPowLimit) bnNew = bnPowLimit;
+    if (params.nDiffFloorHeight > 0 && nNextHeight >= params.nDiffFloorHeight &&
+        algo >= 0 && algo < NUM_ALGOS) {
+        const arith_uint256 bnFloor = UintToArith256(params.powLimitFloorAlgo[algo]);
+        if (bnNew > bnFloor) bnNew = bnFloor;
+    }
+    if (bnNew == arith_uint256(0)) bnNew = UintToArith256(params.powLimitFloorAlgo[algo]);
+    return bnNew.GetCompact();
+}
+
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params, int algo)
 {
     // Genesis block: use per-algo floor
@@ -211,6 +298,11 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
 
     if (params.fPowNoRetargeting)
         return PowLimitForAlgo(params, algo);
+
+    // v1.3.1 anti-hop hard fork: per-algo LWMA replaces the Hivemind all-algo window
+    // + rebalance term. Bit-identical to Hivemind below the activation height.
+    if (params.IsDaaLwmaActive(pindexLast->nHeight + 1))
+        return LwmaPerAlgo(pindexLast, params, algo);
 
     return Hivemind(pindexLast, params, algo);
 }
