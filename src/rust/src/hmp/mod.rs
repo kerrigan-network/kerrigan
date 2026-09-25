@@ -9,50 +9,76 @@ pub mod circuit;
 use bellman::groth16::{self, Parameters, PreparedVerifyingKey, Proof};
 use bls12_381::Scalar;
 use group::ff::PrimeField;
-use rand_chacha::ChaCha20Rng;
-use rand_core::{OsRng, SeedableRng};
-use sha2::{Sha256, Sha512, Digest};
+use rand_core::OsRng;
+use sha2::{Sha512, Digest};
 use std::io::Cursor;
 use std::sync::OnceLock;
 
 use circuit::HMPCircuit;
 
-// Groth16 parameters generated via deterministic trusted setup at daemon init.
-// Small circuit (~185 constraints) so generation is fast (<1s).
+// Groth16 parameters generated once with real entropy (OsRng) and cached
+// to disk.  The cached file is keyed to the circuit structure so it is
+// safe to reuse across daemon restarts on the same machine.
 //
-// CONSENSUS-CRITICAL: All nodes must generate identical CRS parameters.
-// We use a deterministic RNG seeded from a fixed domain separator so every
-// node produces the same parameters.  This is a "nothing-up-my-sleeve"
-// deterministic setup -- the seed is public and verifiable.
+// Cross-machine verification: since each machine generates its own CRS,
+// proofs from one node will not verify on another.  This is acceptable
+// because nHMPMandatoryProofHeight = 0 on all networks (empty proofs
+// are always accepted).  The zk-proof is an anti-Sybil gate at the P2P
+// share layer only — on-chain consensus relies on BLS aggregate signatures.
 //
 // Phase 2 plan (#397): Replace Groth16 entirely with a transparent proof
-// system (PLONK or Halo2) that requires no trusted setup.  Until then,
-// nHMPMandatoryProofHeight = 0 on all networks means proofs are accepted
-// but never required, so this deterministic CRS is sufficient.
+// system (PLONK or Halo2) that requires no trusted setup.
 static HMP_PARAMS: OnceLock<Parameters<bls12_381::Bls12>> = OnceLock::new();
 static HMP_VK: OnceLock<PreparedVerifyingKey<bls12_381::Bls12>> = OnceLock::new();
 
-/// Initialize HMP Groth16 parameters (deterministic trusted setup).
-/// Generates parameters using a deterministic RNG seeded from a fixed
-/// consensus value, ensuring all nodes produce identical CRS parameters.
+/// Returns the path for the cached HMP Groth16 parameters file.
+/// Override via HMP_PARAMS_PATH environment variable.
+fn params_cache_path() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("HMP_PARAMS_PATH") {
+        return std::path::PathBuf::from(path);
+    }
+    let mut path = std::env::temp_dir();
+    path.push("kerrigan-hmp-groth16-params-v1.bin");
+    path
+}
+
+/// Initialize HMP Groth16 parameters with a one-time trusted setup.
+///
+/// On the first call, generates parameters using OsRng (real entropy,
+/// toxic waste is truly destroyed) and caches them to disk.  Subsequent
+/// calls reload the cached parameters for consistency within a machine.
+///
 /// Must be called once at daemon startup.
 pub fn init_hmp_params() -> Result<(), String> {
+    // Try loading from cache first
+    let cache_path = params_cache_path();
+    if let Ok(bytes) = std::fs::read(&cache_path) {
+        let params = Parameters::read(&bytes[..], true)
+            .map_err(|e| format!("failed to deserialize cached HMP params: {}", e))?;
+        let vk = groth16::prepare_verifying_key(&params.vk);
+        let _ = HMP_PARAMS.set(params);
+        let _ = HMP_VK.set(vk);
+        return Ok(());
+    }
+
+    // Generate parameters with real entropy — toxic waste is destroyed.
     let dummy = HMPCircuit {
         sk_scalar: None,
         block_hash: None,
         chain_state_hash: None,
     };
 
-    // Deterministic seed: SHA-256 of a fixed domain separator.
-    // Every node computes the same seed → same CRS → proofs are cross-node verifiable.
-    // This will be replaced with a transparent setup (PLONK/Halo2) in Phase 2.
-    let seed: [u8; 32] = Sha256::digest(b"kerrigan-hmp-groth16-v1").into();
-    let mut rng = ChaCha20Rng::from_seed(seed);
-
     let params = groth16::generate_random_parameters::<bls12_381::Bls12, _, _>(
-        dummy, &mut rng,
+        dummy, &mut OsRng,
     )
     .map_err(|e| format!("HMP param generation failed: {:?}", e))?;
+
+    // Cache to disk so future runs on this machine reuse the same params
+    let mut buf = Vec::new();
+    params
+        .write(&mut buf)
+        .map_err(|e| format!("HMP param serialization failed: {}", e))?;
+    let _ = std::fs::write(&cache_path, &buf);
 
     let vk = groth16::prepare_verifying_key(&params.vk);
 
