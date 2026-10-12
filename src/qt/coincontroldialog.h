@@ -6,6 +6,7 @@
 #define BITCOIN_QT_COINCONTROLDIALOG_H
 
 #include <consensus/amount.h>
+#include <uint256.h>
 
 #include <QAbstractButton>
 #include <QAction>
@@ -14,6 +15,8 @@
 #include <QMenu>
 #include <QPoint>
 #include <QTreeWidgetItem>
+
+#include <set>
 
 class WalletModel;
 
@@ -42,18 +45,27 @@ class CoinControlDialog : public QDialog
     Q_OBJECT
 
 public:
-    explicit CoinControlDialog(wallet::CCoinControl& coin_control, WalletModel* model, QWidget *parent = nullptr);
+    /** With @p selected_notes, the dialog lists the wallet's Sapling notes
+     *  and edits that selection instead of the transparent coins. */
+    explicit CoinControlDialog(wallet::CCoinControl& coin_control, WalletModel* model, std::set<uint256>* selected_notes = nullptr, QWidget *parent = nullptr);
     ~CoinControlDialog();
 
     // static because also called from sendcoinsdialog
     static void updateLabels(wallet::CCoinControl& m_coin_control, WalletModel*, QDialog*);
+    static void updateNoteLabels(std::set<uint256>& selected_notes, WalletModel*, QDialog*);
 
     static QList<CAmount> payAmounts;
     static bool fSubtractFeeFromAmount;
+    //! The send is a Sapling transaction (fixed Sapling fee)
+    static bool fShieldedTx;
+    //! Number of shielded recipients
+    static int nShieldedOutputs;
 
 private:
     Ui::CoinControlDialog *ui;
     wallet::CCoinControl& m_coin_control;
+    //! Selected Sapling notes; nullptr when selecting transparent coins
+    std::set<uint256>* m_selected_notes;
     WalletModel *model;
     int sortColumn;
     Qt::SortOrder sortOrder;
@@ -68,6 +80,10 @@ private:
 
     void sortView(int, Qt::SortOrder);
     void updateView();
+    void updateNoteView();
+    void refreshLabels();
+    static void setLabels(QDialog* dialog, WalletModel* model, CAmount nPayAmount, unsigned int nQuantity, CAmount nAmount,
+                          CAmount nPayFee, CAmount nAfterFee, unsigned int nBytes, CAmount nChange, bool fUnselectedSpent);
 
     enum
     {
@@ -82,7 +98,8 @@ private:
     enum
     {
         TxHashRole = Qt::UserRole,
-        VOutRole
+        VOutRole,
+        NoteCmuRole
     };
 
     friend class CCoinControlWidgetItem;

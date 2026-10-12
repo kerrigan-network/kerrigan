@@ -22,6 +22,7 @@
 
 #include <support/cleanse.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -913,20 +914,20 @@ static rust::Box<::consensus::Network> MakeNoteDecryptionNetwork(
         /*nu5=*/-1, /*nu6=*/-1, /*nu6_1=*/-1);
 }
 
-void SaplingKeyManager::ScanSaplingOutputs(const CTransaction& tx,
+bool SaplingKeyManager::ScanSaplingOutputs(const CTransaction& tx,
                                             const SaplingTxPayload& payload,
                                             int blockHeight,
                                             const std::string& networkIDStr,
                                             int saplingHeight,
                                             WalletBatch* batch)
 {
-    if (payload.vOutputDescriptions.empty()) return;
+    if (payload.vOutputDescriptions.empty()) return false;
 
     // Snapshot IVKs without holding cs during FFI calls (which can be slow).
     std::vector<sapling::SaplingIncomingViewingKey> ivks;
     {
         LOCK(cs);
-        if (mapIvkToAddresses.empty()) return;
+        if (mapIvkToAddresses.empty()) return false;
         ivks.reserve(mapIvkToAddresses.size());
         for (const auto& [ivk, _] : mapIvkToAddresses) {
             ivks.push_back(ivk);
@@ -936,6 +937,7 @@ void SaplingKeyManager::ScanSaplingOutputs(const CTransaction& tx,
     auto rustNetwork = MakeNoteDecryptionNetwork(networkIDStr, saplingHeight);
     const uint32_t height = blockHeight >= 0 ? static_cast<uint32_t>(blockHeight) : 0u;
     const uint256 txid = tx.GetHash();
+    bool involvesWallet = false;
 
     for (int outIdx = 0; outIdx < static_cast<int>(payload.vOutputDescriptions.size()); ++outIdx) {
         const SaplingOutputDescription& od = payload.vOutputDescriptions[outIdx];
@@ -957,6 +959,7 @@ void SaplingKeyManager::ScanSaplingOutputs(const CTransaction& tx,
             LOCK(cs);
             auto existIt = mapSaplingNotes.find(noteKey);
             if (existIt != mapSaplingNotes.end()) {
+                involvesWallet = true;
                 if (existIt->second.blockHeight == -1 && blockHeight >= 0) {
                     // Re-confirmation after reorg: update height but preserve
                     // spend state; the spending tx may still be valid.
@@ -1005,6 +1008,7 @@ void SaplingKeyManager::ScanSaplingOutputs(const CTransaction& tx,
                 // SpendDescription nullifier field directly.
 
                 CAmount noteValue = nd.value;
+                involvesWallet = true;
                 LOCK(cs);
                 if (mapSaplingNotes.count(noteKey) == 0) {
                     mapSaplingNotes[noteKey] = std::move(nd);
@@ -1021,34 +1025,174 @@ void SaplingKeyManager::ScanSaplingOutputs(const CTransaction& tx,
             }
         }
     }
+    return involvesWallet;
 }
 
-void SaplingKeyManager::ScanSaplingSpends(const CTransaction& tx,
+bool SaplingKeyManager::ScanSaplingSpends(const CTransaction& tx,
                                            const SaplingTxPayload& payload,
                                            WalletBatch* batch)
 {
-    if (payload.vSpendDescriptions.empty()) return;
+    if (payload.vSpendDescriptions.empty()) return false;
 
     const uint256 spendingTxid = tx.GetHash();
+    bool involvesWallet = false;
 
     LOCK(cs);
     for (const auto& spend : payload.vSpendDescriptions) {
         // The spend's nullifier is 32 bytes; convert to uint256 for map lookup.
         uint256 nf;
         std::copy(spend.nullifier.begin(), spend.nullifier.end(), nf.begin());
+        if (nf.IsNull()) continue;
 
         // Search all stored notes for a matching nullifier.
         for (auto& [key, nd] : mapSaplingNotes) {
-            if (!nd.isSpent && nd.nullifier == nf && !nf.IsNull()) {
+            if (nd.nullifier != nf) continue;
+            if (!nd.isSpent) {
                 nd.isSpent       = true;
                 nd.spendingTxid  = spendingTxid;
                 if (batch) batch->WriteSaplingNote(key, nd);
                 LogPrint(BCLog::SAPLING, "SaplingKeyManager: note spent txid=%s by %s\n",
                           nd.txid.GetHex(), spendingTxid.GetHex());
-                break;
+                involvesWallet = true;
+            } else if (nd.spendingTxid == spendingTxid) {
+                // Already recorded (rescan or mempool-then-block).
+                involvesWallet = true;
             }
+            break;
         }
     }
+    return involvesWallet;
+}
+
+std::vector<SaplingOutputView> SaplingKeyManager::ViewSaplingOutputs(const CTransaction& tx,
+                                                                     const SaplingTxPayload& payload,
+                                                                     int blockHeight,
+                                                                     const std::string& networkIDStr,
+                                                                     int saplingHeight) const
+{
+    std::vector<SaplingOutputView> result;
+    if (payload.vOutputDescriptions.empty()) return result;
+
+    // Snapshot keys and the already-tracked notes of this tx, then run the
+    // FFI decryptions without holding cs.
+    std::vector<sapling::SaplingIncomingViewingKey> ivks;
+    std::set<std::array<uint8_t, 32>> ovks;
+    std::map<uint256, SaplingNoteData> knownNotes;
+    {
+        LOCK(cs);
+        ivks.reserve(mapIvkToFvk.size());
+        for (const auto& [ivk, fvk] : mapIvkToFvk) {
+            ivks.push_back(ivk);
+            ovks.insert(fvk.ovk);
+        }
+        for (const auto& od : payload.vOutputDescriptions) {
+            uint256 cmu;
+            std::copy(od.cmu.begin(), od.cmu.end(), cmu.begin());
+            auto it = mapSaplingNotes.find(cmu);
+            if (it != mapSaplingNotes.end()) knownNotes.emplace(cmu, it->second);
+        }
+    }
+
+    auto rustNetwork = MakeNoteDecryptionNetwork(networkIDStr, saplingHeight);
+    const uint32_t height = blockHeight >= 0 ? static_cast<uint32_t>(blockHeight) : 0u;
+
+    for (int outIdx = 0; outIdx < static_cast<int>(payload.vOutputDescriptions.size()); ++outIdx) {
+        const SaplingOutputDescription& od = payload.vOutputDescriptions[outIdx];
+
+        uint256 cmu;
+        std::copy(od.cmu.begin(), od.cmu.end(), cmu.begin());
+        auto knownIt = knownNotes.find(cmu);
+        if (knownIt != knownNotes.end()) {
+            SaplingOutputView view;
+            view.outputIndex = outIdx;
+            view.outgoing    = false;
+            view.recipient   = knownIt->second.recipient;
+            view.value       = knownIt->second.value;
+            view.memo        = knownIt->second.memo;
+            result.push_back(std::move(view));
+            continue;
+        }
+
+        ::wallet::SaplingShieldedOutput ffi_output;
+        ffi_output.cv             = od.cv;
+        ffi_output.cmu            = od.cmu;
+        ffi_output.ephemeral_key  = od.ephemeralKey;
+        ffi_output.enc_ciphertext = od.encCiphertext;
+        ffi_output.out_ciphertext = od.outCiphertext;
+
+        auto toView = [&](const ::wallet::DecryptedSaplingOutput& decrypted, bool outgoing) {
+            SaplingOutputView view;
+            view.outputIndex = outIdx;
+            view.outgoing    = outgoing;
+            view.value       = static_cast<CAmount>(decrypted.note_value());
+            auto d    = decrypted.recipient_d();
+            auto pk_d = decrypted.recipient_pk_d();
+            std::copy(d.begin(), d.end(), view.recipient.d.begin());
+            std::copy(pk_d.begin(), pk_d.end(), view.recipient.pk_d.begin());
+            view.memo = decrypted.memo();
+            return view;
+        };
+
+        std::optional<SaplingOutputView> view;
+        for (const auto& ivk : ivks) {
+            try {
+                auto decrypted = ::wallet::try_sapling_note_decryption(*rustNetwork, height, ivk.key, ffi_output);
+                view = toView(*decrypted, /*outgoing=*/false);
+                break;
+            } catch (const std::exception&) {
+                continue;
+            }
+        }
+        if (!view) {
+            for (const auto& ovk : ovks) {
+                try {
+                    auto recovered = ::wallet::try_sapling_output_recovery(*rustNetwork, height, ovk, ffi_output);
+                    view = toView(*recovered, /*outgoing=*/true);
+                    break;
+                } catch (const std::exception&) {
+                    continue;
+                }
+            }
+        }
+        if (view && MoneyRange(view->value)) {
+            result.push_back(std::move(*view));
+        }
+    }
+    return result;
+}
+
+std::optional<SaplingNoteData> SaplingKeyManager::GetNoteByNullifier(const uint256& nullifier) const
+{
+    if (nullifier.IsNull()) return std::nullopt;
+    LOCK(cs);
+    for (const auto& [cmu, nd] : mapSaplingNotes) {
+        if (nd.nullifier == nullifier) return nd;
+    }
+    return std::nullopt;
+}
+
+std::vector<SaplingNoteData> SaplingKeyManager::GetNotesByTxid(const uint256& txid) const
+{
+    std::vector<SaplingNoteData> result;
+    {
+        LOCK(cs);
+        for (const auto& [cmu, nd] : mapSaplingNotes) {
+            if (nd.txid == txid) result.push_back(nd);
+        }
+    }
+    std::sort(result.begin(), result.end(), [](const SaplingNoteData& a, const SaplingNoteData& b) {
+        return a.outputIndex < b.outputIndex;
+    });
+    return result;
+}
+
+bool SaplingKeyManager::IsSpendingTx(const uint256& txid) const
+{
+    LOCK(cs);
+    for (const auto& [cmu, nd] : mapSaplingNotes) {
+        if (nd.isSpent && nd.spendingTxid == txid) return true;
+    }
+    return false;
 }
 
 void SaplingKeyManager::UpdateWitnesses(int blockHeight, const std::vector<uint256>& blockCmus,
@@ -1287,6 +1431,51 @@ std::vector<std::pair<uint256, SaplingNoteData>> SaplingKeyManager::GetUnspentNo
     for (const auto& [key, nd] : mapSaplingNotes) {
         if (!nd.isSpent && nd.blockHeight >= 0 && !nd.witnessData.empty() && nd.recipient == addr && !m_reservedNotes.count(key)) {
             result.emplace_back(key, nd);
+        }
+    }
+    return result;
+}
+
+std::vector<std::pair<uint256, SaplingNoteData>> SaplingKeyManager::GetUnspentNotesWithKeys() const
+{
+    LOCK(cs);
+    std::vector<std::pair<uint256, SaplingNoteData>> result;
+    for (const auto& [key, nd] : mapSaplingNotes) {
+        if (!nd.isSpent && nd.blockHeight >= 0 && !nd.witnessData.empty() && !m_reservedNotes.count(key)) {
+            result.emplace_back(key, nd);
+        }
+    }
+    return result;
+}
+
+std::set<sapling::SaplingIncomingViewingKey> SaplingKeyManager::GetInternalIvks() const
+{
+    std::vector<std::pair<sapling::SaplingFullViewingKey, std::array<uint8_t, 32>>> keys;
+    std::set<sapling::SaplingIncomingViewingKey> tracked;
+    {
+        LOCK(cs);
+        for (const auto& [ivk, fvk] : mapIvkToFvk) {
+            tracked.insert(ivk);
+            auto dkIt = mapIvkToDk.find(ivk);
+            if (dkIt != mapIvkToDk.end()) keys.emplace_back(fvk, dkIt->second);
+        }
+    }
+
+    // An IVK is internal if it is the ZIP 316 internal derivation of another
+    // tracked key. The derivation only needs the FVK and DK.
+    std::set<sapling::SaplingIncomingViewingKey> result;
+    for (const auto& [fvk, dk] : keys) {
+        std::array<uint8_t, 96> fvk_bytes;
+        std::copy(fvk.ak.begin(), fvk.ak.end(), fvk_bytes.begin());
+        std::copy(fvk.nk.begin(), fvk.nk.end(), fvk_bytes.begin() + 32);
+        std::copy(fvk.ovk.begin(), fvk.ovk.end(), fvk_bytes.begin() + 64);
+        try {
+            auto derived = sapling::zip32::derive_internal_fvk(fvk_bytes, dk);
+            sapling::SaplingIncomingViewingKey internalIvk;
+            internalIvk.key = sapling::zip32::fvk_to_ivk(derived.fvk);
+            if (tracked.count(internalIvk)) result.insert(internalIvk);
+        } catch (const std::exception& e) {
+            LogPrintf("SaplingKeyManager::GetInternalIvks: derivation failed: %s\n", e.what());
         }
     }
     return result;

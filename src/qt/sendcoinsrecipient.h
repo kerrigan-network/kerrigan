@@ -41,6 +41,10 @@ public:
 
     bool fSubtractFeeFromAmount; // memory only
 
+    // Memo text for a shielded (Sapling) recipient, sent UTF-8 encoded.
+    // Memory only: not part of the serialized payment request.
+    QString memo;
+
     static const int CURRENT_VERSION = 1;
     int nVersion;
 

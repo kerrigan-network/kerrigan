@@ -15,6 +15,7 @@
 #include <util/message.h>
 #include <util/result.h>
 #include <util/ui_change_type.h>
+#include <wallet/sapling_send.h>
 
 #include <cstdint>
 #include <functional>
@@ -264,11 +265,23 @@ public:
     //! Get all shielded notes (spent + unspent) for the history view.
     virtual std::vector<ShieldedNoteInfo> getShieldedNoteHistory() = 0;
 
-    //! Send a Sapling z_sendmany transaction. Returns txid on success, throws on error.
-    virtual std::string saplingZSendMany(const std::string& from_address,
-        const std::vector<std::pair<std::string, CAmount>>& recipients,
-        int minconf = 1,
-        std::optional<CAmount> fee = std::nullopt) = 0;
+    //! Wallet notes created by transaction @p txid (spent + unspent).
+    virtual std::vector<ShieldedNoteInfo> getShieldedNotesForTx(const uint256& txid) = 0;
+
+    //! Sapling notes the wallet can spend, with at least @p minconf confirmations.
+    virtual std::vector<wallet::SaplingSpendableNote> listSpendableSaplingNotes(int minconf) = 0;
+
+    //! Choose inputs and compute the fee for a shielded send, without
+    //! sending it. Throws std::runtime_error on error.
+    virtual wallet::SaplingSendPlan planSaplingSend(const wallet::SaplingSendSource& source,
+        const std::vector<wallet::SaplingSendRecipient>& recipients,
+        int minconf) = 0;
+
+    //! Send a shielded (t->z, z->z or z->t) transaction. Returns the txid,
+    //! throws std::runtime_error on error.
+    virtual std::string sendSapling(const wallet::SaplingSendSource& source,
+        const std::vector<wallet::SaplingSendRecipient>& recipients,
+        int minconf) = 0;
 
     //! Return whether transaction input belongs to wallet.
     virtual wallet::isminetype txinIsMine(const CTxIn& txin) = 0;

@@ -1405,18 +1405,21 @@ void CWallet::transactionAddedToMempool(const CTransactionRef& tx, int64_t nAcce
     WalletBatch batch(GetDatabase());
     SyncTransaction(tx, TxStateInMempool{}, batch);
 
-    auto it = mapWallet.find(tx->GetHash());
-    if (it != mapWallet.end()) {
-        RefreshMempoolStatus(it->second, chain());
-    }
-
     // Scan for Sapling shielded notes arriving via mempool.
     if (!m_sapling_key_manager.IsEmpty() && tx->nType == TRANSACTION_SAPLING) {
         auto payload = GetTxPayload<SaplingTxPayload>(*tx, /*assert_type=*/false);
         if (payload) {
-            m_sapling_key_manager.ScanSaplingOutputs(*tx, *payload, -1, Params().NetworkIDString(), Params().GetConsensus().SaplingHeight, &batch);
-            m_sapling_key_manager.ScanSaplingSpends(*tx, *payload, &batch);
+            bool involvesWallet = m_sapling_key_manager.ScanSaplingOutputs(*tx, *payload, -1, Params().NetworkIDString(), Params().GetConsensus().SaplingHeight, &batch);
+            involvesWallet |= m_sapling_key_manager.ScanSaplingSpends(*tx, *payload, &batch);
+            if (involvesWallet) {
+                AddSaplingTxToWallet(tx, TxStateInMempool{}, /*rescanning_old_block=*/false);
+            }
         }
+    }
+
+    auto it = mapWallet.find(tx->GetHash());
+    if (it != mapWallet.end()) {
+        RefreshMempoolStatus(it->second, chain());
     }
 }
 
@@ -1461,7 +1464,7 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     }
 }
 
-void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch)
+void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch, bool rescanning_old_block)
 {
     AssertLockHeld(cs_wallet);
     if (m_sapling_key_manager.IsEmpty()) return;
@@ -1469,19 +1472,26 @@ void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& 
     const std::string& netID = Params().NetworkIDString();
     std::vector<uint256> blockCmus;
     std::vector<std::pair<CTransactionRef, SaplingTxPayload>> saplingTxs;
+    // Position in block of every Sapling tx, and the subset that involves the wallet.
+    std::map<uint256, int> saplingTxPos;
+    std::set<uint256> involvingTxs;
 
-    for (const CTransactionRef& ptx : block.vtx) {
+    for (size_t posInBlock = 0; posInBlock < block.vtx.size(); ++posInBlock) {
+        const CTransactionRef& ptx = block.vtx[posInBlock];
         if (ptx->nType == TRANSACTION_SAPLING) {
             auto payload = GetTxPayload<SaplingTxPayload>(*ptx, /*assert_type=*/false);
             if (payload) {
                 // Detect incoming shielded notes for this wallet
-                m_sapling_key_manager.ScanSaplingOutputs(*ptx, *payload, height, netID, Params().GetConsensus().SaplingHeight, &batch);
+                if (m_sapling_key_manager.ScanSaplingOutputs(*ptx, *payload, height, netID, Params().GetConsensus().SaplingHeight, &batch)) {
+                    involvingTxs.insert(ptx->GetHash());
+                }
                 // Collect all note commitments for witness tracking
                 for (const auto& od : payload->vOutputDescriptions) {
                     uint256 cmu;
                     std::memcpy(cmu.begin(), od.cmu.data(), 32);
                     blockCmus.push_back(cmu);
                 }
+                saplingTxPos.emplace(ptx->GetHash(), static_cast<int>(posInBlock));
                 saplingTxs.emplace_back(ptx, *payload);
             }
         }
@@ -1519,7 +1529,31 @@ void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& 
 
     // Detect shielded spends using computed nullifiers
     for (const auto& [ptx, payload] : saplingTxs) {
-        m_sapling_key_manager.ScanSaplingSpends(*ptx, payload, &batch);
+        if (m_sapling_key_manager.ScanSaplingSpends(*ptx, payload, &batch)) {
+            involvingTxs.insert(ptx->GetHash());
+        }
+    }
+
+    // Record shielded-only transactions in the wallet's transaction list so
+    // gettransaction / listtransactions / listsinceblock / -walletnotify see
+    // them like transparent receives.
+    if (!involvingTxs.empty()) {
+        const uint256 block_hash = block.GetHash();
+        for (const auto& [ptx, payload] : saplingTxs) {
+            if (involvingTxs.count(ptx->GetHash()) == 0) continue;
+            AddSaplingTxToWallet(ptx, TxStateConfirmed{block_hash, height, saplingTxPos.at(ptx->GetHash())}, rescanning_old_block);
+        }
+    }
+}
+
+void CWallet::AddSaplingTxToWallet(const CTransactionRef& ptx, const TxState& state, bool rescanning_old_block)
+{
+    AssertLockHeld(cs_wallet);
+    if (mapWallet.count(ptx->GetHash())) return;
+    if (!AddToWallet(ptx, state, /*update_wtx=*/nullptr, /*fFlushOnClose=*/false, rescanning_old_block)) {
+        // Same contract as AddToWalletIfInvolvingMe: a failed write must not
+        // leave the wallet in an inconsistent state.
+        throw std::runtime_error("DB error adding Sapling transaction to wallet, write failed");
     }
 }
 
@@ -1609,7 +1643,7 @@ int CWallet::RebuildSaplingWitnessesFromSnapshot(int fromHeight,
                 // Reuse the per-block Sapling processor. On a replay the
                 // output/spend scans are idempotent because nullifiers and
                 // cmus are stable and the note records already exist.
-                ProcessSaplingBlock(block, cur, batch);
+                ProcessSaplingBlock(block, cur, batch, /*rescanning_old_block=*/true);
                 ++blocksProcessed;
             }
         } // release cs_wallet + flush batch between chunks
@@ -1783,7 +1817,7 @@ void CWallet::RunSaplingWitnessRebuildBackground(std::shared_ptr<CWallet> pwalle
                 pwallet->m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
                 return;
             }
-            pwallet->ProcessSaplingBlock(block, h, batch);
+            pwallet->ProcessSaplingBlock(block, h, batch, /*rescanning_old_block=*/true);
         }
         pwallet->WalletLogPrintf(
             "Sapling witness rebuild: tail drained, %d blocks applied under held lock\n",
@@ -1882,7 +1916,7 @@ int CWallet::RebuildSaplingWitnessesSynchronous(int fromHeight)
                 m_sapling_witness_check_pending.store(true, std::memory_order_relaxed);
                 return applied;
             }
-            ProcessSaplingBlock(block, h, batch);
+            ProcessSaplingBlock(block, h, batch, /*rescanning_old_block=*/true);
         }
         WalletLogPrintf("Sapling witness rebuild: tail drained, %d blocks applied under held lock\n",
                         currentTip - snapshotTipHeight);
@@ -2596,7 +2630,7 @@ CWallet::ScanResult CWallet::ScanForWalletTransactions(const uint256& start_bloc
                     SyncTransaction(block.vtx[posInBlock], TxStateConfirmed{block_hash, block_height, static_cast<int>(posInBlock)}, batch, fUpdate, /*rescanning_old_block=*/true);
                 }
 
-                ProcessSaplingBlock(block, block_height, batch);
+                ProcessSaplingBlock(block, block_height, batch, /*rescanning_old_block=*/true);
 
                 // scan succeeded, record block as most recent successfully scanned
                 result.last_scanned_block = block_hash;
@@ -2771,6 +2805,10 @@ void CWallet::ResendWalletTransactions()
             // the last block. SubmitTxMemoryPoolAndRelay() will not rebroadcast
             // any confirmed or conflicting txs.
             if (wtx.nTimeReceived > m_best_block_time - 5 * 60) continue;
+            // A shielded payment this wallet only received is the sender's to
+            // rebroadcast; re-announcing it would link this node to it.
+            if (wtx.tx->nType == TRANSACTION_SAPLING && !IsFromMe(*wtx.tx) &&
+                !m_sapling_key_manager.IsSpendingTx(wtx.GetHash())) continue;
             bilingual_str unused_err_string;
             if (SubmitTxMemoryPoolAndRelay(wtx, unused_err_string, true)) ++submitted_tx_count;
         }

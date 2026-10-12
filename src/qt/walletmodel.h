@@ -147,10 +147,17 @@ public:
     // Generate a new Sapling shielded address
     QString getNewSaplingAddress();
 
-    // Send a shielded transaction via z_sendmany
-    QString saplingZSendMany(const QString& from,
-                             const QList<QPair<QString, CAmount>>& recipients,
-                             int minconf = 1);
+    // Shielded send (t->z, z->z, z->t): choose inputs and fee without sending.
+    // Throws std::runtime_error.
+    wallet::SaplingSendPlan planSaplingSend(const wallet::SaplingSendSource& source,
+                                            const QList<SendCoinsRecipient>& recipients,
+                                            int minconf = 1);
+
+    // Prove, sign and broadcast a shielded send; returns the txid.
+    // Throws std::runtime_error.
+    QString sendSapling(const wallet::SaplingSendSource& source,
+                        const QList<SendCoinsRecipient>& recipients,
+                        int minconf = 1);
 
     static bool isWalletEnabled();
 

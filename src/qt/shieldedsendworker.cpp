@@ -7,13 +7,13 @@
 #include <stdexcept>
 
 ShieldedSendWorker::ShieldedSendWorker(WalletModel* model,
-                                       const QString& from,
-                                       const QList<QPair<QString, CAmount>>& recipients,
+                                       const wallet::SaplingSendSource& source,
+                                       const QList<SendCoinsRecipient>& recipients,
                                        int minconf,
                                        QObject* parent)
     : QObject(parent)
     , m_model(model)
-    , m_from(from)
+    , m_source(source)
     , m_recipients(recipients)
     , m_minconf(minconf)
 {
@@ -28,10 +28,10 @@ void ShieldedSendWorker::process()
         return;
     }
     try {
-        QString txid = m_model->saplingZSendMany(m_from, m_recipients, m_minconf);
+        QString txid = m_model->sendSapling(m_source, m_recipients, m_minconf);
 
         // Re-check after the (potentially long) proof generation completes.
-        // If the wallet was destroyed mid-call, saplingZSendMany should throw,
+        // If the wallet was destroyed mid-call, sendSapling should throw,
         // but belt-and-suspenders: verify the model is still alive before
         // reporting success.
         if (!m_model) {

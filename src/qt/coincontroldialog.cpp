@@ -20,6 +20,7 @@
 #include <interfaces/node.h>
 #include <key_io.h>
 #include <policy/policy.h>
+#include <sapling/sapling_tx_payload.h>
 #include <wallet/coincontrol.h>
 #include <wallet/coinselection.h>
 #include <wallet/wallet.h>
@@ -36,6 +37,13 @@ using wallet::CCoinControl;
 
 QList<CAmount> CoinControlDialog::payAmounts;
 bool CoinControlDialog::fSubtractFeeFromAmount = false;
+bool CoinControlDialog::fShieldedTx = false;
+int CoinControlDialog::nShieldedOutputs = 0;
+
+// Approximate on-wire sizes for the Bytes estimate of a Sapling transaction
+static constexpr unsigned int SPEND_DESCRIPTION_BYTES = 384;
+static constexpr unsigned int OUTPUT_DESCRIPTION_BYTES = 948;
+static constexpr unsigned int SAPLING_TX_OVERHEAD_BYTES = 120;
 
 bool CCoinControlWidgetItem::operator<(const QTreeWidgetItem &other) const {
     int column = treeWidget()->sortColumn();
@@ -53,10 +61,11 @@ bool CCoinControlWidgetItem::operator<(const QTreeWidgetItem &other) const {
     return QTreeWidgetItem::operator<(other);
 }
 
-CoinControlDialog::CoinControlDialog(CCoinControl& coin_control, WalletModel* _model, QWidget* parent) :
+CoinControlDialog::CoinControlDialog(CCoinControl& coin_control, WalletModel* _model, std::set<uint256>* selected_notes, QWidget* parent) :
     QDialog(parent, GUIUtil::dialog_flags),
     ui(new Ui::CoinControlDialog),
     m_coin_control(coin_control),
+    m_selected_notes(selected_notes),
     model(_model)
 {
     ui->setupUi(this);
@@ -145,11 +154,19 @@ CoinControlDialog::CoinControlDialog(CCoinControl& coin_control, WalletModel* _m
     if (settings.contains("nCoinControlSortColumn") && settings.contains("nCoinControlSortOrder"))
         sortView(settings.value("nCoinControlSortColumn").toInt(), (static_cast<Qt::SortOrder>(settings.value("nCoinControlSortOrder").toInt())));
 
+    if (m_selected_notes) {
+        // Notes cannot be locked
+        setWindowTitle(tr("Shielded Note Selection"));
+        ui->pushButtonToggleLock->hide();
+        lockAction->setVisible(false);
+        unlockAction->setVisible(false);
+    }
+
     if(_model->getOptionsModel() && _model->getAddressTableModel())
     {
         updateView();
         updateLabelLocked();
-        CoinControlDialog::updateLabels(m_coin_control, _model, this);
+        refreshLabels();
     }
 
     GUIUtil::handleCloseWindowShortcut(this);
@@ -190,8 +207,8 @@ void CoinControlDialog::buttonSelectAllClicked()
                 ui->treeWidget->topLevelItem(i)->setCheckState(COLUMN_CHECKBOX, state);
     ui->treeWidget->setEnabled(true);
     if (state == Qt::Unchecked)
-        m_coin_control.UnSelectAll(); // just to be sure
-    CoinControlDialog::updateLabels(m_coin_control, model, this);
+        m_selected_notes ? m_selected_notes->clear() : m_coin_control.UnSelectAll(); // just to be sure
+    refreshLabels();
 }
 
 // Toggle lock state
@@ -217,7 +234,7 @@ void CoinControlDialog::buttonToggleLockClicked()
             updateLabelLocked();
         }
         ui->treeWidget->setEnabled(true);
-        CoinControlDialog::updateLabels(m_coin_control, model, this);
+        refreshLabels();
     }
     else{
         QMessageBox msgBox(this);
@@ -239,7 +256,11 @@ void CoinControlDialog::showMenu(const QPoint &point)
         if (item->data(COLUMN_ADDRESS, TxHashRole).toString().length() == 64) // transaction hash is 64 characters (this means it is a child node, so it is not a parent node in tree mode)
         {
             m_copy_transaction_outpoint_action->setEnabled(true);
-            if (model->wallet().isLockedCoin(COutPoint(uint256S(item->data(COLUMN_ADDRESS, TxHashRole).toString().toStdString()), item->data(COLUMN_ADDRESS, VOutRole).toUInt())))
+            if (m_selected_notes) {
+                lockAction->setEnabled(false);
+                unlockAction->setEnabled(false);
+            }
+            else if (model->wallet().isLockedCoin(COutPoint(uint256S(item->data(COLUMN_ADDRESS, TxHashRole).toString().toStdString()), item->data(COLUMN_ADDRESS, VOutRole).toUInt())))
             {
                 lockAction->setEnabled(false);
                 unlockAction->setEnabled(true);
@@ -402,7 +423,18 @@ void CoinControlDialog::radioListMode(bool checked)
 // checkbox clicked by user
 void CoinControlDialog::viewItemChanged(QTreeWidgetItem* item, int column)
 {
-    if (column == COLUMN_CHECKBOX && item->data(COLUMN_ADDRESS, TxHashRole).toString().length() == 64) // transaction hash is 64 characters (this means it is a child node, so it is not a parent node in tree mode)
+    if (column == COLUMN_CHECKBOX && m_selected_notes && item->data(COLUMN_ADDRESS, TxHashRole).toString().length() == 64)
+    {
+        const uint256 cmu = uint256S(item->data(COLUMN_ADDRESS, NoteCmuRole).toString().toStdString());
+        if (item->checkState(COLUMN_CHECKBOX) == Qt::Unchecked)
+            m_selected_notes->erase(cmu);
+        else
+            m_selected_notes->insert(cmu);
+
+        if (ui->treeWidget->isEnabled()) // do not update on every click for (un)select all
+            refreshLabels();
+    }
+    else if (column == COLUMN_CHECKBOX && item->data(COLUMN_ADDRESS, TxHashRole).toString().length() == 64) // transaction hash is 64 characters (this means it is a child node, so it is not a parent node in tree mode)
     {
         COutPoint outpt(uint256S(item->data(COLUMN_ADDRESS, TxHashRole).toString().toStdString()), item->data(COLUMN_ADDRESS, VOutRole).toUInt());
 
@@ -416,14 +448,14 @@ void CoinControlDialog::viewItemChanged(QTreeWidgetItem* item, int column)
 
         // selection changed -> update labels
         if (ui->treeWidget->isEnabled()) // do not update on every click for (un)select all
-            CoinControlDialog::updateLabels(m_coin_control, model, this);
+            refreshLabels();
     }
 }
 
 // shows count of locked unspent outputs
 void CoinControlDialog::updateLabelLocked()
 {
-    auto locked_coins{model->wallet().listLockedCoins().size()};
+    auto locked_coins{m_selected_notes ? 0 : model->wallet().listLockedCoins().size()};
     if (locked_coins > 0)
     {
        ui->labelLocked->setText(tr("(%1 locked)").arg(locked_coins));
@@ -436,7 +468,69 @@ void CoinControlDialog::on_hideButton_clicked()
 {
     fHideAdditional = !fHideAdditional;
     updateView();
-    CoinControlDialog::updateLabels(m_coin_control, model, this);
+    refreshLabels();
+}
+
+void CoinControlDialog::refreshLabels()
+{
+    if (m_selected_notes) {
+        CoinControlDialog::updateNoteLabels(*m_selected_notes, model, this);
+    } else {
+        CoinControlDialog::updateLabels(m_coin_control, model, this);
+    }
+}
+
+void CoinControlDialog::updateNoteLabels(std::set<uint256>& selected_notes, WalletModel* model, QDialog* dialog)
+{
+    if (!model)
+        return;
+
+    CAmount nPayAmount = 0;
+    for (const CAmount& amount : CoinControlDialog::payAmounts) {
+        nPayAmount += amount;
+    }
+
+    unsigned int nQuantity = 0;
+    CAmount nAmount = 0;
+    std::set<uint256> spendable;
+    for (const auto& note : model->wallet().listSpendableSaplingNotes(/*minconf=*/1)) {
+        spendable.insert(note.cmu);
+        if (!selected_notes.count(note.cmu)) continue;
+        nQuantity++;
+        nAmount += note.value;
+    }
+    // Unselect notes spent elsewhere in the meantime
+    bool fUnselectedSpent = false;
+    for (auto it = selected_notes.begin(); it != selected_notes.end();) {
+        if (!spendable.count(*it)) {
+            it = selected_notes.erase(it);
+            fUnselectedSpent = true;
+        } else {
+            ++it;
+        }
+    }
+
+    CAmount nPayFee = 0;
+    CAmount nAfterFee = 0;
+    CAmount nChange = 0;
+    unsigned int nBytes = 0;
+    if (nQuantity > 0) {
+        const int nTransparentOutputs = std::max(0, static_cast<int>(CoinControlDialog::payAmounts.size()) - CoinControlDialog::nShieldedOutputs);
+        // The fee depends on whether there is a shielded change output
+        bool fChange = true;
+        for (int i = 0; i < 2; ++i) {
+            const int nOutputs = std::max(2, CoinControlDialog::nShieldedOutputs + (fChange ? 1 : 0));
+            nPayFee = CalculateSaplingFee(nQuantity, nOutputs);
+            nBytes = nQuantity * SPEND_DESCRIPTION_BYTES + nOutputs * OUTPUT_DESCRIPTION_BYTES + nTransparentOutputs * 34 + SAPLING_TX_OVERHEAD_BYTES;
+            nChange = nAmount - nPayAmount - (CoinControlDialog::fSubtractFeeFromAmount ? 0 : nPayFee);
+            if (nPayAmount == 0 || (nChange > 0) == fChange) break;
+            fChange = nChange > 0;
+        }
+        if (nPayAmount == 0) nChange = 0;
+        nAfterFee = std::max<CAmount>(nAmount - nPayFee, 0);
+    }
+
+    setLabels(dialog, model, nPayAmount, nQuantity, nAmount, nPayFee, nAfterFee, nBytes, nChange, fUnselectedSpent);
 }
 
 void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *model, QDialog* dialog)
@@ -501,6 +595,15 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
     // calculation
     if (nQuantity > 0)
     {
+        if (CoinControlDialog::fShieldedTx) {
+            // t->z: the fixed Sapling fee, charged per shielded output only
+            const int nOutputs = std::max(2, CoinControlDialog::nShieldedOutputs);
+            const int nTransparentOutputs = std::max(0, static_cast<int>(CoinControlDialog::payAmounts.size()) - CoinControlDialog::nShieldedOutputs);
+            nBytes = nBytesInputs + (nTransparentOutputs + 1) * 34 + nOutputs * OUTPUT_DESCRIPTION_BYTES + SAPLING_TX_OVERHEAD_BYTES;
+            if (CoinControlDialog::fSubtractFeeFromAmount && nAmount - nPayAmount == 0)
+                nBytes -= 34;
+            nPayFee = CalculateSaplingFee(0, nOutputs);
+        } else {
         // Bytes
         nBytes = nBytesInputs + ((CoinControlDialog::payAmounts.size() > 0 ? CoinControlDialog::payAmounts.size() + 1 : 2) * 34) + 10; // always assume +1 output for change here
 
@@ -511,6 +614,7 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
 
         // Fee
         nPayFee = model->wallet().getMinimumFee(nBytes, m_coin_control, nullptr /* returned_target */, nullptr /* reason */);
+        }
 
         if (nPayAmount > 0)
         {
@@ -541,6 +645,12 @@ void CoinControlDialog::updateLabels(CCoinControl& m_coin_control, WalletModel *
         nAfterFee = std::max<CAmount>(nAmount - nPayFee, 0);
     }
 
+    setLabels(dialog, model, nPayAmount, nQuantity, nAmount, nPayFee, nAfterFee, nBytes, nChange, fUnselectedSpent);
+}
+
+void CoinControlDialog::setLabels(QDialog* dialog, WalletModel* model, CAmount nPayAmount, unsigned int nQuantity, CAmount nAmount,
+                                  CAmount nPayFee, CAmount nAfterFee, unsigned int nBytes, CAmount nChange, bool fUnselectedSpent)
+{
     // actually update labels
     BitcoinUnit nDisplayUnit = BitcoinUnit::KRGN;
     if (model->getOptionsModel())
@@ -602,6 +712,11 @@ void CoinControlDialog::updateView()
 {
     if (!model || !model->getOptionsModel() || !model->getAddressTableModel())
         return;
+
+    if (m_selected_notes) {
+        updateNoteView();
+        return;
+    }
 
     ui->treeWidget->setColumnHidden(COLUMN_LABEL, false);
 
@@ -749,6 +864,90 @@ void CoinControlDialog::updateView()
     }
 
     // sort view
+    sortView(sortColumn, sortOrder);
+    ui->treeWidget->setEnabled(true);
+}
+
+void CoinControlDialog::updateNoteView()
+{
+    ui->treeWidget->setColumnHidden(COLUMN_LABEL, false);
+    ui->hideButton->setVisible(false);
+
+    const bool treeMode = ui->radioTreeMode->isChecked();
+    ui->treeWidget->clear();
+    ui->treeWidget->setEnabled(false); // performance, otherwise refreshLabels would be called for every checked checkbox
+    ui->treeWidget->setAlternatingRowColors(!treeMode);
+    const QFlags<Qt::ItemFlag> flgCheckbox = Qt::ItemIsSelectable | Qt::ItemIsEnabled | Qt::ItemIsUserCheckable;
+    const QFlags<Qt::ItemFlag> flgTristate = flgCheckbox | Qt::ItemIsAutoTristate;
+    const BitcoinUnit nDisplayUnit = model->getOptionsModel()->getDisplayUnit();
+
+    // Group the notes by the address they were received on
+    std::map<std::string, std::vector<wallet::SaplingSpendableNote>> notesByAddress;
+    for (auto& note : model->wallet().listSpendableSaplingNotes(/*minconf=*/1)) {
+        notesByAddress[note.address].push_back(std::move(note));
+    }
+
+    for (const auto& [address, notes] : notesByAddress) {
+        const QString sAddress = QString::fromStdString(address);
+        QString sLabel = notes.front().is_change ? tr("(change)") : model->getAddressTableModel()->labelForAddress(sAddress);
+        if (sLabel.isEmpty())
+            sLabel = tr("(no label)");
+
+        CCoinControlWidgetItem* itemAddress{nullptr};
+        if (treeMode) {
+            itemAddress = new CCoinControlWidgetItem(ui->treeWidget);
+            itemAddress->setFlags(flgTristate);
+            itemAddress->setCheckState(COLUMN_CHECKBOX, Qt::Unchecked);
+            itemAddress->setText(COLUMN_LABEL, sLabel);
+            itemAddress->setToolTip(COLUMN_LABEL, sLabel);
+            itemAddress->setText(COLUMN_ADDRESS, sAddress);
+            itemAddress->setToolTip(COLUMN_ADDRESS, sAddress);
+        }
+
+        CAmount nSum = 0;
+        for (const auto& note : notes) {
+            nSum += note.value;
+
+            CCoinControlWidgetItem* itemNote = treeMode ? new CCoinControlWidgetItem(itemAddress) : new CCoinControlWidgetItem(ui->treeWidget);
+            itemNote->setFlags(flgCheckbox);
+            itemNote->setCheckState(COLUMN_CHECKBOX, Qt::Unchecked);
+
+            if (!treeMode) {
+                itemNote->setText(COLUMN_ADDRESS, sAddress);
+                itemNote->setText(COLUMN_LABEL, sLabel);
+            }
+            itemNote->setToolTip(COLUMN_ADDRESS, sAddress);
+
+            itemNote->setText(COLUMN_AMOUNT, BitcoinUnits::format(nDisplayUnit, note.value));
+            itemNote->setToolTip(COLUMN_AMOUNT, BitcoinUnits::format(nDisplayUnit, note.value));
+            itemNote->setData(COLUMN_AMOUNT, Qt::UserRole, QVariant((qlonglong)note.value));
+
+            itemNote->setText(COLUMN_DATE, note.time ? GUIUtil::dateTimeStr(note.time) : QString());
+            itemNote->setData(COLUMN_DATE, Qt::UserRole, QVariant((qlonglong)note.time));
+
+            itemNote->setText(COLUMN_CONFIRMATIONS, QString::number(note.depth));
+            itemNote->setData(COLUMN_CONFIRMATIONS, Qt::UserRole, QVariant((qlonglong)note.depth));
+
+            // transaction hash and Sapling output index (for "Copy transaction ID")
+            itemNote->setData(COLUMN_ADDRESS, TxHashRole, QString::fromStdString(note.txid.GetHex()));
+            itemNote->setData(COLUMN_ADDRESS, VOutRole, note.output_index);
+            itemNote->setData(COLUMN_ADDRESS, NoteCmuRole, QString::fromStdString(note.cmu.GetHex()));
+
+            if (m_selected_notes->count(note.cmu)) {
+                itemNote->setCheckState(COLUMN_CHECKBOX, Qt::Checked);
+            }
+        }
+
+        if (treeMode) {
+            itemAddress->setText(COLUMN_CHECKBOX, "(" + QString::number(notes.size()) + ")");
+            itemAddress->setText(COLUMN_AMOUNT, BitcoinUnits::format(nDisplayUnit, nSum));
+            itemAddress->setToolTip(COLUMN_AMOUNT, BitcoinUnits::format(nDisplayUnit, nSum));
+            itemAddress->setData(COLUMN_AMOUNT, Qt::UserRole, QVariant((qlonglong)nSum));
+            if (itemAddress->checkState(COLUMN_CHECKBOX) == Qt::PartiallyChecked)
+                itemAddress->setExpanded(true);
+        }
+    }
+
     sortView(sortColumn, sortOrder);
     ui->treeWidget->setEnabled(true);
 }

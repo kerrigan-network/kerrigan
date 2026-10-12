@@ -7,6 +7,8 @@
 
 #include <qt/walletmodel.h>
 
+#include <uint256.h>
+
 #include <QDialog>
 #include <QMessageBox>
 #include <QPointer>
@@ -14,6 +16,8 @@
 #include <QString>
 #include <QThread>
 #include <QTimer>
+
+#include <set>
 
 static const int MAX_SEND_POPUP_ENTRIES = 10;
 
@@ -78,10 +82,28 @@ private:
     // Active shielded send thread, tracked so the destructor can wait for it.
     QPointer<QThread> m_shieldedThread;
 
-    // Returns true if any recipient address is a Sapling z-address
-    bool hasShieldedRecipient(const QList<SendCoinsRecipient>& recipients) const;
-    // Execute a shielded send via ShieldedSendWorker on a background thread
-    void sendShielded(const QList<SendCoinsRecipient>& recipients, bool relockOnComplete = false);
+    // Sapling notes chosen in Coin Control while paying from shielded funds
+    std::set<uint256> m_selected_notes;
+    // The fee section shows the fixed Sapling fee instead of the fee selection
+    bool m_shielded_fee_mode{false};
+    // Recomputes that fee once editing pauses (planning lists the wallet's coins)
+    QTimer m_shielded_fee_timer;
+    // Tooltip of the custom change address checkbox for transparent funds
+    QString m_change_address_tooltip;
+
+    // "Pay from: Shielded" is selected
+    bool payFromShielded() const;
+    // The send needs a Sapling transaction: shielded source or recipient
+    bool isShieldedSend() const;
+    // Spendable shielded balance, or the total of the selected notes
+    CAmount shieldedAvailableBalance(bool selected_only) const;
+    // The Sapling funds and recipients currently entered on the page
+    wallet::SaplingSendSource shieldedSendSource() const;
+    // Fee text for the fee section while a Sapling transaction is set up
+    QString shieldedFeeText();
+    // Plan, confirm and start a shielded send on a background thread.
+    // Returns false if nothing was started.
+    bool sendShielded(const QList<SendCoinsRecipient>& recipients, bool relockOnComplete = false);
 
     // Process WalletModel::SendCoinsReturn and generate a pair consisting
     // of a message and message flags for use in Q_EMIT message().
@@ -115,6 +137,8 @@ private Q_SLOTS:
     void updateNumberOfBlocks(int count, const QDateTime& blockDate, const QString& blockHash, double nVerificationProgress, bool header, SynchronizationState sync_state);
     void updateSmartFeeLabel();
     void keepChangeAddressChanged(bool);
+    void payFromChanged();
+    void updateShieldedState();
 
 Q_SIGNALS:
     // Fired when a message should be reported to the user

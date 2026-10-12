@@ -650,8 +650,19 @@ public:
     void blockConnected(const CBlock& block, int height) override;
     void blockDisconnected(const CBlock& block, int height) override;
 
-    /** Scan a single block for incoming/spent Sapling shielded notes. */
-    void ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    /**
+     * Scan a single block for incoming/spent Sapling shielded notes.
+     * Transactions that create or spend a wallet note are added to mapWallet
+     * if they are not tracked yet.
+     */
+    void ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch, bool rescanning_old_block = false) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+
+    /**
+     * Add a transaction that only involves the wallet through Sapling notes
+     * (and so was skipped by AddToWalletIfInvolvingMe) to mapWallet. No-op if
+     * the transaction is already tracked; SyncTransaction keeps its state current.
+     */
+    void AddSaplingTxToWallet(const CTransactionRef& ptx, const TxState& state, bool rescanning_old_block) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /**
      * Replay Sapling blocks using a pre-captured block-hash snapshot.

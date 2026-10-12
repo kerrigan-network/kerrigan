@@ -603,6 +603,7 @@ BITCOIN_CORE_H = \
   wallet/rpc/util.h \
   wallet/rpc/wallet.h \
   wallet/sapling_keymanager.h \
+  wallet/sapling_send.h \
   wallet/sapling_notedata.h \
   wallet/salvage.h \
   wallet/scriptpubkeyman.h \
@@ -842,6 +843,7 @@ libbitcoin_wallet_a_SOURCES = \
   wallet/rpc/util.cpp \
   wallet/rpc/wallet.cpp \
   wallet/sapling_keymanager.cpp \
+  wallet/sapling_send.cpp \
   wallet/scriptpubkeyman.cpp \
   wallet/spend.cpp \
   wallet/transaction.cpp \

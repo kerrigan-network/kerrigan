@@ -6,7 +6,6 @@
 
 #include <chain.h>
 #include <consensus/amount.h>
-#include <consensus/tx_check.h>
 #include <consensus/validation.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
@@ -26,9 +25,6 @@
 #include <chainparams.h>
 #include <key_io.h>
 #include <rust/bridge.h>
-#include <sapling/sapling_init.h>
-#include <sapling/sapling_transaction_builder.h>
-#include <sapling/sapling_tx_payload.h>
 #include <random.h>
 #include <wallet/coincontrol.h>
 #include <wallet/context.h>
@@ -38,6 +34,7 @@
 #include <wallet/receive.h>
 #include <wallet/rpc/wallet.h>
 #include <wallet/sapling_keymanager.h>
+#include <wallet/sapling_send.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -574,6 +571,27 @@ public:
         }
         return result;
     }
+    static ShieldedNoteInfo MakeShieldedNoteInfo(const uint256& cmu, const SaplingNoteData& nd)
+    {
+        ShieldedNoteInfo info;
+        info.cmu = cmu;
+        info.value = nd.value;
+        info.address = EncodeSaplingAddress(nd.recipient);
+        // Decode memo: extract printable ASCII prefix
+        std::string memo;
+        for (size_t i = 0; i < nd.memo.size(); ++i) {
+            uint8_t c = nd.memo[i];
+            if (c == 0) break;
+            if (c >= 32 && c < 127) memo += static_cast<char>(c);
+        }
+        info.memo = memo;
+        info.txid = nd.txid;
+        info.outputIndex = nd.outputIndex;
+        info.blockHeight = nd.blockHeight;
+        info.isSpent = nd.isSpent;
+        info.spendingTxid = nd.spendingTxid;
+        return info;
+    }
     std::vector<ShieldedNoteInfo> getShieldedNoteHistory() override
     {
         const auto& km = m_wallet->GetSaplingKeyManager();
@@ -581,479 +599,33 @@ public:
         std::vector<ShieldedNoteInfo> result;
         result.reserve(allNotes.size());
         for (const auto& [cmu, nd] : allNotes) {
-            ShieldedNoteInfo info;
-            info.cmu = cmu;
-            info.value = nd.value;
-            info.address = EncodeSaplingAddress(nd.recipient);
-            // Decode memo: extract printable ASCII prefix
-            std::string memo;
-            for (size_t i = 0; i < nd.memo.size(); ++i) {
-                uint8_t c = nd.memo[i];
-                if (c == 0) break;
-                if (c >= 32 && c < 127) memo += static_cast<char>(c);
-            }
-            info.memo = memo;
-            info.txid = nd.txid;
-            info.outputIndex = nd.outputIndex;
-            info.blockHeight = nd.blockHeight;
-            info.isSpent = nd.isSpent;
-            info.spendingTxid = nd.spendingTxid;
-            result.push_back(std::move(info));
+            result.push_back(MakeShieldedNoteInfo(cmu, nd));
         }
         return result;
     }
-    std::string saplingZSendMany(const std::string& from_address,
-        const std::vector<std::pair<std::string, CAmount>>& recipients,
-        int minconf,
-        std::optional<CAmount> fee) override
+    std::vector<ShieldedNoteInfo> getShieldedNotesForTx(const uint256& txid) override
     {
-        WAIT_LOCK(m_wallet->cs_wallet, wallet_lock);
-
-        // Check wallet is unlocked early, before expensive proof generation
-        if (m_wallet->IsLocked()) {
-            throw std::runtime_error("Wallet is locked");
+        std::vector<ShieldedNoteInfo> result;
+        for (const auto& nd : m_wallet->GetSaplingKeyManager().GetNotesByTxid(txid)) {
+            result.push_back(MakeShieldedNoteInfo(uint256(), nd));
         }
-
-        if (!sapling::IsSaplingInitialized()) {
-            throw std::runtime_error("Sapling parameters not loaded");
-        }
-
-        auto& km = m_wallet->GetSaplingKeyManager();
-
-        // Parse source address
-        sapling::SaplingPaymentAddress fromSapling;
-        bool fromIsShielded = DecodeSaplingAddress(from_address, fromSapling);
-        CTxDestination fromTransparent;
-        if (!fromIsShielded) {
-            fromTransparent = DecodeDestination(from_address);
-            if (!IsValidDestination(fromTransparent)) {
-                throw std::runtime_error("Invalid from address");
-            }
-        }
-
-        // Reject empty recipient list (matches RPC path)
-        if (recipients.empty()) {
-            throw std::runtime_error("No recipients specified");
-        }
-        // Reject negative minconf (matches RPC path)
-        if (minconf < 0) {
-            throw std::runtime_error("minconf must be non-negative");
-        }
-
-        // Parse recipients
-        struct Recipient {
-            bool isShielded;
-            sapling::SaplingPaymentAddress saplingAddr;
-            CTxDestination transparentDest;
-            CAmount amount;
-        };
-        std::vector<Recipient> parsedRecipients;
-        CAmount totalSend = 0;
-        size_t nShieldedOutputs = 0;
-
-        for (const auto& [addrStr, amount] : recipients) {
-            Recipient r;
-            r.amount = amount;
-            // Validate per-recipient amount (matches RPC path)
-            if (r.amount <= 0 || !MoneyRange(r.amount)) {
-                throw std::runtime_error("Invalid recipient amount");
-            }
-            r.isShielded = DecodeSaplingAddress(addrStr, r.saplingAddr);
-            if (!r.isShielded) {
-                r.transparentDest = DecodeDestination(addrStr);
-                if (!IsValidDestination(r.transparentDest)) {
-                    throw std::runtime_error("Invalid recipient address: " + addrStr);
-                }
-            } else {
-                nShieldedOutputs++;
-            }
-            // Overflow guard (matches RPC path)
-            if (r.amount > MAX_MONEY - totalSend) {
-                throw std::runtime_error("Total send amount out of range");
-            }
-            totalSend += r.amount;
-            parsedRecipients.push_back(std::move(r));
-        }
-
-        bool hasShielded = fromIsShielded || nShieldedOutputs > 0;
-        if (!hasShielded) {
-            throw std::runtime_error("z_sendmany requires at least one shielded address");
-        }
-
-        const auto& chainparams = Params();
-        const auto& params = chainparams.GetConsensus();
-        int tipHeight = m_wallet->GetLastBlockHeight();
-        std::string netID = chainparams.NetworkIDString();
-
-        // Get anchor
-        std::array<uint8_t, 32> anchor{};
-        {
-            uint256 anchorHash;
-            if (sapling::GetBestAnchor(tipHeight, anchorHash)) {
-                std::copy(anchorHash.begin(), anchorHash.end(), anchor.begin());
-            }
-        }
-
-        SaplingTransactionBuilder builder(params, tipHeight + 1, anchor, netID);
-
-        CAmount txFee = fee.value_or(SAPLING_BASE_FEE);
-        // Validate explicit fee is positive and within range
-        if (fee.has_value() && (!MoneyRange(txFee) || txFee <= 0)) {
-            throw std::runtime_error("Fee must be positive");
-        }
-        size_t nShieldedSpends = 0;
-        std::set<uint256> selectedNullifiers; // Track selected notes for reservation
-        std::vector<COutPoint> lockedCoins; // Track locked UTXOs for cleanup
-
-        // Deferred registration of the internal diversified change address.
-        // Populated when a change output is added to the builder; the actual
-        // RegisterDiversifiedAddress call runs only after CommitTransaction
-        // succeeds, so aborted sends leave no orphan mapping in the wallet
-        // DB. A crash in the narrow commit-to-register window is still
-        // recovered by LoadNote self-heal on next wallet load.
-        std::optional<sapling::SaplingPaymentAddress> pendingChangeAddr;
-        std::optional<sapling::SaplingIncomingViewingKey> pendingChangeIvk;
-
-        if (fromIsShielded) {
-            if (!km.CanSpend(fromSapling)) {
-                throw std::runtime_error("Don't have spending key for source address");
-            }
-            auto sk = km.GetSpendingKey(fromSapling);
-            if (!sk) {
-                throw std::runtime_error("Spending key not found");
-            }
-
-            auto allNotes = km.GetUnspentNotes(fromSapling);
-            std::vector<SaplingNoteData> notes;
-            for (const auto& note : allNotes) {
-                int confs = (note.blockHeight >= 0) ? (tipHeight - note.blockHeight + 1) : 0;
-                if (confs >= minconf) {
-                    notes.push_back(note);
-                }
-            }
-
-            // Fee estimation: convergence loop handles the circular
-            // dependency between spend count, change output, and fee.
-            if (!fee.has_value()) {
-                CAmount prevFee = -1;
-                // Apply 2-output privacy padding (matches RPC path)
-                CAmount estimatedFee = CalculateSaplingFee(1, std::max(size_t{2}, nShieldedOutputs));
-                for (int iter = 0; iter < 10 && estimatedFee != prevFee; ++iter) {
-                    prevFee = estimatedFee;
-
-                    CAmount runningTotal = 0;
-                    size_t estimatedSpends = 0;
-                    for (const auto& note : notes) {
-                        if (runningTotal >= totalSend + estimatedFee) break;
-                        estimatedSpends++;
-                        runningTotal += note.value;
-                    }
-                    if (estimatedSpends == 0) estimatedSpends = 1;
-
-                    bool hasChange = (runningTotal > totalSend + estimatedFee);
-                    size_t totalOutputs = std::max(size_t{2}, nShieldedOutputs + (hasChange ? 1 : 0));
-                    estimatedFee = CalculateSaplingFee(estimatedSpends, totalOutputs);
-                }
-                txFee = estimatedFee;
-            }
-
-            // Select notes
-            CAmount noteTotal = 0;
-            for (const auto& note : notes) {
-                if (noteTotal >= totalSend + txFee) break;
-                nShieldedSpends++;
-
-                if (note.witnessData.empty()) {
-                    throw std::runtime_error("Note has no Merkle witness");
-                }
-                std::array<uint8_t, 1065> merklePathArr;
-                try {
-                    rust::Slice<const uint8_t> witSlice(note.witnessData.data(), note.witnessData.size());
-                    auto witness = sapling::tree::witness_deserialize(witSlice);
-                    auto merklePath = sapling::tree::witness_path(*witness);
-                    if (merklePath.size() != 1065) {
-                        throw std::runtime_error("unexpected Merkle path size");
-                    }
-                    std::copy(merklePath.begin(), merklePath.end(), merklePathArr.begin());
-                } catch (const rust::Error& e) {
-                    throw std::runtime_error(strprintf("Corrupt Merkle witness for note in tx %s: %s", note.txid.GetHex(), e.what()));
-                }
-
-                std::array<uint8_t, 43> recipientArr;
-                std::copy(note.recipient.d.begin(), note.recipient.d.end(), recipientArr.begin());
-                std::copy(note.recipient.pk_d.begin(), note.recipient.pk_d.end(), recipientArr.begin() + 11);
-
-                if (!builder.AddSaplingSpend(*sk, recipientArr, note.value, note.rseed, merklePathArr)) {
-                    throw std::runtime_error("Failed to add Sapling spend");
-                }
-                noteTotal += note.value;
-                // Skip notes with null nullifiers
-                if (!note.nullifier.IsNull()) {
-                    selectedNullifiers.insert(note.nullifier);
-                }
-            }
-
-            if (noteTotal < totalSend + txFee) {
-                throw std::runtime_error("Insufficient shielded funds");
-            }
-
-            // Reserve selected notes to prevent double-selection during unlock
-            if (!selectedNullifiers.empty()) {
-                km.ReserveNotesByNullifier(selectedNullifiers);
-            }
-
-            // Change output
-            CAmount change = noteTotal - totalSend - txFee;
-            if (change > 0) {
-                auto fvk = km.GetFvk(fromSapling);
-                auto dk = km.GetDk(fromSapling);
-                if (!fvk || !dk) {
-                    // Unreserve notes before throwing
-                    if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-                    throw std::runtime_error("Cannot derive change address");
-                }
-
-                std::array<uint8_t, 96> source_fvk_bytes;
-                std::copy(fvk->ak.begin(), fvk->ak.end(), source_fvk_bytes.begin());
-                std::copy(fvk->nk.begin(), fvk->nk.end(), source_fvk_bytes.begin() + 32);
-                std::copy(fvk->ovk.begin(), fvk->ovk.end(), source_fvk_bytes.begin() + 64);
-
-                // Derive change-address FVK/DK. ZIP 316 internal derivation
-                // applies only when the source is an EXTERNAL user-facing
-                // address: AddSpendingKey eagerly registers the matching
-                // internal FVK in mapIvkToFvk, so the post-commit
-                // RegisterDiversifiedAddress call will find the IVK.
-                //
-                // If the source is itself an internal address (a previously
-                // stranded change note healed via LoadNote, or change being
-                // re-spent), calling derive_internal_fvk a second time would
-                // produce an "internal-of-internal" FVK whose IVK is not
-                // tracked by the wallet, and the register call would fail
-                // with "unknown IVK". Reuse the source FVK/DK directly in
-                // that case: privacy is preserved (the source is already
-                // unlinkable), and the IVK matches mapIvkToFvk because we
-                // just passed CanSpend.
-                std::array<uint8_t, 96> change_fvk_bytes;
-                std::array<uint8_t, 32> change_dk_bytes;
-                std::array<uint8_t, 43> change_addr_bytes;
-                try {
-                    auto sourceIvk = km.GetIvk(fromSapling);
-                    const bool sourceIsExternal =
-                        sourceIvk.has_value() && km.IsExternalIvk(*sourceIvk);
-                    if (sourceIsExternal) {
-                        auto derived = sapling::zip32::derive_internal_fvk(source_fvk_bytes, *dk);
-                        change_fvk_bytes = derived.fvk;
-                        change_dk_bytes  = derived.dk;
-                    } else {
-                        change_fvk_bytes = source_fvk_bytes;
-                        change_dk_bytes  = *dk;
-                    }
-                    std::array<uint8_t, 11> j_start{};
-                    GetStrongRandBytes(Span{j_start.data(), 8});
-                    auto found = sapling::zip32::find_address(change_fvk_bytes, change_dk_bytes, j_start);
-                    change_addr_bytes = found.addr;
-                } catch (...) {
-                    if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-                    throw;
-                }
-
-                // Use the change FVK's OVK so the sender can recover the
-                // note while limiting exposure (internal OVK for external
-                // sources; source's own OVK for internal sources, which is
-                // already held by the wallet).
-                std::array<uint8_t, 32> changeOvk;
-                std::copy(change_fvk_bytes.begin() + 64, change_fvk_bytes.begin() + 96, changeOvk.begin());
-
-                if (!builder.AddSaplingOutput(changeOvk, change_addr_bytes, change)) {
-                    // Unreserve notes before throwing
-                    if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-                    throw std::runtime_error("Failed to add shielded change output");
-                }
-
-                // Stash the change address + change IVK. The mapping is
-                // persisted via RegisterDiversifiedAddress only AFTER
-                // CommitTransaction succeeds (mirrors the RPC z_sendmany
-                // path); LoadNote's self-heal rebuilds anything lost in
-                // the commit-vs-register race on next wallet load.
-                sapling::SaplingPaymentAddress changeAddr;
-                std::copy(change_addr_bytes.begin(), change_addr_bytes.begin() + 11, changeAddr.d.begin());
-                std::copy(change_addr_bytes.begin() + 11, change_addr_bytes.end(),   changeAddr.pk_d.begin());
-
-                sapling::SaplingIncomingViewingKey changeIvk;
-                try {
-                    changeIvk.key = sapling::zip32::fvk_to_ivk(change_fvk_bytes);
-                } catch (...) {
-                    if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-                    throw;
-                }
-
-                pendingChangeAddr = changeAddr;
-                pendingChangeIvk = changeIvk;
-            }
-        } else {
-            // Transparent source
-            if (!fee.has_value()) {
-                // Apply 2-output privacy padding (matches RPC + shielded-source path)
-                txFee = CalculateSaplingFee(0, std::max(size_t{2}, nShieldedOutputs));
-            }
-
-            CCoinControl coin_control;
-            coin_control.m_min_depth = minconf;
-
-            // Use AvailableCoinsListUnspent to include spendable descriptor-wallet UTXOs
-            CoinsResult available_coins = AvailableCoinsListUnspent(*m_wallet, &coin_control);
-            auto allCoins = available_coins.all();
-
-            CScript sourceScript = GetScriptForDestination(fromTransparent);
-            allCoins.erase(
-                std::remove_if(allCoins.begin(), allCoins.end(),
-                    [&sourceScript](const COutput& c) {
-                        return c.txout.scriptPubKey != sourceScript;
-                    }),
-                allCoins.end());
-
-            CAmount sourceTotal = 0;
-            for (const auto& coin : allCoins) {
-                // MoneyRange overflow guard (matches RPC path)
-                if (!MoneyRange(sourceTotal + coin.txout.nValue)) {
-                    throw std::runtime_error("Transparent balance overflow");
-                }
-                sourceTotal += coin.txout.nValue;
-            }
-
-            if (sourceTotal < totalSend + txFee) {
-                throw std::runtime_error("Insufficient transparent funds");
-            }
-
-            std::sort(allCoins.begin(), allCoins.end(), [](const COutput& a, const COutput& b) {
-                return a.txout.nValue > b.txout.nValue;
-            });
-
-            CAmount transparentTotal = 0;
-            for (const auto& coin : allCoins) {
-                if (transparentTotal >= totalSend + txFee) break;
-                builder.AddTransparentInput(coin.outpoint, coin.txout.scriptPubKey, coin.txout.nValue);
-                m_wallet->LockCoin(coin.outpoint);
-                lockedCoins.push_back(coin.outpoint);
-                transparentTotal += coin.txout.nValue;
-            }
-
-            CAmount change = transparentTotal - totalSend - txFee;
-            CScript scriptChange = GetScriptForDestination(fromTransparent);
-            CTxOut changeTxOut(change, scriptChange);
-            if (change > 0 && !IsDust(changeTxOut, m_wallet->chain().relayDustFee())) {
-                builder.AddTransparentOutput(scriptChange, change);
-            } else if (change > 0) {
-                txFee += change;
-            }
-        }
-
-        // Add recipients
-        for (const auto& r : parsedRecipients) {
-            if (r.isShielded) {
-                std::array<uint8_t, 43> toAddr;
-                std::copy(r.saplingAddr.d.begin(), r.saplingAddr.d.end(), toAddr.begin());
-                std::copy(r.saplingAddr.pk_d.begin(), r.saplingAddr.pk_d.end(), toAddr.begin() + 11);
-                if (!builder.AddSaplingOutputNoOvk(toAddr, r.amount)) {
-                    if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-                    for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-                    throw std::runtime_error("Failed to add shielded output");
-                }
-            } else {
-                CScript scriptPubKey = GetScriptForDestination(r.transparentDest);
-                builder.AddTransparentOutput(scriptPubKey, r.amount);
-            }
-        }
-
-        // Release cs_wallet before Groth16 proof generation (slow, 1-30s).
-        // All inputs have been collected above; the builder owns them now.
-        wallet_lock.unlock();
-
-        // Build (creates Sapling proofs + binding signature, expensive)
-        std::string buildError;
-        auto mtx = builder.Build(&buildError);
-        if (!mtx) {
-            wallet_lock.lock();
-            if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-            for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-            throw std::runtime_error("Failed to build Sapling transaction: " + buildError);
-        }
-
-        // Reacquire cs_wallet for signing and commit
-        wallet_lock.lock();
-
-        // Check for reorg during proof generation; anchor may be stale
-        if (m_wallet->GetLastBlockHeight() != tipHeight) {
-            if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-            for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-            throw std::runtime_error("Chain tip changed during proof generation, anchor may be stale, please retry");
-        }
-
-        // Verify wallet is still unlocked after reacquiring lock
-        if (m_wallet->IsLocked()) {
-            if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-            for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-            throw std::runtime_error("Wallet was locked during proof generation");
-        }
-
-        // Sign transparent inputs (requires cs_wallet)
-        if (!mtx->vin.empty()) {
-            if (!m_wallet->SignTransaction(*mtx)) {
-                if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-                for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-                throw std::runtime_error("Failed to sign transparent inputs");
-            }
-        }
-
-        CTransactionRef tx = MakeTransactionRef(std::move(*mtx));
-
-        // Fee sanity check
-        if (txFee > m_wallet->m_default_max_tx_fee) {
-            if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-            for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-            throw std::runtime_error("Fee exceeds wallet maximum");
-        }
-
-        // Validate transaction before committing
-        TxValidationState txState;
-        if (!CheckTransaction(*tx, txState)) {
-            if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-            for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-            throw std::runtime_error("Transaction validation failed: " + txState.ToString());
-        }
-
-        unsigned int nMaxTxSize = (tx->nType == TRANSACTION_SAPLING)
-            ? MAX_SAPLING_TX_EXTRA_PAYLOAD
-            : MAX_STANDARD_TX_SIZE;
-        if (GetSerializeSize(*tx) > nMaxTxSize) {
-            if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-            for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-            throw std::runtime_error("Transaction too large");
-        }
-
-        // Wrap CommitTransaction to unreserve notes on failure (matches RPC path)
-        try {
-            m_wallet->CommitTransaction(tx, {}, {});
-        } catch (...) {
-            if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-            for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-            throw;
-        }
-
-        // Register the internal diversified change address now that the tx
-        // is committed. A failure here leaves the mapping recoverable via
-        // LoadNote self-heal on next wallet load; it is deliberately
-        // non-fatal because the funds are safely spendable either way.
-        if (pendingChangeAddr && pendingChangeIvk) {
-            WalletBatch batch(m_wallet->GetDatabase());
-            if (!km.RegisterDiversifiedAddress(*pendingChangeAddr, *pendingChangeIvk, &batch)) {
-                LogPrintf("sendShielded: failed to register internal change address (funds still spendable after next restart via LoadNote self-heal)\n");
-            }
-        }
-
-        if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
-        for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
-        return tx->GetHash().GetHex();
+        return result;
+    }
+    std::vector<SaplingSpendableNote> listSpendableSaplingNotes(int minconf) override
+    {
+        return ListSpendableSaplingNotes(*m_wallet, minconf);
+    }
+    SaplingSendPlan planSaplingSend(const SaplingSendSource& source,
+        const std::vector<SaplingSendRecipient>& recipients,
+        int minconf) override
+    {
+        return PlanSaplingSend(*m_wallet, source, recipients, minconf);
+    }
+    std::string sendSapling(const SaplingSendSource& source,
+        const std::vector<SaplingSendRecipient>& recipients,
+        int minconf) override
+    {
+        return SendSapling(*m_wallet, source, recipients, minconf);
     }
     wallet::isminetype txinIsMine(const CTxIn& txin) override
     {

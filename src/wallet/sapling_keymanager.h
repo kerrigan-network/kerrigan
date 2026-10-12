@@ -13,6 +13,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <string>
 #include <vector>
 
 class CBlock;
@@ -35,6 +36,21 @@ class WalletBatch;
  * Key derivation is performed via Rust FFI calls to the sapling-crypto crate
  * (ZIP 32 hierarchical deterministic key derivation).
  */
+/**
+ * One Sapling output of a transaction as far as this wallet can read it.
+ * Produced by SaplingKeyManager::ViewSaplingOutputs() for z_viewtransaction.
+ */
+struct SaplingOutputView {
+    /** Index of the OutputDescription within the SaplingTxPayload. */
+    int outputIndex{-1};
+    /** True if the output was recovered with an outgoing viewing key, i.e. it
+     *  is not addressed to this wallet. */
+    bool outgoing{false};
+    sapling::SaplingPaymentAddress recipient;
+    CAmount value{0};
+    std::array<uint8_t, 512> memo{};
+};
+
 class SaplingKeyManager
 {
 private:
@@ -269,8 +285,10 @@ public:
      * @param blockHeight Confirmed height (-1 for mempool).
      * @param networkIDStr "main", "test", or "regtest" (for Rust FFI).
      * @param saplingHeight Sapling activation height (for regtest Rust network).
+     * @return true if at least one output of @p tx is a wallet note (newly
+     *         detected or already tracked).
      */
-    void ScanSaplingOutputs(const CTransaction& tx,
+    bool ScanSaplingOutputs(const CTransaction& tx,
                             const SaplingTxPayload& payload,
                             int blockHeight,
                             const std::string& networkIDStr,
@@ -283,10 +301,41 @@ public:
      *
      * @param tx      The spending transaction.
      * @param payload Parsed SaplingTxPayload.
+     * @return true if at least one spend of @p tx consumes a wallet note.
      */
-    void ScanSaplingSpends(const CTransaction& tx,
+    bool ScanSaplingSpends(const CTransaction& tx,
                            const SaplingTxPayload& payload,
                            WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * Read every Sapling output of @p tx the wallet has keys for.
+     *
+     * Outputs already tracked as notes are taken from the note store; other
+     * outputs are trial-decrypted with every IVK (including viewing-key-only
+     * ones) and then with every OVK. Needs no spending key, so it works on a
+     * locked or watch-only wallet. Outputs nothing can decrypt are omitted.
+     */
+    std::vector<SaplingOutputView> ViewSaplingOutputs(const CTransaction& tx,
+                                                      const SaplingTxPayload& payload,
+                                                      int blockHeight,
+                                                      const std::string& networkIDStr,
+                                                      int saplingHeight) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * The wallet note with the given nullifier, if any (spent or unspent).
+     */
+    std::optional<SaplingNoteData> GetNoteByNullifier(const uint256& nullifier) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * All wallet notes created by transaction @p txid (spent + unspent),
+     * ordered by output index.
+     */
+    std::vector<SaplingNoteData> GetNotesByTxid(const uint256& txid) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * Whether transaction @p txid spends at least one wallet note.
+     */
+    bool IsSpendingTx(const uint256& txid) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
      * Update incremental Merkle witnesses for all unspent wallet notes.
@@ -343,6 +392,18 @@ public:
      * Unspent notes with their cmu keys, for reservation tracking.
      */
     std::vector<std::pair<uint256, SaplingNoteData>> GetUnspentNotesWithKeys(const sapling::SaplingPaymentAddress& addr) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * Unspent notes with their cmu keys across all addresses, for reservation
+     * tracking (same filter as GetUnspentNotes()).
+     */
+    std::vector<std::pair<uint256, SaplingNoteData>> GetUnspentNotesWithKeys() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * IVKs of the internal (ZIP 316 change) keys of the tracked spending keys.
+     * Derived from the viewing keys, so it also works while the wallet is locked.
+     */
+    std::set<sapling::SaplingIncomingViewingKey> GetInternalIvks() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
      * Remove notes created by zapped transactions and clear spend state

@@ -34,14 +34,17 @@ SendCoinsEntry::SendCoinsEntry(QWidget* parent) :
     setButtonIcons();
 
     // normal kerrigan address field
-    GUIUtil::setupAddressWidget(ui->payTo, this, true);
+    GUIUtil::setupAddressWidget(ui->payTo, this, /*fAllowURI=*/true, /*fAllowSapling=*/true);
 
     GUIUtil::setFont({ui->payToLabel,
                      ui->labellLabel,
                      ui->amountLabel,
-                     ui->messageLabel}, {GUIUtil::FontWeight::Normal, 15});
+                     ui->messageLabel,
+                     ui->memoLabel}, {GUIUtil::FontWeight::Normal, 15});
 
     GUIUtil::updateFonts();
+
+    updateMemoVisibility(QString());
 
     // Connect signals
     connect(ui->payAmount, &BitcoinAmountField::valueChanged, this, &SendCoinsEntry::payAmountChanged);
@@ -83,7 +86,9 @@ void SendCoinsEntry::on_payTo_textChanged(const QString &address)
         ui->payTo->blockSignals(false);
     } else {
         updateLabel(address);
+        updateMemoVisibility(address);
     }
+    Q_EMIT payToChanged();
 }
 
 void SendCoinsEntry::setModel(WalletModel *_model)
@@ -108,6 +113,8 @@ void SendCoinsEntry::clear()
     ui->messageTextLabel->clear();
     ui->messageTextLabel->hide();
     ui->messageLabel->hide();
+    ui->memoEdit->clear();
+    updateMemoVisibility(QString());
 
     // update the display unit, to not use the default ("BTC")
     updateDisplayUnit();
@@ -165,6 +172,12 @@ bool SendCoinsEntry::validate(interfaces::Node& node)
         retval = false;
     }
 
+    // A Sapling memo field holds at most 512 bytes
+    if (isSapling && ui->memoEdit->text().toUtf8().size() > 512) {
+        ui->memoEdit->setValid(false);
+        retval = false;
+    }
+
     return retval;
 }
 
@@ -176,6 +189,9 @@ SendCoinsRecipient SendCoinsEntry::getValue()
     recipient.amount = ui->payAmount->value();
     recipient.message = ui->messageTextLabel->text();
     recipient.fSubtractFeeFromAmount = (ui->checkboxSubtractFeeFromAmount->checkState() == Qt::Checked);
+    // Memos only exist for shielded recipients; ignore the (hidden) field otherwise
+    sapling::SaplingPaymentAddress saplingAddr;
+    recipient.memo = DecodeSaplingAddress(recipient.address.toStdString(), saplingAddr) ? ui->memoEdit->text() : QString();
 
     return recipient;
 }
@@ -186,7 +202,8 @@ QWidget *SendCoinsEntry::setupTabChain(QWidget *prev)
     QWidget::setTabOrder(ui->payTo, ui->addAsLabel);
     QWidget *w = ui->payAmount->setupTabChain(ui->addAsLabel);
     QWidget::setTabOrder(w, ui->checkboxSubtractFeeFromAmount);
-    QWidget::setTabOrder(ui->checkboxSubtractFeeFromAmount, ui->addressBookButton);
+    QWidget::setTabOrder(ui->checkboxSubtractFeeFromAmount, ui->memoEdit);
+    QWidget::setTabOrder(ui->memoEdit, ui->addressBookButton);
     QWidget::setTabOrder(ui->addressBookButton, ui->pasteButton);
     QWidget::setTabOrder(ui->pasteButton, ui->deleteButton);
     return ui->deleteButton;
@@ -204,9 +221,11 @@ void SendCoinsEntry::setValue(const SendCoinsRecipient &value)
         ui->payTo->setText(recipient.address);
         ui->addAsLabel->setText(recipient.label);
         ui->payAmount->setValue(recipient.amount);
+        ui->memoEdit->setText(recipient.memo);
     }
 
     updateLabel(recipient.address);
+    updateMemoVisibility(recipient.address);
 }
 
 void SendCoinsEntry::setAddress(const QString &address)
@@ -251,6 +270,14 @@ void SendCoinsEntry::setButtonIcons()
     GUIUtil::setIcon(ui->addressBookButton, "address-book");
     GUIUtil::setIcon(ui->pasteButton, "editpaste");
     GUIUtil::setIcon(ui->deleteButton, "remove", GUIUtil::ThemedColor::RED);
+}
+
+void SendCoinsEntry::updateMemoVisibility(const QString &address)
+{
+    sapling::SaplingPaymentAddress saplingAddr;
+    const bool isSapling = DecodeSaplingAddress(address.toStdString(), saplingAddr);
+    ui->memoLabel->setVisible(isSapling);
+    ui->memoEdit->setVisible(isSapling);
 }
 
 bool SendCoinsEntry::updateLabel(const QString &address)

@@ -28,6 +28,7 @@
 #include <node/interface_ui.h>
 #include <policy/fees.h>
 #include <sapling/sapling_address.h>
+#include <sapling/sapling_tx_payload.h>
 #include <txmempool.h>
 #include <validation.h>
 #include <wallet/coincontrol.h>
@@ -82,7 +83,8 @@ SendCoinsDialog::SendCoinsDialog(QWidget* parent) :
                       ui->labelCoinControlAfterFeeText,
                       ui->labelCoinControlChangeText,
                       ui->labelFeeHeadline,
-                      ui->fallbackFeeWarningLabel
+                      ui->fallbackFeeWarningLabel,
+                      ui->labelPayFrom
                      }, {GUIUtil::FontWeight::Bold});
 
     GUIUtil::setFont({ui->labelBalance,
@@ -93,6 +95,7 @@ SendCoinsDialog::SendCoinsDialog(QWidget* parent) :
                      }, {GUIUtil::FontWeight::Bold, 16});
 
     ui->checkBoxCoinControlChange->setEnabled(true);
+    m_change_address_tooltip = ui->checkBoxCoinControlChange->toolTip();
     GUIUtil::setupAddressWidget(ui->lineEditCoinControlChange, this);
 
     addEntry();
@@ -150,6 +153,12 @@ SendCoinsDialog::SendCoinsDialog(QWidget* parent) :
     ui->sendButton->setToolTip(tr("Confirm the send action"));
 
     GUIUtil::ExceptionSafeConnect(ui->sendButton, &QPushButton::clicked, this, &SendCoinsDialog::sendButtonClicked);
+
+    // Pay from: transparent coins or shielded notes
+    connect(ui->radioPayFromTransparent, &QRadioButton::toggled, this, &SendCoinsDialog::payFromChanged);
+    m_shielded_fee_timer.setSingleShot(true);
+    m_shielded_fee_timer.setInterval(300);
+    connect(&m_shielded_fee_timer, &QTimer::timeout, this, &SendCoinsDialog::updateFeeMinimizedLabel);
 }
 
 void SendCoinsDialog::setClientModel(ClientModel *_clientModel)
@@ -250,6 +259,14 @@ void SendCoinsDialog::setModel(WalletModel *_model)
             ui->confTargetSelector->setCurrentIndex(getIndexForConfTarget(model->wallet().getConfirmTarget()));
         else
             ui->confTargetSelector->setCurrentIndex(getIndexForConfTarget(settings.value("nConfTarget").toInt()));
+
+        // Pay from: shielded notes need the wallet's own spending keys
+        const bool can_spend_shielded = !model->wallet().privateKeysDisabled() && !model->wallet().hasExternalSigner();
+        ui->radioPayFromShielded->setEnabled(can_spend_shielded);
+        if (can_spend_shielded && settings.value("fPayFromShielded", false).toBool()) {
+            ui->radioPayFromShielded->setChecked(true);
+        }
+        payFromChanged();
     }
 }
 
@@ -272,6 +289,7 @@ SendCoinsDialog::~SendCoinsDialog()
     settings.setValue("nFeeRadio", ui->groupFee->checkedId());
     settings.setValue("nConfTarget", getConfTargetForIndex(ui->confTargetSelector->currentIndex()));
     settings.setValue("nTransactionFee", (qint64)ui->customFee->value());
+    settings.setValue("fPayFromShielded", payFromShielded());
 
     delete ui;
 }
@@ -478,97 +496,147 @@ bool SendCoinsDialog::send(const QList<SendCoinsRecipient>& recipients, QString&
     return true;
 }
 
-bool SendCoinsDialog::hasShieldedRecipient(const QList<SendCoinsRecipient>& recipients) const
+bool SendCoinsDialog::payFromShielded() const
 {
-    for (const auto& rcp : recipients) {
+    return ui->radioPayFromShielded->isChecked();
+}
+
+bool SendCoinsDialog::isShieldedSend() const
+{
+    if (payFromShielded()) return true;
+    for (int i = 0; i < ui->entries->count(); ++i) {
+        SendCoinsEntry* entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
         sapling::SaplingPaymentAddress addr;
-        if (DecodeSaplingAddress(rcp.address.toStdString(), addr)) {
+        if (entry && !entry->isHidden() && DecodeSaplingAddress(entry->getValue().address.toStdString(), addr)) {
             return true;
         }
     }
     return false;
 }
 
-void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, bool relockOnComplete)
+CAmount SendCoinsDialog::shieldedAvailableBalance(bool selected_only) const
 {
-    // Decide source: use shielded balance if available, otherwise transparent (t->z shield)
-    auto saplingAddrs = model->wallet().listSaplingAddresses();
-    CAmount shieldedBal = model->getShieldedBalance();
-    QString fromAddress;
-    if (shieldedBal > 0 && !saplingAddrs.empty()) {
-        // Has shielded funds, send z->z -- pick the address with the highest balance
-        // so we don't fail with "Insufficient shielded funds" when the first address
-        // alphabetically has no balance but another one does.
-        std::map<std::string, CAmount> addrBalances;
-        for (const auto& addr : saplingAddrs) {
-            addrBalances[addr] = 0;
-        }
-        auto notes = model->wallet().getShieldedNoteHistory();
-        for (const auto& note : notes) {
-            if (!note.isSpent && addrBalances.count(note.address)) {
-                addrBalances[note.address] += note.value;
-            }
-        }
-        std::string bestAddr = saplingAddrs[0];
-        CAmount bestBal = 0;
-        for (const auto& [addr, bal] : addrBalances) {
-            if (bal > bestBal) {
-                bestBal = bal;
-                bestAddr = addr;
-            }
-        }
-        fromAddress = QString::fromStdString(bestAddr);
-    } else {
-        // No shielded funds: pick our own transparent receive address with the
-        // highest spendable UTXO sum. getAddresses() also returns purpose="send"
-        // entries; blindly picking [0] often hits one whose script matches no
-        // UTXOs, sourcing zero coins and throwing "Insufficient transparent funds".
-        auto coinsByDest = model->wallet().listCoins();
-        CTxDestination bestDest;
-        CAmount bestBal = -1;
-        for (const auto& a : model->wallet().getAddresses()) {
-            if (a.is_mine == wallet::ISMINE_NO || a.purpose != "receive") continue;
-            CAmount bal = 0;
-            auto it = coinsByDest.find(a.dest);
-            if (it != coinsByDest.end()) {
-                for (const auto& [op, wtxout] : it->second) {
-                    if (wtxout.depth_in_main_chain >= 1 && !wtxout.is_spent) bal += wtxout.txout.nValue;
-                }
-            }
-            if (bal > bestBal) { bestBal = bal; bestDest = a.dest; }
-        }
-        if (bestBal < 0 || !IsValidDestination(bestDest)) {
-            QMessageBox::critical(this, tr("Send Shielded"),
-                tr("No spendable transparent receive address available to send from."));
-            fNewRecipientAllowed = true;
-            return;
-        }
-        fromAddress = QString::fromStdString(EncodeDestination(bestDest));
+    CAmount total = 0;
+    for (const auto& note : model->wallet().listSpendableSaplingNotes(/*minconf=*/1)) {
+        if (selected_only && !m_selected_notes.count(note.cmu)) continue;
+        total += note.value;
     }
+    return total;
+}
 
-    QList<QPair<QString, CAmount>> shieldedRecipients;
-    CAmount totalAmount = 0;
-    for (const auto& rcp : recipients) {
-        shieldedRecipients.append(qMakePair(rcp.address, rcp.amount));
-        totalAmount += rcp.amount;
+wallet::SaplingSendSource SendCoinsDialog::shieldedSendSource() const
+{
+    wallet::SaplingSendSource source;
+    source.shielded = payFromShielded();
+    if (source.shielded) {
+        source.notes.assign(m_selected_notes.begin(), m_selected_notes.end());
+    } else {
+        m_coin_control->ListSelected(source.coins);
+        source.change_dest = m_coin_control->destChange;
+    }
+    return source;
+}
+
+QString SendCoinsDialog::shieldedFeeText()
+{
+    static_assert(SAPLING_PER_SPEND_FEE == SAPLING_PER_OUTPUT_FEE, "the fee text uses one rate for inputs and outputs");
+    const BitcoinUnit unit = model->getOptionsModel()->getDisplayUnit();
+
+    // The fee for what is entered so far, if it can be sent
+    QList<SendCoinsRecipient> recipients;
+    for (int i = 0; i < ui->entries->count(); ++i) {
+        SendCoinsEntry* entry = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
+        if (!entry || entry->isHidden()) continue;
+        const SendCoinsRecipient rcp = entry->getValue();
+        sapling::SaplingPaymentAddress addr;
+        const bool valid_address = DecodeSaplingAddress(rcp.address.toStdString(), addr) || IsValidDestinationString(rcp.address.toStdString());
+        if (valid_address && rcp.amount > 0) recipients.append(rcp);
+    }
+    if (!recipients.isEmpty()) {
+        try {
+            const auto plan = model->planSaplingSend(shieldedSendSource(), recipients);
+            return tr("%1 (fixed shielded fee)").arg(BitcoinUnits::formatWithUnit(unit, plan.fee));
+        } catch (const std::exception&) {
+            // Not sendable yet (e.g. insufficient funds): show how the fee is made up
+        }
+    }
+    return tr("%1 + %2 per shielded input and output (fixed shielded fee)")
+        .arg(BitcoinUnits::formatWithUnit(unit, SAPLING_BASE_FEE), BitcoinUnits::formatWithUnit(unit, SAPLING_PER_SPEND_FEE));
+}
+
+bool SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, bool relockOnComplete)
+{
+    wallet::SaplingSendSource source = shieldedSendSource();
+
+    wallet::SaplingSendPlan plan;
+    try {
+        plan = model->planSaplingSend(source, recipients);
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, tr("Shielded Send"), QString::fromStdString(e.what()));
+        fNewRecipientAllowed = true;
+        return false;
     }
 
     // Confirm with user
-    BitcoinUnit unit = model->getOptionsModel()->getDisplayUnit();
-    QString amountStr = BitcoinUnits::formatWithUnit(unit, totalAmount);
-    QString msg = tr("Send %1 via shielded transaction?\n\n"
-                     "From: %2\n\n"
-                     "Proof generation may take a moment.")
-                     .arg(amountStr, fromAddress);
+    const BitcoinUnit unit = model->getOptionsModel()->getDisplayUnit();
+    auto fmt = [unit](CAmount amount) { return BitcoinUnits::formatWithUnit(unit, amount); };
 
-    QMessageBox::StandardButton reply = QMessageBox::question(
-        this, tr("Confirm Shielded Send"), msg,
-        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    CAmount totalAmount = 0;
+    for (const CAmount amount : plan.amounts) totalAmount += amount;
 
-    if (reply != QMessageBox::Yes) {
-        fNewRecipientAllowed = true;
-        return;
+    QStringList lines;
+    lines << tr("Send %1 via shielded transaction?").arg(fmt(totalAmount)) << QString();
+
+    const int n_inputs = static_cast<int>(source.shielded ? plan.notes.size() : plan.coins.size());
+    lines << (source.shielded ? tr("From: Shielded funds, %n note(s)", "", n_inputs)
+                              : tr("From: Transparent funds, %n input(s)", "", n_inputs));
+    constexpr size_t MAX_LISTED_SOURCES = 10;
+    for (size_t i = 0; i < plan.sources.size() && i < MAX_LISTED_SOURCES; ++i) {
+        const auto& group = plan.sources[i];
+        QString line = tr("%1 from %2").arg(fmt(group.value), QString::fromStdString(group.address));
+        if (group.is_change) line += " " + tr("(change)");
+        lines << "    " + line;
     }
+    if (plan.sources.size() > MAX_LISTED_SOURCES) {
+        lines << "    " + tr("…and %n more address(es)", "", static_cast<int>(plan.sources.size() - MAX_LISTED_SOURCES));
+    }
+
+    lines << QString() << tr("To:");
+    for (int i = 0; i < recipients.size(); ++i) {
+        const auto& rcp = recipients[i];
+        lines << "    " + tr("%1 to %2").arg(fmt(plan.amounts[i]), rcp.address);
+        if (!rcp.memo.isEmpty()) {
+            lines << "    " + tr("Memo: %1").arg(rcp.memo);
+        }
+    }
+
+    lines << QString() << tr("Fee: %1").arg(fmt(plan.fee));
+    if (plan.change > 0) {
+        if (source.shielded) {
+            lines << tr("Change: %1, back to your shielded funds").arg(fmt(plan.change));
+        } else if (IsValidDestination(source.change_dest)) {
+            lines << tr("Change: %1, to %2").arg(fmt(plan.change), QString::fromStdString(EncodeDestination(source.change_dest)));
+        } else {
+            lines << tr("Change: %1, to a new change address").arg(fmt(plan.change));
+        }
+    }
+    lines << QString() << tr("Proof generation may take a moment.");
+
+    // Same confirmation as transparent sends (Yes is enabled after a short
+    // delay), as plain text: the memo is user input and must not be rendered
+    // as rich text
+    auto confirmationDialog = new SendConfirmationDialog(tr("Confirm Shielded Send"), lines.join("\n"), /*informative_text=*/"", /*detailed_text=*/"",
+                                                         SEND_CONFIRM_DELAY, /*enable_send=*/true, /*always_show_unsigned=*/false, this);
+    confirmationDialog->setAttribute(Qt::WA_DeleteOnClose);
+    confirmationDialog->setTextFormat(Qt::PlainText);
+    if (confirmationDialog->exec() != QMessageBox::Yes) {
+        fNewRecipientAllowed = true;
+        return false;
+    }
+
+    // Send exactly the inputs that were confirmed
+    source.coins = plan.coins;
+    source.notes = plan.notes;
 
     // Show progress dialog
     auto* progress = new QProgressDialog(
@@ -579,7 +647,7 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
     progress->show();
 
     auto* thread = new QThread;
-    auto* worker = new ShieldedSendWorker(model, fromAddress, shieldedRecipients);
+    auto* worker = new ShieldedSendWorker(model, source, recipients);
     worker->moveToThread(thread);
 
     // Track the thread so the destructor can wait for it if the dialog
@@ -622,6 +690,7 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
     connect(thread, &QThread::finished, thread, &QObject::deleteLater);
 
     thread->start();
+    return true;
 }
 
 void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
@@ -646,8 +715,8 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
     if (!valid || allRecipients.isEmpty())
         return;
 
-    // Route to shielded send if any recipient is a z-address
-    if (hasShieldedRecipient(allRecipients)) {
+    // Shielded funds or a shielded recipient need a Sapling transaction
+    if (isShieldedSend()) {
         fNewRecipientAllowed = false;
         WalletModel::EncryptionStatus encStatus = model->getEncryptionStatus();
         if (encStatus == model->Locked) {
@@ -662,7 +731,9 @@ void SendCoinsDialog::sendButtonClicked([[maybe_unused]] bool checked)
                 return;
             }
             try {
-                sendShielded(allRecipients, /*relockOnComplete=*/true);
+                if (!sendShielded(allRecipients, /*relockOnComplete=*/true)) {
+                    model->setWalletLocked(true); // Nothing was sent
+                }
             } catch (...) {
                 model->setWalletLocked(true); // Re-lock on exception
                 fNewRecipientAllowed = true;
@@ -803,6 +874,7 @@ void SendCoinsDialog::clear()
 
     // Clear coin control settings
     m_coin_control->UnSelectAll();
+    m_selected_notes.clear();
     if (!fKeepChangeAddress) {
         ui->checkBoxCoinControlChange->setChecked(false);
         ui->lineEditCoinControlChange->clear();
@@ -838,6 +910,7 @@ SendCoinsEntry *SendCoinsDialog::addEntry()
     connect(entry, &SendCoinsEntry::useAvailableBalance, this, &SendCoinsDialog::useAvailableBalance);
     connect(entry, &SendCoinsEntry::payAmountChanged, this, &SendCoinsDialog::coinControlUpdateLabels);
     connect(entry, &SendCoinsEntry::subtractFeeFromAmountChanged, this, &SendCoinsDialog::coinControlUpdateLabels);
+    connect(entry, &SendCoinsEntry::payToChanged, this, &SendCoinsDialog::updateShieldedState);
 
     // Focus the field, so that entry can start immediately
     entry->clear();
@@ -959,7 +1032,11 @@ void SendCoinsDialog::setBalance(const interfaces::WalletBalances& balances)
             balance = balances.balance;
         }
 
-        ui->labelBalance->setText(BitcoinUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), balance));
+        const BitcoinUnit unit = model->getOptionsModel()->getDisplayUnit();
+        const CAmount shielded = shieldedAvailableBalance(/*selected_only=*/false);
+        ui->radioPayFromTransparent->setText(tr("Tra&nsparent (%1)").arg(BitcoinUnits::formatWithUnit(unit, balance)));
+        ui->radioPayFromShielded->setText(tr("S&hielded (%1)").arg(BitcoinUnits::formatWithUnit(unit, shielded)));
+        ui->labelBalance->setText(BitcoinUnits::formatWithUnit(unit, payFromShielded() ? shielded : balance));
     }
 }
 
@@ -1037,7 +1114,8 @@ void SendCoinsDialog::useAvailableBalance(SendCoinsEntry* entry)
     m_coin_control->fAllowWatchOnly = model->wallet().privateKeysDisabled() && !model->wallet().hasExternalSigner();
 
     // Calculate available amount to send.
-    CAmount amount = model->wallet().getAvailableBalance(*m_coin_control);
+    CAmount amount = payFromShielded() ? shieldedAvailableBalance(/*selected_only=*/!m_selected_notes.empty())
+                                       : model->wallet().getAvailableBalance(*m_coin_control);
     for (int i = 0; i < ui->entries->count(); ++i) {
         SendCoinsEntry* e = qobject_cast<SendCoinsEntry*>(ui->entries->itemAt(i)->widget());
         if (e && !e->isHidden() && e != entry) {
@@ -1069,6 +1147,15 @@ void SendCoinsDialog::updateFeeMinimizedLabel()
 {
     if(!model || !model->getOptionsModel())
         return;
+
+    if (m_shielded_fee_mode) {
+        ui->labelFeeMinimized->setText(shieldedFeeText());
+        ui->labelFeeMinimized->setToolTip(tr("Shielded transactions pay a fixed fee of %1, plus %2 for each shielded input (note spent) and each shielded output (at least two). The fee selection does not apply to them.")
+            .arg(BitcoinUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), SAPLING_BASE_FEE),
+                 BitcoinUnits::formatWithUnit(model->getOptionsModel()->getDisplayUnit(), SAPLING_PER_SPEND_FEE)));
+        return;
+    }
+    ui->labelFeeMinimized->setToolTip(QString());
 
     if (ui->radioSmartFee->isChecked())
         ui->labelFeeMinimized->setText(ui->labelSmartFee->text());
@@ -1112,7 +1199,7 @@ void SendCoinsDialog::updateSmartFeeLabel()
     if (reason == FeeReason::FALLBACK) {
         ui->labelSmartFee2->show(); // (Smart fee not initialized yet. This usually takes a few blocks...)
         ui->labelFeeEstimation->setText("");
-        ui->fallbackFeeWarningLabel->setVisible(true);
+        ui->fallbackFeeWarningLabel->setVisible(!m_shielded_fee_mode);
     }
     else
     {
@@ -1167,6 +1254,7 @@ void SendCoinsDialog::coinControlFeatureChanged(bool checked)
 
     if (!checked && model) { // coin control features disabled
         m_coin_control = std::make_unique<CCoinControl>(m_coin_control->nCoinType);
+        m_selected_notes.clear();
     }
 
     coinControlUpdateLabels();
@@ -1175,7 +1263,7 @@ void SendCoinsDialog::coinControlFeatureChanged(bool checked)
 // Coin Control: button inputs -> show actual coin control dialog
 void SendCoinsDialog::coinControlButtonClicked()
 {
-    auto dlg = new CoinControlDialog(*m_coin_control, model);
+    auto dlg = new CoinControlDialog(*m_coin_control, model, payFromShielded() ? &m_selected_notes : nullptr);
     connect(dlg, &QDialog::finished, this, &SendCoinsDialog::coinControlUpdateLabels);
     GUIUtil::ShowModalDialogAsynchronously(dlg);
 }
@@ -1260,6 +1348,8 @@ void SendCoinsDialog::coinControlUpdateLabels()
     // set pay amounts
     CoinControlDialog::payAmounts.clear();
     CoinControlDialog::fSubtractFeeFromAmount = false;
+    CoinControlDialog::fShieldedTx = isShieldedSend();
+    CoinControlDialog::nShieldedOutputs = 0;
 
     for(int i = 0; i < ui->entries->count(); ++i)
     {
@@ -1270,13 +1360,24 @@ void SendCoinsDialog::coinControlUpdateLabels()
             CoinControlDialog::payAmounts.append(rcp.amount);
             if (rcp.fSubtractFeeFromAmount)
                 CoinControlDialog::fSubtractFeeFromAmount = true;
+            sapling::SaplingPaymentAddress addr;
+            if (DecodeSaplingAddress(rcp.address.toStdString(), addr))
+                CoinControlDialog::nShieldedOutputs++;
         }
     }
 
-    if (m_coin_control->HasSelected())
+    if (m_shielded_fee_mode) {
+        m_shielded_fee_timer.start();
+    }
+
+    if (payFromShielded() ? !m_selected_notes.empty() : m_coin_control->HasSelected())
     {
         // actual coin control calculation
-        CoinControlDialog::updateLabels(*m_coin_control, model, this);
+        if (payFromShielded()) {
+            CoinControlDialog::updateNoteLabels(m_selected_notes, model, this);
+        } else {
+            CoinControlDialog::updateLabels(*m_coin_control, model, this);
+        }
 
         // show coin control stats
         ui->labelCoinControlAutomaticallySelected->hide();
@@ -1295,6 +1396,45 @@ void SendCoinsDialog::coinControlUpdateLabels()
 void SendCoinsDialog::keepChangeAddressChanged(bool checked)
 {
     fKeepChangeAddress = checked;
+}
+
+void SendCoinsDialog::payFromChanged()
+{
+    if (!model) return;
+    setBalance(model->wallet().getBalances());
+    updateShieldedState();
+}
+
+void SendCoinsDialog::updateShieldedState()
+{
+    // Shielded transactions pay the fixed Sapling fee: show it in place of
+    // the fee selection, which does not apply to them
+    const bool shielded_send = isShieldedSend();
+    if (shielded_send != m_shielded_fee_mode) {
+        m_shielded_fee_mode = shielded_send;
+        if (shielded_send) {
+            ui->labelFeeMinimized->setVisible(true);
+            ui->buttonChooseFee->setVisible(false);
+            ui->buttonMinimizeFee->setVisible(false);
+            ui->frameFeeSelection->setVisible(false);
+            ui->fallbackFeeWarningLabel->setVisible(false);
+            updateFeeMinimizedLabel();
+        } else {
+            m_shielded_fee_timer.stop();
+            minimizeFeeSection(fFeeMinimized);
+            updateSmartFeeLabel();
+        }
+    }
+
+    // Change from shielded notes always goes to an internal shielded address
+    const bool shielded_source = payFromShielded();
+    ui->checkBoxCoinControlChange->setEnabled(!shielded_source);
+    ui->checkBoxCoinControlChange->setToolTip(shielded_source
+        ? tr("Shielded change always goes to an internal shielded address of this wallet, so it cannot be linked to your published addresses.")
+        : m_change_address_tooltip);
+    ui->lineEditCoinControlChange->setEnabled(!shielded_source && (ui->checkBoxCoinControlChange->isChecked() || fKeepChangeAddress));
+
+    coinControlUpdateLabels();
 }
 
 SendConfirmationDialog::SendConfirmationDialog(const QString& title, const QString& text, const QString& informative_text, const QString& detailed_text, int _secDelay, bool enable_send, bool always_show_unsigned, QWidget* parent)

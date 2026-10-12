@@ -431,6 +431,7 @@ QString TransactionTableModel::formatTxType(const TransactionRecord *wtx) const
         return tr("Received from");
     case TransactionRecord::SendToAddress:
     case TransactionRecord::SendToOther:
+    case TransactionRecord::SendToShielded:
         return tr("Sent to");
     case TransactionRecord::SendToSelf:
         return tr("Payment to yourself");
@@ -479,11 +480,36 @@ QString TransactionTableModel::formatTxToAddress(const TransactionRecord *wtx, b
         return QString::fromStdString(wtx->strAddress) + watchAddress;
     case TransactionRecord::SendToSelf:
         return formatAddressLabel(wtx->strAddress, wtx->label, tooltip) + watchAddress;
+    case TransactionRecord::SendToShielded:
+        return formatShieldedRecipient(wtx, tooltip) + watchAddress;
     case TransactionRecord::DataTransaction:
     case TransactionRecord::Other:
         break; // use fail-over here
     } // no default case, so the compiler can warn about missing cases
     return tr("(n/a)") + watchAddress;
+}
+
+QString TransactionTableModel::formatShieldedRecipient(const TransactionRecord *wtx, bool tooltip) const
+{
+    // The sender cannot decrypt shielded outputs to other wallets. Name the
+    // recipient only when all of them went to shielded addresses of this
+    // wallet, whose notes are known (possibly only shortly after sending).
+    if (wtx->ownShieldedAddress.empty()) {
+        CAmount own_value = 0;
+        std::string first_address;
+        for (const auto& note : walletModel->wallet().getShieldedNotesForTx(wtx->hash)) {
+            own_value += note.value;
+            if (first_address.empty()) first_address = note.address;
+        }
+        if (!first_address.empty() && own_value == wtx->shieldedValue) {
+            wtx->ownShieldedAddress = first_address;
+        }
+    }
+    if (wtx->ownShieldedAddress.empty()) {
+        return tr("(shielded address)");
+    }
+    const QString address = QString::fromStdString(wtx->ownShieldedAddress);
+    return tooltip ? tr("%1 (your shielded address)").arg(address) : address;
 }
 
 QVariant TransactionTableModel::addressColor(const TransactionRecord *wtx) const
@@ -502,6 +528,7 @@ QVariant TransactionTableModel::addressColor(const TransactionRecord *wtx) const
         }
         } break;
     case TransactionRecord::SendToSelf:
+    case TransactionRecord::SendToShielded:
     case TransactionRecord::DataTransaction:
         return GUIUtil::getThemedQColor(GUIUtil::ThemedColor::BAREADDRESS);
     case TransactionRecord::SendToOther:
@@ -535,6 +562,7 @@ QVariant TransactionTableModel::amountColor(const TransactionRecord *rec) const
         return GUIUtil::getThemedQColor(GUIUtil::ThemedColor::GREEN);
     case TransactionRecord::SendToAddress:
     case TransactionRecord::SendToOther:
+    case TransactionRecord::SendToShielded:
     case TransactionRecord::DataTransaction:
     case TransactionRecord::Other:
         return GUIUtil::getThemedQColor(GUIUtil::ThemedColor::RED);
@@ -590,7 +618,8 @@ QString TransactionTableModel::formatTooltip(const TransactionRecord *rec) const
 {
     QString tooltip = formatTxStatus(rec) + QString("\n") + formatTxType(rec);
     if(rec->type==TransactionRecord::RecvFromOther || rec->type==TransactionRecord::SendToOther ||
-       rec->type==TransactionRecord::SendToAddress || rec->type==TransactionRecord::RecvWithAddress)
+       rec->type==TransactionRecord::SendToAddress || rec->type==TransactionRecord::RecvWithAddress ||
+       rec->type==TransactionRecord::SendToShielded)
     {
         tooltip += QString(" ") + formatTxToAddress(rec, true);
     }

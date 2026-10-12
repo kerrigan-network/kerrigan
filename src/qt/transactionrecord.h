@@ -83,6 +83,7 @@ public:
         PlatformTransfer,
         DustReceive,
         DataTransaction,
+        SendToShielded,
     };
 
     /** Number of confirmation recommended for accepting a transaction */
@@ -132,7 +133,13 @@ public:
 
     CAmount debit;
     CAmount credit;
+    /** SendToShielded: total value sent into shielded outputs */
+    CAmount shieldedValue{0};
     /**@}*/
+
+    /** SendToShielded: the recipient once known to be a shielded address of
+     *  this wallet (looked up lazily, the note may be detected later) */
+    mutable std::string ownShieldedAddress;
 
     /** Subtransaction index, for sort key */
     int idx;
