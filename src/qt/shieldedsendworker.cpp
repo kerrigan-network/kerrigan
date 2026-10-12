@@ -8,7 +8,7 @@
 
 ShieldedSendWorker::ShieldedSendWorker(WalletModel* model,
                                        const QString& from,
-                                       const QList<QPair<QString, CAmount>>& recipients,
+                                       const QList<SendCoinsRecipient>& recipients,
                                        int minconf,
                                        QObject* parent)
     : QObject(parent)

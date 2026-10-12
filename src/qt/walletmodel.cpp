@@ -457,13 +457,18 @@ QString WalletModel::getNewSaplingAddress()
 }
 
 QString WalletModel::saplingZSendMany(const QString& from,
-                                       const QList<QPair<QString, CAmount>>& recipients,
+                                       const QList<SendCoinsRecipient>& recipients,
                                        int minconf)
 {
-    std::vector<std::pair<std::string, CAmount>> rcpts;
+    std::vector<interfaces::Wallet::SaplingRecipient> rcpts;
     rcpts.reserve(recipients.size());
     for (const auto& r : recipients) {
-        rcpts.emplace_back(r.first.toStdString(), r.second);
+        interfaces::Wallet::SaplingRecipient rcpt;
+        rcpt.address = r.address.toStdString();
+        rcpt.amount = r.amount;
+        const QByteArray memo = r.memo.toUtf8();
+        rcpt.memo.assign(memo.begin(), memo.end());
+        rcpts.push_back(std::move(rcpt));
     }
     return QString::fromStdString(
         m_wallet->saplingZSendMany(from.toStdString(), rcpts, minconf));

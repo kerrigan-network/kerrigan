@@ -8,11 +8,14 @@
 #include <chain.h>
 #include <interfaces/wallet.h>
 #include <interfaces/node.h>
+#include <primitives/transaction.h>
 
 #include <wallet/ismine.h>
 
+#include <algorithm>
 #include <cstdint>
 
+using wallet::ISMINE_NO;
 using wallet::ISMINE_SPENDABLE;
 using wallet::ISMINE_WATCH_ONLY;
 using wallet::isminetype;
@@ -39,6 +42,16 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(interfaces::Nod
     CAmount nNet = nCredit - nDebit;
     uint256 hash = wtx.tx->GetHash();
     std::map<std::string, std::string> mapValue = wtx.value_map;
+
+    // A Sapling transaction that touches the wallet only through shielded notes
+    // has no transparent credit or debit to show here and would otherwise be
+    // listed as a zero-amount "Payment to yourself" or "Other" row. Such
+    // transactions are listed on the Shielded transactions page instead.
+    if (wtx.tx->nType == TRANSACTION_SAPLING &&
+        std::none_of(wtx.txin_is_mine.begin(), wtx.txin_is_mine.end(), [](isminetype mine) { return mine != ISMINE_NO; }) &&
+        std::none_of(wtx.txout_is_mine.begin(), wtx.txout_is_mine.end(), [](isminetype mine) { return mine != ISMINE_NO; })) {
+        return parts;
+    }
 
     // Check if any inputs belong to this wallet (for dust detection)
     bool isFromMe = false;

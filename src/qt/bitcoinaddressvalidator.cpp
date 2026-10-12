@@ -6,7 +6,9 @@
 #include <qt/bitcoinaddressvalidator.h>
 #include <qt/guiutil.h>
 
+#include <chainparams.h>
 #include <key_io.h>
+#include <sapling/sapling_address.h>
 
 /* Base58 characters are:
      "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -15,7 +17,15 @@
   - All numbers except for '0'
   - All upper-case letters except for 'I' and 'O'
   - All lower-case letters except for 'l'
+
+  Sapling addresses are Bech32m: "<hrp>1" followed by characters from
+     "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+  in either all lower case or all upper case.
 */
+
+namespace {
+const QString BECH32_CHARSET = QStringLiteral("qpzry9x8gf2tvdw0s3jn54khce6mua7l");
+} // namespace
 
 BitcoinAddressEntryValidator::BitcoinAddressEntryValidator(QObject *parent, bool fAllowURI) :
     QValidator(parent), fAllowURI(fAllowURI)
@@ -64,6 +74,26 @@ QValidator::State BitcoinAddressEntryValidator::validate(QString &input, int &po
             ++idx;
     }
 
+    // Sapling address (Bech32m), or a prefix of its human-readable part
+    const QString sapling_prefix = QString::fromStdString(Params().SaplingHRP()) + QLatin1Char('1');
+    const QString lower = input.toLower();
+    if (sapling_prefix.startsWith(lower)) {
+        return QValidator::Acceptable;
+    }
+    if (lower.startsWith(sapling_prefix) && (input == lower || input == input.toUpper())) {
+        bool bech32 = true;
+        for (int idx = sapling_prefix.size(); idx < lower.size(); ++idx) {
+            if (!BECH32_CHARSET.contains(lower.at(idx))) {
+                bech32 = false;
+                break;
+            }
+        }
+        if (bech32) {
+            return QValidator::Acceptable;
+        }
+        // Otherwise fall through: it may still be a Base58 address
+    }
+
     // Validation
     QValidator::State state = QValidator::Acceptable;
     for (int idx = 0; idx < input.size(); ++idx)
@@ -86,8 +116,8 @@ QValidator::State BitcoinAddressEntryValidator::validate(QString &input, int &po
     return state;
 }
 
-BitcoinAddressCheckValidator::BitcoinAddressCheckValidator(QObject *parent) :
-    QValidator(parent)
+BitcoinAddressCheckValidator::BitcoinAddressCheckValidator(QObject *parent, bool fAllowSapling) :
+    QValidator(parent), fAllowSapling(fAllowSapling)
 {
 }
 
@@ -96,6 +126,10 @@ QValidator::State BitcoinAddressCheckValidator::validate(QString &input, int &po
     Q_UNUSED(pos);
     // Validate the passed Kerrigan address
     if (IsValidDestinationString(input.toStdString())) {
+        return QValidator::Acceptable;
+    }
+    sapling::SaplingPaymentAddress sapling_addr;
+    if (fAllowSapling && DecodeSaplingAddress(input.toStdString(), sapling_addr)) {
         return QValidator::Acceptable;
     }
 

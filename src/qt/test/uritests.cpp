@@ -7,6 +7,9 @@
 #include <qt/guiutil.h>
 #include <qt/walletmodel.h>
 
+#include <key_io.h>
+#include <sapling/sapling_address.h>
+
 #include <QUrl>
 
 void URITests::uriTests()
@@ -106,4 +109,56 @@ void URITests::uriTests()
 
     uri.setUrl(QString("kerrigan:XwnLY9Tf7Zsef8gMGL2fhWA9ZmMjt4KPwg"));
     QVERIFY(GUIUtil::parseBitcoinURI(uri, &rv));
+
+    // Sapling memo (ZIP 321): base64url without padding, shielded recipients only
+    sapling::SaplingPaymentAddress zaddr;
+    zaddr.d.fill(0x01);
+    zaddr.pk_d.fill(0x02);
+    const QString zaddrStr = QString::fromStdString(EncodeSaplingAddress(zaddr));
+
+    uri.setUrl(QString("kerrigan:%1?amount=0.1&memo=MTI").arg(zaddrStr));
+    QVERIFY(GUIUtil::parseBitcoinURI(uri, &rv));
+    QVERIFY(rv.address == zaddrStr);
+    QVERIFY(rv.amount == 10000000);
+    QVERIFY(rv.memo == QString("12"));
+
+    // req-memo is understood
+    uri.setUrl(QString("kerrigan:%1?req-memo=MTI").arg(zaddrStr));
+    QVERIFY(GUIUtil::parseBitcoinURI(uri, &rv));
+    QVERIFY(rv.memo == QString("12"));
+
+    // A memo is not allowed for a transparent address
+    uri.setUrl(QString("kerrigan:XwnLY9Tf7Zsef8gMGL2fhWA9ZmMjt4KPwg?memo=MTI"));
+    QVERIFY(!GUIUtil::parseBitcoinURI(uri, &rv));
+
+    // Invalid base64url
+    uri.setUrl(QString("kerrigan:%1?memo=M!I").arg(zaddrStr));
+    QVERIFY(!GUIUtil::parseBitcoinURI(uri, &rv));
+
+    // More than 512 bytes
+    const QString tooLong = QString::fromLatin1(QByteArray(513, 'a').toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    uri.setUrl(QString("kerrigan:%1?memo=%2").arg(zaddrStr, tooLong));
+    QVERIFY(!GUIUtil::parseBitcoinURI(uri, &rv));
+
+    // Not UTF-8 text
+    uri.setUrl(QString("kerrigan:%1?memo=_w").arg(zaddrStr)); // 0xFF
+    QVERIFY(!GUIUtil::parseBitcoinURI(uri, &rv));
+
+    // A NUL inside the text; trailing zero padding is fine
+    uri.setUrl(QString("kerrigan:%1?memo=YQBi").arg(zaddrStr)); // "a\0b"
+    QVERIFY(!GUIUtil::parseBitcoinURI(uri, &rv));
+    uri.setUrl(QString("kerrigan:%1?memo=YWIAAA").arg(zaddrStr)); // "ab\0\0"
+    QVERIFY(GUIUtil::parseBitcoinURI(uri, &rv));
+    QVERIFY(rv.memo == QString("ab"));
+
+    // formatBitcoinURI round trip
+    SendCoinsRecipient zrcp;
+    zrcp.address = zaddrStr;
+    zrcp.amount = 10000000;
+    zrcp.memo = QString::fromUtf8("Order #42 \xe2\x80\x93 thanks");
+    SendCoinsRecipient parsed;
+    QVERIFY(GUIUtil::parseBitcoinURI(GUIUtil::formatBitcoinURI(zrcp), &parsed));
+    QVERIFY(parsed.address == zrcp.address);
+    QVERIFY(parsed.amount == zrcp.amount);
+    QVERIFY(parsed.memo == zrcp.memo);
 }

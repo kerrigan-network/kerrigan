@@ -8,7 +8,8 @@
 #include <QValidator>
 
 /** Base58 entry widget validator, checks for valid characters and
- * removes some whitespace.
+ * removes some whitespace. Input that starts with the Sapling address prefix
+ * is checked against the Bech32 character set instead.
  */
 class BitcoinAddressEntryValidator : public QValidator
 {
@@ -23,16 +24,20 @@ private:
     bool fAllowURI;
 };
 
-/** Bitcoin address widget validator, checks for a valid bitcoin address.
+/** Bitcoin address widget validator, checks for a valid bitcoin address,
+ * or a Sapling payment address if fAllowSapling is set.
  */
 class BitcoinAddressCheckValidator : public QValidator
 {
     Q_OBJECT
 
 public:
-    explicit BitcoinAddressCheckValidator(QObject *parent);
+    explicit BitcoinAddressCheckValidator(QObject *parent, bool fAllowSapling = false);
 
     State validate(QString &input, int &pos) const override;
+
+private:
+    bool fAllowSapling;
 };
 
 #endif // BITCOIN_QT_BITCOINADDRESSVALIDATOR_H

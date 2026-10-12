@@ -546,24 +546,31 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
         fromAddress = QString::fromStdString(EncodeDestination(bestDest));
     }
 
-    QList<QPair<QString, CAmount>> shieldedRecipients;
-    CAmount totalAmount = 0;
-    for (const auto& rcp : recipients) {
-        shieldedRecipients.append(qMakePair(rcp.address, rcp.amount));
-        totalAmount += rcp.amount;
-    }
-
     // Confirm with user
     BitcoinUnit unit = model->getOptionsModel()->getDisplayUnit();
+    CAmount totalAmount = 0;
+    QStringList toLines;
+    for (const auto& rcp : recipients) {
+        totalAmount += rcp.amount;
+        toLines << tr("%1 to %2").arg(BitcoinUnits::formatWithUnit(unit, rcp.amount), rcp.address);
+        if (!rcp.memo.isEmpty()) {
+            toLines << tr("Memo: %1").arg(rcp.memo);
+        }
+    }
+
     QString amountStr = BitcoinUnits::formatWithUnit(unit, totalAmount);
     QString msg = tr("Send %1 via shielded transaction?\n\n"
                      "From: %2\n\n"
+                     "To:\n%3\n\n"
                      "Proof generation may take a moment.")
-                     .arg(amountStr, fromAddress);
+                     .arg(amountStr, fromAddress, toLines.join("\n"));
 
-    QMessageBox::StandardButton reply = QMessageBox::question(
-        this, tr("Confirm Shielded Send"), msg,
-        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    // Plain text: the memo is user input and must not be rendered as rich text
+    QMessageBox confirmBox(QMessageBox::Question, tr("Confirm Shielded Send"), msg,
+                           QMessageBox::Yes | QMessageBox::Cancel, this);
+    confirmBox.setTextFormat(Qt::PlainText);
+    confirmBox.setDefaultButton(QMessageBox::Cancel);
+    const int reply = confirmBox.exec();
 
     if (reply != QMessageBox::Yes) {
         fNewRecipientAllowed = true;
@@ -579,7 +586,7 @@ void SendCoinsDialog::sendShielded(const QList<SendCoinsRecipient>& recipients, 
     progress->show();
 
     auto* thread = new QThread;
-    auto* worker = new ShieldedSendWorker(model, fromAddress, shieldedRecipients);
+    auto* worker = new ShieldedSendWorker(model, fromAddress, recipients);
     worker->moveToThread(thread);
 
     // Track the thread so the destructor can wait for it if the dialog

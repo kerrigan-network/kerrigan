@@ -128,8 +128,8 @@ namespace GUIUtil
     QString dateTimeStr(const QDateTime &datetime);
     QString dateTimeStr(qint64 nTime);
 
-    // Set up widget for address
-    void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent, bool fAllowURI = false);
+    // Set up widget for address; fAllowSapling also accepts Sapling payment addresses
+    void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent, bool fAllowURI = false, bool fAllowSapling = false);
 
     // Setup appearance settings if not done yet
     void setupAppearance(QWidget* parent, OptionsModel* model);

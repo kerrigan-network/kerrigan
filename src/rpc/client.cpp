@@ -277,6 +277,18 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "protx update_service_evo", 2, "coreP2PAddrs", true },
     { "protx update_service_evo", 5, "platformP2PAddrs", true },
     { "protx update_service_evo", 6, "platformHTTPSAddrs", true },
+    { "getblocksubsidy", 0, "height" },
+    { "getdronelist", 0, "height" },
+    { "z_getbalance", 1, "minconf" },
+    { "z_listunspent", 0, "minconf" },
+    { "z_listunspent", 1, "maxconf" },
+    { "z_listunspent", 2, "addresses" },
+    { "z_sendmany", 1, "amounts" },
+    { "z_sendmany", 2, "minconf" },
+    { "z_sendmany", 3, "fee" },
+    { "z_importkey", 2, "startHeight" },
+    { "z_importviewingkey", 2, "startHeight" },
+    { "z_rebuildsaplingwitnesses", 0, "from_height" },
 };
 // clang-format on
 

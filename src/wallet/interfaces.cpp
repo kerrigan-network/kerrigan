@@ -603,7 +603,7 @@ public:
         return result;
     }
     std::string saplingZSendMany(const std::string& from_address,
-        const std::vector<std::pair<std::string, CAmount>>& recipients,
+        const std::vector<SaplingRecipient>& recipients,
         int minconf,
         std::optional<CAmount> fee) override
     {
@@ -646,14 +646,16 @@ public:
             sapling::SaplingPaymentAddress saplingAddr;
             CTxDestination transparentDest;
             CAmount amount;
+            std::vector<uint8_t> memo;
         };
         std::vector<Recipient> parsedRecipients;
         CAmount totalSend = 0;
         size_t nShieldedOutputs = 0;
 
-        for (const auto& [addrStr, amount] : recipients) {
+        for (const auto& recipient : recipients) {
+            const std::string& addrStr = recipient.address;
             Recipient r;
-            r.amount = amount;
+            r.amount = recipient.amount;
             // Validate per-recipient amount (matches RPC path)
             if (r.amount <= 0 || !MoneyRange(r.amount)) {
                 throw std::runtime_error("Invalid recipient amount");
@@ -666,6 +668,16 @@ public:
                 }
             } else {
                 nShieldedOutputs++;
+            }
+            // Memo rules match the RPC path
+            if (!recipient.memo.empty()) {
+                if (!r.isShielded) {
+                    throw std::runtime_error("Memo can only be sent to shielded addresses");
+                }
+                if (recipient.memo.size() > 512) {
+                    throw std::runtime_error("Memo too long (max 512 bytes)");
+                }
+                r.memo = recipient.memo;
             }
             // Overflow guard (matches RPC path)
             if (r.amount > MAX_MONEY - totalSend) {
@@ -954,7 +966,7 @@ public:
                 std::array<uint8_t, 43> toAddr;
                 std::copy(r.saplingAddr.d.begin(), r.saplingAddr.d.end(), toAddr.begin());
                 std::copy(r.saplingAddr.pk_d.begin(), r.saplingAddr.pk_d.end(), toAddr.begin() + 11);
-                if (!builder.AddSaplingOutputNoOvk(toAddr, r.amount)) {
+                if (!builder.AddSaplingOutputNoOvk(toAddr, r.amount, r.memo)) {
                     if (!selectedNullifiers.empty()) km.UnreserveNotesByNullifier(selectedNullifiers);
                     for (const auto& op : lockedCoins) m_wallet->UnlockCoin(op);
                     throw std::runtime_error("Failed to add shielded output");

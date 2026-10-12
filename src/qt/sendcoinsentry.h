@@ -77,6 +77,8 @@ private:
     /** Set required icons for buttons inside the dialog */
     void setButtonIcons();
     bool updateLabel(const QString &address);
+    /** Show the memo field only for shielded (Sapling) recipients */
+    void updateMemoVisibility(const QString &address);
 };
 
 #endif // BITCOIN_QT_SENDCOINSENTRY_H

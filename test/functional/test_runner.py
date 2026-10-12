@@ -104,6 +104,7 @@ BASE_SCRIPTS = [
     'feature_sapling_fees.py',
     'feature_sapling_relay.py',
     'feature_sapling_activation.py',
+    'wallet_sapling_viewtransaction.py',
     'feature_recovery_selfheal.py',
     'feature_multi_algo_mining.py',
     'feature_llmq_data_recovery.py',

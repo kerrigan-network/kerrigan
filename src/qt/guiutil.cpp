@@ -17,6 +17,7 @@
 #include <fs.h>
 #include <interfaces/node.h>
 #include <key_io.h>
+#include <sapling/sapling_address.h>
 #include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <protocol.h>
@@ -281,7 +282,7 @@ static std::string DummyAddress(const CChainParams &params)
     return "";
 }
 
-void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent, bool fAllowURI)
+void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent, bool fAllowURI, bool fAllowSapling)
 {
     parent->setFocusProxy(widget);
 
@@ -290,7 +291,7 @@ void setupAddressWidget(QValidatedLineEdit *widget, QWidget *parent, bool fAllow
     widget->setPlaceholderText(QObject::tr("Enter a Kerrigan address (e.g. %1)").arg(
         QString::fromStdString(DummyAddress(Params()))));
     widget->setValidator(new BitcoinAddressEntryValidator(parent, fAllowURI));
-    widget->setCheckValidator(new BitcoinAddressCheckValidator(parent));
+    widget->setCheckValidator(new BitcoinAddressCheckValidator(parent, fAllowSapling));
 }
 
 void setupAppearance(QWidget* parent, OptionsModel* model)
@@ -391,6 +392,39 @@ bool parseBitcoinURI(const QUrl &uri, SendCoinsRecipient *out)
             }
             fShouldReturnFalse = false;
         }
+        else if (i->first == "memo")
+        {
+            // ZIP 321: base64url without padding, at most 512 bytes, and only
+            // for shielded recipients. Only text (UTF-8) memos are accepted
+            // because the Send page edits the memo as text.
+            sapling::SaplingPaymentAddress saplingAddr;
+            if (!DecodeSaplingAddress(rv.address.toStdString(), saplingAddr)) {
+                return false;
+            }
+            const auto decoded = QByteArray::fromBase64Encoding(i->second.toLatin1(),
+                QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals | QByteArray::AbortOnBase64DecodingErrors);
+            if (!decoded) {
+                return false;
+            }
+            QByteArray memo = *decoded;
+            if (memo.size() > 512) {
+                return false;
+            }
+            while (!memo.isEmpty() && memo.back() == '\0') {
+                memo.chop(1);
+            }
+            // The Send page edits the memo as a line of text, which cannot
+            // hold a NUL: it would silently change the memo
+            if (memo.contains('\0')) {
+                return false;
+            }
+            const QString text = QString::fromUtf8(memo);
+            if (text.toUtf8() != memo) {
+                return false;
+            }
+            rv.memo = text;
+            fShouldReturnFalse = false;
+        }
 
         if (fShouldReturnFalse)
             return false;
@@ -436,6 +470,13 @@ QString formatBitcoinURI(const SendCoinsRecipient &info)
     {
         QString msg(QUrl::toPercentEncoding(info.message));
         ret += QString("%1message=%2").arg(paramCount == 0 ? "?" : "&").arg(msg);
+        paramCount++;
+    }
+
+    if (!info.memo.isEmpty())
+    {
+        QString memo = QString::fromLatin1(info.memo.toUtf8().toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+        ret += QString("%1memo=%2").arg(paramCount == 0 ? "?" : "&").arg(memo);
         paramCount++;
     }
 
