@@ -10,11 +10,53 @@
 #include <external_signer.h>
 
 #include <algorithm>
+#include <cctype>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-ExternalSigner::ExternalSigner(const std::string& command, const std::string chain, const std::string& fingerprint, const std::string name): m_command(command), m_chain(chain), m_fingerprint(fingerprint), m_name(name) {}
+// Validate no spaces or shell metacharacters in a token that will become
+// a single argv element.  Since RunCommandParseJSON uses subprocess::Popen
+// with space-splitting (or vector-based construction), any component with
+// spaces could inject additional arguments.
+static bool IsSafeToken(const std::string& s)
+{
+    if (s.empty()) return false;
+    for (char c : s) {
+        if (std::isspace(static_cast<unsigned char>(c))) return false;
+        if (c == '\'' || c == '"' || c == '\\' || c == '`' || c == '$' ||
+            c == '|' || c == ';' || c == '&' || c == '(' || c == ')' ||
+            c == '<' || c == '>' || c == '*' || c == '?' || c == '[' ||
+            c == ']' || c == '{' || c == '}') return false;
+    }
+    return true;
+}
+
+// Validate the signer command path: must be non-empty, contain only safe
+// characters, and no spaces (prevents argument injection via the command
+// path).
+static bool IsSafeCommandPath(const std::string& cmd)
+{
+    if (cmd.empty()) return false;
+    for (char c : cmd) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) &&
+            c != '/' && c != '.' && c != '-' && c != '_') {
+            return false;
+        }
+    }
+    return true;
+}
+
+ExternalSigner::ExternalSigner(const std::string& command, const std::string chain, const std::string& fingerprint, const std::string name)
+    : m_command(command), m_chain(chain), m_fingerprint(fingerprint), m_name(name)
+{
+    if (!IsSafeCommandPath(m_command)) {
+        throw std::runtime_error("Invalid signer command path: " + command);
+    }
+    if (!IsHex(m_fingerprint)) {
+        throw std::runtime_error("Invalid signer fingerprint (must be hex): " + fingerprint);
+    }
+}
 
 std::string ExternalSigner::NetworkArg() const
 {
@@ -23,6 +65,10 @@ std::string ExternalSigner::NetworkArg() const
 
 bool ExternalSigner::Enumerate(const std::string& command, std::vector<ExternalSigner>& signers, const std::string chain)
 {
+    if (!IsSafeCommandPath(command)) {
+        throw std::runtime_error("Invalid signer command path: " + command);
+    }
+
     // Call <command> enumerate
     const UniValue result = RunCommandParseJSON(command + " enumerate");
     if (!result.isArray()) {
@@ -43,6 +89,9 @@ bool ExternalSigner::Enumerate(const std::string& command, std::vector<ExternalS
             throw std::runtime_error(strprintf("'%s' received invalid response, missing signer fingerprint", command));
         }
         const std::string& fingerprintStr = fingerprint.get_str();
+        if (!IsHex(fingerprintStr)) {
+            throw std::runtime_error(strprintf("'%s' returned invalid fingerprint (must be hex): %s", command, fingerprintStr));
+        }
         // Skip duplicate signer
         bool duplicate = false;
         for (const ExternalSigner& signer : signers) {
@@ -61,6 +110,12 @@ bool ExternalSigner::Enumerate(const std::string& command, std::vector<ExternalS
 
 UniValue ExternalSigner::DisplayAddress(const std::string& descriptor) const
 {
+    // Validate descriptor contains no injection characters (descriptors are
+    // well-defined: function(args) — alphanumeric, /, ', <, >, ,, #, @, xpub
+    // chars).  Reject anything with spaces or shell metacharacters.
+    if (!IsSafeToken(descriptor)) {
+        throw std::runtime_error("Invalid descriptor for DisplayAddress");
+    }
     return RunCommandParseJSON(m_command + " --fingerprint " + m_fingerprint + NetworkArg() + " displayaddress --desc " + descriptor);
 }
 
@@ -75,6 +130,10 @@ bool ExternalSigner::SignTransaction(PartiallySignedTransaction& psbtx, std::str
     CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
     ssTx << psbtx;
     // parse ExternalSigner master fingerprint
+    if (!IsHex(m_fingerprint)) {
+        error = "Invalid signer fingerprint (must be hex)";
+        return false;
+    }
     std::vector<unsigned char> parsed_m_fingerprint = ParseHex(m_fingerprint);
     // Check if signer fingerprint matches any input master key fingerprint
     auto matches_signer_fingerprint = [&](const PSBTInput& input) {
