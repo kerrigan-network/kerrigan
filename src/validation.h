@@ -754,6 +754,23 @@ public:
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex, bool ignore_chainlocks = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /**
+     * Bring the Sapling state (SaplingDB) to the block the coins database
+     * holds, or, when a coins flush was interrupted, to the block
+     * ReplayBlocks rolls forward from. SaplingDB is synced at every block and
+     * the coins only at flushes, so after an unclean stop SaplingDB is ahead
+     * of the coins, or on another branch after a reorg. Rolls it back to the
+     * last block both share, from its own per-block records, or else by
+     * undoing blocks from disk, or else rebuilds it from scratch; then rolls
+     * it forward from the block files. Runs before ReplayBlocks.
+     *
+     * @returns false if the state cannot be rebuilt (a block missing on
+     *          disk, or rejected) or a shutdown interrupted the rebuild; the
+     *          state then holds a prefix of the chain, and the next start
+     *          continues from there.
+     */
+    bool ReconcileSaplingState(const std::function<bool()>& shutdown_requested) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();
     /** Ensures we have a genesis block in the block tree, possibly writing one to disk. */

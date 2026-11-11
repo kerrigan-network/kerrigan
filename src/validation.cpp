@@ -6794,6 +6794,143 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
     return true;
 }
 
+bool CChainState::ReconcileSaplingState(const std::function<bool()>& shutdown_requested)
+{
+    AssertLockHeld(cs_main);
+    if (!m_chain_helper || !m_chain_helper->sapling_state) return true;
+    sapling::CSaplingState& sapling = *m_chain_helper->sapling_state;
+    const Consensus::Params& consensus = m_params.GetConsensus();
+
+    // The block the coins hold. After an interrupted flush they are between
+    // two blocks, and ReplayBlocks rolls them, Sapling included, from the old
+    // one, so that is the one the Sapling state must hold.
+    const std::vector<uint256> heads = CoinsDB().GetHeadBlocks();
+    if (!heads.empty() && heads.size() != 2) return true; // ReplayBlocks reports it
+    const uint256 coins_hash = heads.empty() ? CoinsDB().GetBestBlock() : heads[1];
+    const CBlockIndex* coins_tip{nullptr};
+    if (!coins_hash.IsNull()) {
+        coins_tip = m_blockman.LookupBlockIndex(coins_hash);
+        if (!coins_tip) return true; // ReplayBlocks or LoadChainTip report it
+    }
+
+    // The genesis block never reaches ProcessBlock: the state must hold the
+    // coins tip if a Sapling-active block was connected up to it, and be
+    // empty otherwise.
+    const int first_height = std::max(consensus.SaplingHeight, 1);
+    const CBlockIndex* want = (coins_tip && coins_tip->nHeight >= first_height) ? coins_tip : nullptr;
+    const uint256 best = sapling.GetBestBlock();
+    const int best_height = sapling.GetBestBlockHeight();
+
+    // The per-block records an older build left (it neither writes nor
+    // erases them) may name blocks it undid; drop them before relying on
+    // any, so that every record names the state's block at its height.
+    if (!sapling.HasTrustedBlockMeta() && !sapling.ResetBlockMeta()) {
+        return error("%s: failed to reset the Sapling per-block records", __func__);
+    }
+
+    if (want ? best == want->GetBlockHash() : (best.IsNull() && best_height < 0)) {
+        return true;
+    }
+    LogPrintf("Sapling state is at %s (height %d) but the coins at %s (height %d), after an unclean stop "
+              "or a failed write; reconciling\n",
+              best.ToString(), best_height, coins_hash.ToString(), coins_tip ? coins_tip->nHeight : -1);
+
+    // 1. The highest height whose state belongs to want's chain, from the
+    //    per-block records, then drop everything above it. Records exist for
+    //    the blocks this build connected; below them (an older build
+    //    connected those blocks) the search stops.
+    int keep{-1};
+    const int search_top = want ? std::min(want->nHeight, best_height) : -1;
+    if (search_top >= first_height) {
+        for (int h = search_top; h >= first_height; --h) {
+            sapling::CSaplingState::BlockMeta meta;
+            if (!sapling.GetBlockMeta(h, meta)) break;
+            if (meta.hash == want->GetAncestor(h)->GetBlockHash()) {
+                keep = h;
+                break;
+            }
+        }
+        if (keep >= 0 && !sapling.RollbackToHeight(keep)) {
+            return error("%s: failed to roll the Sapling state back to height %d", __func__, keep);
+        }
+    }
+
+    // 2. A state without those records (written by an older build): undo
+    //    it block by block down to the fork with want's chain, if its best
+    //    block and the blocks down to the fork are known and on disk.
+    if (keep < 0 && want && !best.IsNull()) {
+        const CBlockIndex* pbest = m_blockman.LookupBlockIndex(best);
+        const CBlockIndex* fork = pbest ? LastCommonAncestor(pbest, want) : nullptr;
+        if (pbest && pbest->nHeight == best_height && fork && fork->nHeight >= first_height) {
+            bool undone{true};
+            for (const CBlockIndex* pindex = pbest; pindex != fork; pindex = pindex->pprev) {
+                CBlock block;
+                if (!(pindex->nStatus & BLOCK_HAVE_DATA) || !ReadBlockFromDisk(block, pindex, consensus) ||
+                    !sapling.UndoBlock(block, pindex, consensus)) {
+                    undone = false;
+                    break;
+                }
+            }
+            if (undone && sapling.GetBestBlock() == fork->GetBlockHash()) {
+                keep = fork->nHeight;
+                LogPrintf("Sapling state undone block by block to height %d\n", keep);
+            }
+        }
+    }
+
+    // 3. Otherwise start over.
+    if (keep < 0) {
+        LogPrintf("Rebuilding Sapling state from the block files, up to height %d\n", want ? want->nHeight : 0);
+        sapling.Wipe();
+    }
+
+    // 4. Roll forward along want's chain from the block files.
+    if (want) {
+        const int from = keep < 0 ? first_height : keep + 1;
+        const int stop_at = m_params.IsMockableChain() ? gArgs.GetIntArg("-stopsaplingreplayat", -1) : -1;
+        int last_percent{-1};
+        for (int h = from; h <= want->nHeight; ++h) {
+            if (h == stop_at) {
+                LogPrintf("Sapling rebuild stopped for testing at height %d\n", h);
+                return false;
+            }
+            if ((h - from) % 1000 == 999 && shutdown_requested && shutdown_requested()) {
+                LogPrintf("Sapling rebuild interrupted at height %d; the next start continues it\n", h);
+                return false;
+            }
+            const CBlockIndex* pindex = want->GetAncestor(h);
+            CBlock block;
+            if (!ReadBlockFromDisk(block, pindex, consensus)) {
+                return error("%s: cannot read block %s (height %d) to rebuild the Sapling state",
+                             __func__, pindex->GetBlockHash().ToString(), h);
+            }
+            if (!sapling.ProcessBlock(block, pindex, consensus, /*fJustCheck=*/false) ||
+                !sapling.CommitBlock(/*fSync=*/h == want->nHeight)) {
+                return error("%s: the Sapling state rejected block %s (height %d) while being rebuilt",
+                             __func__, pindex->GetBlockHash().ToString(), h);
+            }
+            const int percent = want->nHeight > from ? (h - from) * 100 / (want->nHeight - from) : 100;
+            if (percent != last_percent) {
+                last_percent = percent;
+                uiInterface.ShowProgress(_("Rebuilding Sapling state…").translated, percent, false);
+                if (percent % 10 == 0) {
+                    LogPrintf("Rolling Sapling state forward: height %d of %d\n", h, want->nHeight);
+                }
+            }
+        }
+        uiInterface.ShowProgress("", 100, false);
+    }
+
+    const uint256 now = sapling.GetBestBlock();
+    if (want ? now != want->GetBlockHash() : !now.IsNull()) {
+        return error("%s: the Sapling state is at %s after reconciling, not at the coins tip %s",
+                     __func__, now.ToString(), coins_hash.ToString());
+    }
+    LogPrintf("Reconciled Sapling state with the coins at %s (height %d), value pool %s\n",
+              coins_hash.ToString(), coins_tip ? coins_tip->nHeight : -1, FormatMoney(sapling.GetValuePool()));
+    return true;
+}
+
 bool CChainState::ReplayBlocks()
 {
     LOCK(cs_main);

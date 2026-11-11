@@ -99,6 +99,7 @@ BASE_SCRIPTS = [
     # Kerrigan-specific tests (multi-algo PoW + Sapling shielded transactions)
     'feature_multialgo_stress.py',
     'feature_sapling_reorg.py',
+    'feature_sapling_crash_recovery.py --descriptors',
     'feature_invalidateblock.py',
     'feature_sapling.py',
     'feature_coordinator_supervisor.py',
