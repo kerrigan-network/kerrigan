@@ -32,8 +32,17 @@ namespace sapling {
  * LevelDB key structure:
  *   'N' + uint256 nullifier  -> int32_t height  (nullifier spend set)
  *   'Z' + int32_t height     -> uint256 root    (commitment tree root per block)
+ *   'T' + int32_t height     -> frontier        (serialized commitment tree per block)
+ *   'H' + int32_t height     -> BlockMeta       (block hash + value pool per block)
  *   'B'                      -> uint256 hash    (best block hash)
+ *   'M'                      -> uint256 hash    (best block, as written by a build that keeps 'H')
  *   'V'                      -> int64_t pool    (cumulative Sapling value pool, ZIP-209)
+ *
+ * The state is synced at every block while the coins database is flushed
+ * only periodically, so after an unclean stop it can be ahead of the coins
+ * tip, or on another branch. ReconcileSaplingState (validation.cpp) brings it
+ * back to the coins tip at startup, using the 'H' records to roll back
+ * without the blocks that were lost with the block index.
  */
 class CSaplingState
 {
@@ -42,12 +51,26 @@ public:
     static constexpr uint8_t DB_NULLIFIER  = 'N';
     static constexpr uint8_t DB_TREE_ROOT  = 'Z';
     static constexpr uint8_t DB_TREE_DATA  = 'T';  // serialized frontier per height
+    static constexpr uint8_t DB_BLOCK_META = 'H';  // BlockMeta per height
     static constexpr uint8_t DB_BEST_BLOCK = 'B';
+    static constexpr uint8_t DB_META_BEST  = 'M';  // DB_BEST_BLOCK as of the last write that kept DB_BLOCK_META
     static constexpr uint8_t DB_VALUE_POOL = 'V';  // cumulative Sapling value pool (ZIP-209)
+
+    /** The block connected at a height, and the value pool it left. */
+    struct BlockMeta {
+        uint256 hash;
+        int64_t pool{0};
+        SERIALIZE_METHODS(BlockMeta, obj) { READWRITE(obj.hash, obj.pool); }
+    };
 
 private:
     mutable Mutex cs;
     std::unique_ptr<CDBWrapper> db;
+
+    // Kept to reopen the database empty (Wipe).
+    const fs::path m_db_path;
+    const size_t m_cache_size;
+    const bool m_memory;
 
     // Reverse index: anchor value -> set of block heights, for O(1) IsValidAnchor lookup.
     // Multiple heights per root because carry-forward blocks reuse the same root.
@@ -171,9 +194,11 @@ public:
      * No-op if no pending batch exists (e.g. block had no Sapling txs,
      * or ProcessBlock was called with fJustCheck=true).
      *
+     * @param fSync  sync the write; only the startup reconciliation, which
+     *               syncs its last block, passes false
      * @return true on success
      */
-    bool CommitBlock() EXCLUSIVE_LOCKS_REQUIRED(!cs);
+    bool CommitBlock(bool fSync = true) EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
     /**
      * Discard the pending batch without writing to DB.
@@ -191,6 +216,39 @@ public:
      */
     bool UndoBlock(const CBlock& block, const CBlockIndex* pindex,
                    const Consensus::Params& params) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * Whether the DB_BLOCK_META records describe the blocks the state was
+     * built from. False when a build without them (which neither writes nor
+     * erases them) wrote the state after the last build with them.
+     */
+    bool HasTrustedBlockMeta() const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * Drop every DB_BLOCK_META record, write the best block's own, and mark
+     * the records trusted. For a state whose records are not trusted: what an
+     * older build left may name blocks it has since undone. Afterwards a
+     * record exists only for the best block and the blocks this build
+     * connects, and is erased when its block is undone, so every record
+     * names the state's block at its height.
+     */
+    bool ResetBlockMeta() EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** The DB_BLOCK_META record at a height; false if there is none. */
+    bool GetBlockMeta(int nHeight, BlockMeta& meta) const EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /**
+     * Roll the state back to what the block at nHeight left, without the
+     * blocks above it: erase the nullifiers spent above nHeight and the
+     * per-height records above it, and restore the best block and value pool
+     * from the DB_BLOCK_META record at nHeight, which must exist. The caller
+     * checks that the record names the block it wants (HasTrustedBlockMeta).
+     * Synced, one batch.
+     */
+    bool RollbackToHeight(int nHeight) EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
+    /** Drop the whole state: reopen the database empty. */
+    void Wipe() EXCLUSIVE_LOCKS_REQUIRED(!cs);
 };
 
 } // namespace sapling
