@@ -440,6 +440,20 @@ public:
      */
     std::atomic<bool> m_sapling_rebuild_active{false};
 
+    /**
+     * Set while a witness rebuild has cleared the witnesses and replays its
+     * snapshot with cs_wallet released between chunks. blockConnected then
+     * leaves the witnesses alone (it still records notes and spends): its
+     * blocks are above the snapshot, and the rebuild's tail drain applies
+     * them under cs_wallet, which also clears this. Updating the witnesses
+     * here as well applied them twice to witnesses that existed by then,
+     * and the replay appended older blocks to witnesses created here, so
+     * the rebuilt witnesses disagreed with the chain (anchor mismatch).
+     * Only honoured while m_sapling_rebuild_active, so a rebuild that dies
+     * without reaching its tail drain cannot leave it set.
+     */
+    bool m_sapling_witnesses_deferred GUARDED_BY(cs_wallet){false};
+
 private:
     /**
      * Background thread driving the auto-rebuild replay. Owned by CWallet
@@ -650,8 +664,13 @@ public:
     void blockConnected(const CBlock& block, int height) override;
     void blockDisconnected(const CBlock& block, int height) override;
 
-    /** Scan a single block for incoming/spent Sapling shielded notes. */
-    void ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    /**
+     * Scan a single block for incoming/spent Sapling shielded notes.
+     * @param defer_witnesses  leave the witnesses to a running rebuild
+     *                         (m_sapling_witnesses_deferred)
+     */
+    void ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch,
+                             bool defer_witnesses = false) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     /**
      * Add to the wallet the transactions of @p block that paid it a note or
