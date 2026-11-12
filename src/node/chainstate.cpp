@@ -184,7 +184,8 @@ std::optional<ChainstateLoadingError> LoadChainstate(bool fReset,
         }
 
         // A flush writes the coins and then EvoDB: if the node stopped in
-        // between, have ReplayBlocks roll EvoDB forward with the coins.
+        // between, or after a commit of EvoDB alone, have ReplayBlocks bring
+        // EvoDB to the coins.
         if (&chainman.ActiveChainstate() == chainstate && !chainstate->ReconcileEvoDB()) {
             return ChainstateLoadingError::ERROR_REPLAYBLOCKS_FAILED;
         }

@@ -6851,19 +6851,21 @@ bool CChainState::ReconcileEvoDB()
 
     const CBlockIndex* coins_tip = m_blockman.LookupBlockIndex(coins_hash);
     const CBlockIndex* evo_tip = m_blockman.LookupBlockIndex(evo_hash);
-    // A stop between the two writes leaves EvoDB at the block of an earlier
-    // flush: behind the coins, or on a branch a reorg left since. Anything
-    // else is left to the startup checks.
-    if (!coins_tip || !evo_tip || (evo_tip->nStatus & BLOCK_FAILED_MASK)) return true;
+    // A stop between the two writes of a flush leaves EvoDB at the block of
+    // an earlier flush: behind the coins, or on a branch a reorg left since.
+    // A stop after EvoDB was committed alone leaves it ahead of the coins,
+    // on blocks that may have been invalidated since. EvoDB's blocks were
+    // connected once, so their undo data undoes them either way.
+    if (!coins_tip || !evo_tip) return true; // left to the startup checks
     const CBlockIndex* fork = LastCommonAncestor(coins_tip, evo_tip);
-    if (fork == coins_tip) return true; // EvoDB ahead of the coins
 
     LogPrintf("EvoDB is at %s (height %d) but the coins at %s (height %d), after a stop between their writes\n",
               evo_hash.ToString(), evo_tip->nHeight, coins_hash.ToString(), coins_tip->nHeight);
 
     // ReplayBlocks undoes both tips' blocks down to the fork (EvoDB's with
     // EvoDB, the coins' in the coins alone) and connects the coins' blocks
-    // from there.
+    // from there. With EvoDB ahead, the fork is the coins' block: it only
+    // undoes EvoDB's.
     for (const CBlockIndex* tip : {evo_tip, coins_tip}) {
         for (const CBlockIndex* p = tip; p != fork; p = p->pprev) {
             if (!(p->nStatus & BLOCK_HAVE_DATA) || !(p->nStatus & BLOCK_HAVE_UNDO)) {
@@ -6876,7 +6878,8 @@ bool CChainState::ReconcileEvoDB()
     if (!CoinsDB().MarkFlushInterrupted(coins_hash, evo_hash)) {
         return error("%s: failed to mark the coins database for a replay", __func__);
     }
-    LogPrintf("EvoDB: replaying the blocks from height %d to %d with the coins\n", fork->nHeight + 1, coins_tip->nHeight);
+    LogPrintf("EvoDB: replaying with the coins: undoing %d of its blocks above height %d, connecting %d of the coins'\n",
+              evo_tip->nHeight - fork->nHeight, fork->nHeight, coins_tip->nHeight - fork->nHeight);
     return true;
 }
 

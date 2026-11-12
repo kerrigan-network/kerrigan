@@ -1226,11 +1226,11 @@ bool CDeterministicMNManager::IsRepaired() const { return m_evoDb.Exists(DB_LIST
 
 void CDeterministicMNManager::CompleteRepair()
 {
-    auto dbTx = m_evoDb.BeginTransaction();
-    m_evoDb.Write(DB_LIST_REPAIRED, 1);
-    dbTx->Commit();
-    // flush it to disk
-    if (!m_evoDb.CommitRootTransaction()) {
+    // Written straight to disk, like the repaired diffs. Committing EvoDB's
+    // root transaction here would also write the blocks connected since the
+    // last flush: EvoDB ahead of the coins on disk until the next flush, and
+    // after a reindex, of coins not on disk at all yet.
+    if (!m_evoDb.GetRawDB().Write(DB_LIST_REPAIRED, 1, /*fSync=*/true)) {
         // Unconditional halt, DB corruption is not safe to continue
         throw std::runtime_error("CDeterministicMNManager::CompleteRepair -- Failed to commit to evoDB");
     }

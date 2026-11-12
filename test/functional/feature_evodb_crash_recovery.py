@@ -8,9 +8,10 @@ A full flush writes the coins database (chainstate/) and then EvoDB (evodb/:
 the masternode list, quorum commitments and other special-transaction state),
 two separate databases. A kill, an OOM kill, a crash or a full disk between
 the two writes leaves EvoDB at the block of the previous flush and the coins
-at a later one. Startup used to read that as drift and refuse to start
-(headless: "HEADLESS FAULT EXIT (STARTUP_DRIFT ...)"). The node must instead
-replay the blocks in between, EvoDB and the Sapling state with the coins.
+at a later one; a stop after a commit of EvoDB alone leaves EvoDB ahead.
+Startup used to read that as drift and refuse to start (headless:
+"HEADLESS FAULT EXIT (STARTUP_DRIFT ...)"). The node must instead replay the
+blocks in between, EvoDB and the Sapling state with the coins.
 
 -crashbeforeevodbflush=<n> (regtest only) makes the node exit at the first
 full flush at or above height n, after the coins are written and before
@@ -21,6 +22,12 @@ Scenarios (node0 stops there and restarts, node1 never stops):
      and a ProUpRegTx, the spend of a masternode's collateral, a ProRegTx and
      a Sapling shield.
   2. EvoDB on another branch: a reorg after the last flush, then the stop.
+  3. EvoDB ahead of the coins, on blocks invalidated since: a flush, then
+     invalidateblock, then the stop in the next flush. The blocks EvoDB has
+     and the coins do not hold a ProUpServTx, a ProUpRegTx and a Sapling
+     shield. The replay must undo them in EvoDB and load the chain at the
+     coins' block; loading then reconsiders the invalidated blocks, as at
+     every start, and connects them again on what the replay left.
 After each, node0 must match node1: same tip, masternode list, quorum list,
 UTXO set and Sapling value pool. Then each must accept the other's blocks,
 node0's with a Sapling spend.
@@ -108,7 +115,7 @@ class EvoDBCrashRecoveryTest(BitcoinTestFramework):
         self.start_node(i)
         log = self.debug_log_since(i, offset)
         assert DRIFT_EXIT_TAG not in log, "node refused to start after the stop"
-        assert RECONCILE_TAG in log, "the restart should find EvoDB behind the coins"
+        assert RECONCILE_TAG in log, "the restart should find EvoDB apart from the coins"
         assert "Replaying blocks" in log
         return log
 
@@ -170,6 +177,7 @@ class EvoDBCrashRecoveryTest(BitcoinTestFramework):
 
         self.scenario_behind_same_chain()
         self.scenario_other_branch()
+        self.scenario_ahead_on_invalidated_blocks()
 
     def scenario_behind_same_chain(self):
         self.log.info("Scenario 1: stop between the writes with EvoDB behind on the same chain")
@@ -241,6 +249,46 @@ class EvoDBCrashRecoveryTest(BitcoinTestFramework):
         log = self.restart_after_crash(0)
         assert "Rolling back" in log and "Rolling forward" in log
         assert_equal(self.state(0), expected)
+
+        self.connect_nodes(0, 1)
+        self.check_blocks_both_ways()
+
+    def scenario_ahead_on_invalidated_blocks(self):
+        self.log.info("Scenario 3: EvoDB ahead of the coins, on blocks invalidated since")
+        n0, n1 = self.nodes
+        mn_b = self.mn_b
+
+        fork_hash = n0.getbestblockhash()
+        fork_height = n0.getblockcount()
+        mn_b.update_service(n0, submit=True, addrs_core_p2p=[f"127.0.0.4:{mn_b.nodePort}"], fundsAddr=self.fee_a)
+        self.generate(n0, 1)
+        first = n0.getbestblockhash()
+        mn_b.update_registrar(n0, submit=True, votingAddr=n0.getnewaddress(), fundsAddr=self.fee_b)
+        self.generate(n0, 1)
+        n0.z_sendmany(self.t0, [{"address": self.z0, "amount": 3.0}])
+        self.generate(n0, 1)
+        ahead_tip = n0.getbestblockhash()
+
+        # The clean stop flushes the coins and EvoDB at ahead_tip. node0 then
+        # goes back to fork_height and stops in the next flush: the coins at
+        # fork_height, EvoDB still at ahead_tip, three blocks ahead, as a
+        # commit of EvoDB alone would leave it.
+        self.restart_node(0, extra_args=DIP3_ARGS + [f"-crashbeforeevodbflush={fork_height}"])
+        assert_equal(n0.getbestblockhash(), ahead_tip)
+        n0.invalidateblock(first)
+        assert_equal(n0.getbestblockhash(), fork_hash)
+
+        self.crash_in_flush(0)
+        log = self.restart_after_crash(0)
+        assert f"(height {fork_height + 3}) but the coins at {fork_hash}" in log
+        assert "Rolling back" in log and "Rolling forward" not in log
+        assert f"Loaded best chain: hashBestChain={fork_hash} height={fork_height}" in log
+        # Loading reconsiders the invalidated blocks, as at every start.
+        # Connecting them again fails unless the replay left EvoDB and the
+        # Sapling state at the fork.
+        assert "is ahead of our tip, reconsidering" in log
+        self.wait_until(lambda: n0.getbestblockhash() == ahead_tip)
+        assert_equal(self.state(0), self.state(1))
 
         self.connect_nodes(0, 1)
         self.check_blocks_both_ways()
