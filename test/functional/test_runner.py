@@ -114,7 +114,7 @@ BASE_SCRIPTS = [
     'wallet_sapling_viewingkey_norelay.py',
     'feature_sapling_spent_note_integrity.py',
     'feature_sapling_islock_mining.py',
-    'feature_recovery_selfheal.py',
+    'feature_recovery_selfheal.py --descriptors',
     'feature_multi_algo_mining.py',
     'feature_llmq_data_recovery.py',
     'wallet_hd.py --legacy-wallet',
