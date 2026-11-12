@@ -2832,6 +2832,36 @@ static bool CheckGovernanceEscrowSpend(
     return true;
 }
 
+/** Write again the anti-replay record of an escrow release in a block that
+ *  ConnectBlock accepted, for RollforwardBlock: the same transactions as
+ *  ConnectBlock passes to CheckGovernanceEscrowSpend, which marked them.
+ *  view holds the coins as they were before tx. */
+static void RedoEscrowReleaseRecord(const CTransaction& tx, const CCoinsViewCache& view, int nBlockHeight,
+                                    const Consensus::Params& consensus, CEvoDB& evodb)
+{
+    const bool spends_escrow = std::any_of(tx.vin.begin(), tx.vin.end(), [&](const CTxIn& txin) {
+        const Coin& coin = view.AccessCoin(txin.prevout);
+        return !coin.IsSpent() && consensus.IsGrowthEscrowScript(std::vector<unsigned char>(coin.out.scriptPubKey.begin(),
+                                                                                            coin.out.scriptPubKey.end()));
+    });
+    if (!spends_escrow) return;
+    if (consensus.nEscrowBurnHeight > 0 && nBlockHeight >= consensus.nEscrowBurnHeight && IsPureEscrowBurn(tx, view, consensus)) {
+        return;
+    }
+    static const std::vector<unsigned char> KRGN_MAGIC{'K', 'R', 'G', 'N'};
+    for (const auto& txout : tx.vout) {
+        if (txout.scriptPubKey.size() == 38 &&
+            txout.scriptPubKey[0] == OP_RETURN &&
+            txout.scriptPubKey[1] == 0x24 /* push 36 bytes */ &&
+            std::equal(KRGN_MAGIC.begin(), KRGN_MAGIC.end(), txout.scriptPubKey.begin() + 2)) {
+            uint256 proposalHash;
+            memcpy(proposalHash.begin(), txout.scriptPubKey.data() + 6, 32);
+            MarkEscrowReleaseExecuted(evodb, proposalHash, nBlockHeight);
+            return;
+        }
+    }
+}
+
 // ===========================================================================
 //  Deterministic taint-root freeze: chain walk + activation
 // ===========================================================================
@@ -6606,6 +6636,8 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
                 }
             }
 
+            RedoEscrowReleaseRecord(*tx, inputs, pindex->nHeight, m_params.GetConsensus(), m_evoDb);
+
             for (const CTxIn &txin : tx->vin) {
                 inputs.SpendCoin(txin.prevout);
             }
@@ -6931,6 +6963,47 @@ bool CChainState::ReconcileSaplingState(const std::function<bool()>& shutdown_re
     return true;
 }
 
+/** Undo the effects of a block on the coins alone, as DisconnectBlock does,
+ *  for ReplayBlocks; EvoDB, the Sapling state and the indexes are left as
+ *  they are. */
+static DisconnectResult DisconnectBlockCoins(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view)
+{
+    CBlockUndo blockUndo;
+    if (!UndoReadFromDisk(blockUndo, pindex)) {
+        error("%s: failure reading undo data", __func__);
+        return DISCONNECT_FAILED;
+    }
+    if (blockUndo.vtxundo.size() + 1 != block.vtx.size()) {
+        error("%s: block and undo data inconsistent", __func__);
+        return DISCONNECT_FAILED;
+    }
+
+    bool fClean = true;
+    for (int i = block.vtx.size() - 1; i >= 0; i--) {
+        const CTransaction& tx = *block.vtx[i];
+        for (size_t o = 0; o < tx.vout.size(); o++) {
+            if (!tx.vout[o].scriptPubKey.IsUnspendable()) {
+                fClean = view.SpendCoin(COutPoint(tx.GetHash(), o)) && fClean;
+            }
+        }
+        if (i > 0) { // not coinbases
+            CTxUndo& txundo = blockUndo.vtxundo[i - 1];
+            if (txundo.vprevout.size() != tx.vin.size()) {
+                error("%s: transaction and undo data inconsistent", __func__);
+                return DISCONNECT_FAILED;
+            }
+            for (unsigned int j = tx.vin.size(); j > 0;) {
+                --j;
+                const int res = ApplyTxInUndo(std::move(txundo.vprevout[j]), view, tx.vin[j].prevout);
+                if (res == DISCONNECT_FAILED) return DISCONNECT_FAILED;
+                fClean = fClean && res != DISCONNECT_UNCLEAN;
+            }
+        }
+    }
+    view.SetBestBlock(pindex->pprev->GetBlockHash());
+    return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
+}
+
 bool CChainState::ReplayBlocks()
 {
     LOCK(cs_main);
@@ -6990,7 +7063,31 @@ bool CChainState::ReplayBlocks()
         }
     }
 
+    // Special transactions are checked with the BLS scheme of their block,
+    // which switches at V19 activation. At startup it is still the default
+    // until the chain tip sets it, after this, so set it for the old tip;
+    // rolling back and forward switch it as DisconnectBlock and ConnectBlock do.
+    bls::bls_legacy_scheme.store(!DeploymentActiveAfter(pindexOld, m_params.GetConsensus(), Consensus::DEPLOYMENT_V19));
+
     auto dbTx = m_evoDb.BeginTransaction();
+
+    // Rolling forward checks each block's special transactions, and builds
+    // the indexes, against the coins as they were before it. The coins hold
+    // the new tip, or a mix of both tips after an interrupted flush, so take
+    // them back along the new branch first. Like the steps below, undoing a
+    // block is idempotent, so the result does not depend on that mix.
+    if (pindexNew != pindexFork && pindexNew->nHeight > 0) {
+        LogPrintf("Taking the coins back from height %d to %d\n", pindexNew->nHeight, pindexFork ? pindexFork->nHeight : 0);
+    }
+    for (const CBlockIndex* pindex = pindexNew; pindex != pindexFork && pindex->nHeight > 0; pindex = pindex->pprev) {
+        CBlock block;
+        if (!ReadBlockFromDisk(block, pindex, m_params.GetConsensus())) {
+            return error("ReplayBlocks(): ReadBlockFromDisk() failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
+        }
+        if (DisconnectBlockCoins(block, pindex, cache) == DISCONNECT_FAILED) {
+            return error("ReplayBlocks(): failed to undo the coins of block %s (height %d)", pindex->GetBlockHash().ToString(), pindex->nHeight);
+        }
+    }
 
     // Rollback along the old branch.
     while (pindexOld != pindexFork) {
