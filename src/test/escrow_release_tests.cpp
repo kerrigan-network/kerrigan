@@ -153,9 +153,16 @@ BOOST_AUTO_TEST_CASE(escrow_replay_prevention)
     MarkEscrowReleaseExecuted(testEvoDB, proposalHash, 1000);
     BOOST_CHECK(IsEscrowReleaseExecuted(testEvoDB, proposalHash));
 
-    // Unmark (reorg simulation)
-    UnmarkEscrowReleaseExecuted(testEvoDB, proposalHash);
+    // Undoing another block that carries the same marker (anyone can put it
+    // in a transaction) keeps the record.
+    BOOST_CHECK(!UnmarkEscrowReleaseExecuted(testEvoDB, proposalHash, 1005));
+    BOOST_CHECK(!UnmarkEscrowReleaseExecuted(testEvoDB, proposalHash, 999));
+    BOOST_CHECK(IsEscrowReleaseExecuted(testEvoDB, proposalHash));
+
+    // Undoing the block that executed it (reorg simulation) erases it.
+    BOOST_CHECK(UnmarkEscrowReleaseExecuted(testEvoDB, proposalHash, 1000));
     BOOST_CHECK(!IsEscrowReleaseExecuted(testEvoDB, proposalHash));
+    BOOST_CHECK(!UnmarkEscrowReleaseExecuted(testEvoDB, proposalHash, 1000));
 }
 
 BOOST_AUTO_TEST_CASE(escrow_release_accessor_methods)

@@ -2416,7 +2416,9 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
             // At this point, all of txundo.vprevout should have been moved out.
         }
 
-        // Undo escrow release execution records
+        // Undo escrow release execution records. Only the record this block
+        // wrote: the marker alone does not make a release, and a record
+        // erased for another block's release would let it run again.
         static const std::vector<unsigned char> KRGN_MAGIC{'K', 'R', 'G', 'N'};
         for (const auto& txout : tx.vout) {
             if (txout.scriptPubKey.size() == 38 &&
@@ -2426,9 +2428,10 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
             {
                 uint256 proposalHash;
                 memcpy(proposalHash.begin(), txout.scriptPubKey.data() + 6, 32);
-                UnmarkEscrowReleaseExecuted(m_evoDb, proposalHash);
-                LogPrintf("%s: undoing escrow release execution %s at height %d\n",
-                          __func__, proposalHash.ToString(), pindex->nHeight);
+                if (UnmarkEscrowReleaseExecuted(m_evoDb, proposalHash, pindex->nHeight)) {
+                    LogPrintf("%s: undoing escrow release execution %s at height %d\n",
+                              __func__, proposalHash.ToString(), pindex->nHeight);
+                }
                 break;
             }
         }
