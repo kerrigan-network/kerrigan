@@ -83,6 +83,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <deque>
 #include <numeric>
 #include <optional>
@@ -4307,6 +4308,14 @@ bool CChainState::FlushStateToDisk(
                 if (!CoinsTip().Flush())
                     return AbortNode(state, "Failed to write to coin database");
             }
+            if (m_params.IsMockableChain()) {
+                // Test only: stop between the two writes, as a kill or a full disk can.
+                const int64_t crash_at{gArgs.GetIntArg("-crashbeforeevodbflush", -1)};
+                if (crash_at >= 0 && m_chain.Height() >= crash_at) {
+                    LogPrintf("Simulating a crash between the coins and EvoDB writes. Goodbye.\n");
+                    std::_Exit(0);
+                }
+            }
             {
                 LOG_TIME_SECONDS("write evodb cache to disk");
                 if (!m_evoDb.CommitRootTransaction()) {
@@ -6823,6 +6832,48 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
         } // end Stage 2+ block
     }
 
+    return true;
+}
+
+bool CChainState::ReconcileEvoDB()
+{
+    AssertLockHeld(cs_main);
+
+    // A coins flush that was itself interrupted is marked already, and
+    // ReplayBlocks checks EvoDB against the block that flush started from.
+    if (!CoinsDB().GetHeadBlocks().empty()) return true;
+    const uint256 coins_hash = CoinsDB().GetBestBlock();
+    uint256 evo_hash;
+    if (coins_hash.IsNull() || !m_evoDb.Read(EVODB_BEST_BLOCK, evo_hash) || evo_hash == coins_hash) return true;
+
+    const CBlockIndex* coins_tip = m_blockman.LookupBlockIndex(coins_hash);
+    const CBlockIndex* evo_tip = m_blockman.LookupBlockIndex(evo_hash);
+    // A stop between the two writes leaves EvoDB at the block of an earlier
+    // flush: behind the coins, or on a branch a reorg left since. Anything
+    // else is left to the startup checks.
+    if (!coins_tip || !evo_tip || (evo_tip->nStatus & BLOCK_FAILED_MASK)) return true;
+    const CBlockIndex* fork = LastCommonAncestor(coins_tip, evo_tip);
+    if (fork == coins_tip) return true; // EvoDB ahead of the coins
+
+    LogPrintf("EvoDB is at %s (height %d) but the coins at %s (height %d), after a stop between their writes\n",
+              evo_hash.ToString(), evo_tip->nHeight, coins_hash.ToString(), coins_tip->nHeight);
+
+    // ReplayBlocks undoes both tips' blocks down to the fork (EvoDB's with
+    // EvoDB, the coins' in the coins alone) and connects the coins' blocks
+    // from there.
+    for (const CBlockIndex* tip : {evo_tip, coins_tip}) {
+        for (const CBlockIndex* p = tip; p != fork; p = p->pprev) {
+            if (!(p->nStatus & BLOCK_HAVE_DATA) || !(p->nStatus & BLOCK_HAVE_UNDO)) {
+                LogPrintf("EvoDB: block %s (height %d) is not on disk, cannot replay\n", p->GetBlockHash().ToString(), p->nHeight);
+                return true;
+            }
+        }
+    }
+
+    if (!CoinsDB().MarkFlushInterrupted(coins_hash, evo_hash)) {
+        return error("%s: failed to mark the coins database for a replay", __func__);
+    }
+    LogPrintf("EvoDB: replaying the blocks from height %d to %d with the coins\n", fork->nHeight + 1, coins_tip->nHeight);
     return true;
 }
 

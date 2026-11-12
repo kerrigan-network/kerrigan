@@ -73,6 +73,13 @@ public:
     bool NeedsUpgrade();
     size_t EstimateSize() const override;
 
+    /**
+     * Mark the database, in one synced write, as being in the middle of a
+     * flush from old_tip to new_tip, as the first batch of BatchWrite does,
+     * so that ReplayBlocks rolls the chainstate from old_tip to new_tip.
+     */
+    bool MarkFlushInterrupted(const uint256& new_tip, const uint256& old_tip);
+
     //! Dynamically alter the underlying leveldb cache size.
     void ResizeCache(size_t new_cache_size) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 };

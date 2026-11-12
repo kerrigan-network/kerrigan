@@ -755,6 +755,22 @@ public:
     void ResetBlockFailureFlags(CBlockIndex* pindex, bool ignore_chainlocks = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /**
+     * A full flush writes the coins and then EvoDB, two separate databases.
+     * If the process stopped between the two (a kill, an OOM kill, a crash
+     * or a full disk), EvoDB holds the block of the previous flush and the
+     * coins a later one. Mark the coins database as an interrupted flush
+     * from EvoDB's block to the coins' block, so that ReplayBlocks undoes
+     * EvoDB's blocks above their common ancestor and connects the coins'
+     * blocks again, EvoDB, the Sapling state and the coins together. Leaves
+     * anything else (EvoDB ahead of the coins, on a branch this node
+     * rejected, or blocks missing on disk) to the startup checks. Runs
+     * before ReconcileSaplingState and ReplayBlocks.
+     *
+     * @returns false only if the mark could not be written.
+     */
+    bool ReconcileEvoDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
      * Bring the Sapling state (SaplingDB) to the block the coins database
      * holds, or, when a coins flush was interrupted, to the block
      * ReplayBlocks rolls forward from. SaplingDB is synced at every block and
