@@ -2237,6 +2237,23 @@ int ApplyTxInUndo(Coin&& undo, CCoinsViewCache& view, const COutPoint& out)
     return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
 }
 
+/** The governance proposal an escrow release names: the hash in its first
+ *  OP_RETURN output that pushes "KRGN" and the hash (36 bytes). */
+static std::optional<uint256> GetEscrowReleaseProposal(const CTransaction& tx)
+{
+    static constexpr unsigned char KRGN_MAGIC[]{'K', 'R', 'G', 'N'};
+    for (const auto& txout : tx.vout) {
+        const CScript& script = txout.scriptPubKey;
+        if (script.size() == 38 && script[0] == OP_RETURN && script[1] == 0x24 /* push 36 bytes */ &&
+            std::equal(std::begin(KRGN_MAGIC), std::end(KRGN_MAGIC), script.begin() + 2)) {
+            uint256 proposalHash;
+            memcpy(proposalHash.begin(), script.data() + 6, 32);
+            return proposalHash;
+        }
+    }
+    return std::nullopt;
+}
+
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
 DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, bool fVerifyOnly)
@@ -2419,21 +2436,10 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
         // Undo escrow release execution records. Only the record this block
         // wrote: the marker alone does not make a release, and a record
         // erased for another block's release would let it run again.
-        static const std::vector<unsigned char> KRGN_MAGIC{'K', 'R', 'G', 'N'};
-        for (const auto& txout : tx.vout) {
-            if (txout.scriptPubKey.size() == 38 &&
-                txout.scriptPubKey[0] == OP_RETURN &&
-                txout.scriptPubKey[1] == 0x24 &&
-                std::equal(KRGN_MAGIC.begin(), KRGN_MAGIC.end(), txout.scriptPubKey.begin() + 2))
-            {
-                uint256 proposalHash;
-                memcpy(proposalHash.begin(), txout.scriptPubKey.data() + 6, 32);
-                if (UnmarkEscrowReleaseExecuted(m_evoDb, proposalHash, pindex->nHeight)) {
-                    LogPrintf("%s: undoing escrow release execution %s at height %d\n",
-                              __func__, proposalHash.ToString(), pindex->nHeight);
-                }
-                break;
-            }
+        if (const auto proposalHash = GetEscrowReleaseProposal(tx);
+            proposalHash && UnmarkEscrowReleaseExecuted(m_evoDb, *proposalHash, pindex->nHeight)) {
+            LogPrintf("%s: undoing escrow release execution %s at height %d\n",
+                      __func__, proposalHash->ToString(), pindex->nHeight);
         }
     }
 
@@ -2700,26 +2706,14 @@ static bool CheckGovernanceEscrowSpend(
     }
 
     // 1. Find OP_RETURN output with "KRGN" + 32-byte governance proposal hash
-    static const std::vector<unsigned char> KRGN_MAGIC{'K', 'R', 'G', 'N'};
-    uint256 proposalHash;
-    bool foundMarker = false;
-    for (const auto& txout : tx.vout) {
-        if (txout.scriptPubKey.size() == 38 &&
-            txout.scriptPubKey[0] == OP_RETURN &&
-            txout.scriptPubKey[1] == 0x24 /* push 36 bytes */ &&
-            std::equal(KRGN_MAGIC.begin(), KRGN_MAGIC.end(), txout.scriptPubKey.begin() + 2))
-        {
-            memcpy(proposalHash.begin(), txout.scriptPubKey.data() + 6, 32);
-            foundMarker = true;
-            break;
-        }
-    }
-    if (!foundMarker) {
+    const std::optional<uint256> marker = GetEscrowReleaseProposal(tx);
+    if (!marker) {
         LogPrintf("ERROR: %s: tx %s spends escrow without governance reference\n",
                   __func__, tx.GetHash().ToString());
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
             "bad-escrow-no-proposal", "escrow spend missing OP_RETURN governance proposal reference");
     }
+    const uint256& proposalHash = *marker;
 
     // 2. Anti-replay: check if this proposal has already been executed
     if (IsEscrowReleaseExecuted(evodb, proposalHash)) {
@@ -2852,17 +2846,8 @@ static void RedoEscrowReleaseRecord(const CTransaction& tx, const CCoinsViewCach
     if (consensus.nEscrowBurnHeight > 0 && nBlockHeight >= consensus.nEscrowBurnHeight && IsPureEscrowBurn(tx, view, consensus)) {
         return;
     }
-    static const std::vector<unsigned char> KRGN_MAGIC{'K', 'R', 'G', 'N'};
-    for (const auto& txout : tx.vout) {
-        if (txout.scriptPubKey.size() == 38 &&
-            txout.scriptPubKey[0] == OP_RETURN &&
-            txout.scriptPubKey[1] == 0x24 /* push 36 bytes */ &&
-            std::equal(KRGN_MAGIC.begin(), KRGN_MAGIC.end(), txout.scriptPubKey.begin() + 2)) {
-            uint256 proposalHash;
-            memcpy(proposalHash.begin(), txout.scriptPubKey.data() + 6, 32);
-            MarkEscrowReleaseExecuted(evodb, proposalHash, nBlockHeight);
-            return;
-        }
+    if (const auto proposalHash = GetEscrowReleaseProposal(tx)) {
+        MarkEscrowReleaseExecuted(evodb, *proposalHash, nBlockHeight);
     }
 }
 
