@@ -156,9 +156,6 @@ struct Params {
     int WithdrawalsHeight;
     /** Block height at which Sapling (zk-SNARK shielded transactions) becomes active */
     int SaplingHeight;
-    /** Block height at which SaplingDB consistency checks become hard rejections.
-     *  Below this height, mismatches are logged but tolerated (pre-v8 compat). */
-    int nSaplingStrictnessHeight{0};
     /** Block height at which Hivemind Protocol becomes active */
     int HMPHeight;
     /** 4-stage HMP bootstrap activation heights.

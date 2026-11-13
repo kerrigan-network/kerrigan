@@ -2294,24 +2294,18 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
     if (!fVerifyOnly &&
         sapling::IsSaplingActive(m_params.GetConsensus(), pindex->nHeight) &&
         !m_chain_helper->sapling_state->VerifyBestBlock(pindex->GetBlockHash())) {
-        // Tolerate SaplingDB being ahead of coin-state: after a crash where
-        // SaplingDB committed but CoinsTip did not, the rollback loop may
-        // disconnect blocks that SaplingDB already unwound past. UndoBlock
-        // handles this idempotently (mirrors connect-path fix).
-        int saplingHeight = m_chain_helper->sapling_state->GetBestBlockHeight();
-        if (saplingHeight <= pindex->nHeight) {
-            // Same consistency-drift class as the EvoDB check above.
-            // PARK-VS-EXIT: GUI parks (quarantine); headless goes DOWN via the
-            // original AbortNode semantics (non-zero exit).
-            const std::string detail = strprintf("SaplingDB best-block mismatch disconnecting %s (height %d, sapling height %d)",
-                                                 pindex->GetBlockHash().ToString(), pindex->nHeight, saplingHeight);
-            if (recovery::ParkOnFault()) {
-                recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_SAPLING_DISCONNECT, detail);
-            } else {
-                recovery::NoteHeadlessFaultShutdown("DRIFT_SAPLING (DisconnectBlock)", detail);
-            }
-            return DISCONNECT_FAILED;
+        // Same consistency-drift class as the EvoDB check above.
+        // PARK-VS-EXIT: GUI parks (quarantine); headless goes DOWN via the
+        // original AbortNode semantics (non-zero exit).
+        const std::string detail = strprintf("SaplingDB best-block mismatch disconnecting %s (height %d, sapling height %d)",
+                                             pindex->GetBlockHash().ToString(), pindex->nHeight,
+                                             m_chain_helper->sapling_state->GetBestBlockHeight());
+        if (recovery::ParkOnFault()) {
+            recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_SAPLING_DISCONNECT, detail);
+        } else {
+            recovery::NoteHeadlessFaultShutdown("DRIFT_SAPLING (DisconnectBlock)", detail);
         }
+        return DISCONNECT_FAILED;
     }
 
     auto start = Now<SteadyMilliseconds>();
@@ -3020,6 +3014,10 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     uint256 hashPrevBlock = pindex->pprev == nullptr ? uint256() : pindex->pprev->GetBlockHash();
     assert(hashPrevBlock == view.GetBestBlock());
 
+    // The Sapling state follows the active chainstate's tip: VerifyDB
+    // (fVerifyOnly) and a background chainstate (assumeutxo) leave it alone.
+    const bool fSapling = !fVerifyOnly && this == &m_chainman.ActiveChainstate();
+
     if (pindex->pprev) {
         bool fDIP0003Active = DeploymentActiveAt(*pindex, m_params.GetConsensus(), Consensus::DEPLOYMENT_DIP0003);
         if (fDIP0003Active && !m_evoDb.VerifyBestBlock(pindex->pprev->GetBlockHash())) {
@@ -3037,6 +3035,19 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 recovery::NoteHeadlessFaultShutdown("DRIFT_EVODB (ConnectBlock)", detail);
             }
             return state.Error("Found EvoDB inconsistency, node quarantined");
+        }
+        // Same for the Sapling state.
+        if (fSapling && sapling::IsSaplingActive(m_params.GetConsensus(), pindex->nHeight) &&
+            !m_chain_helper->sapling_state->VerifyBestBlock(pindex->pprev->GetBlockHash())) {
+            const std::string detail = strprintf("SaplingDB best-block mismatch connecting %s (height %d, sapling height %d)",
+                                                 pindex->GetBlockHash().ToString(), pindex->nHeight,
+                                                 m_chain_helper->sapling_state->GetBestBlockHeight());
+            if (recovery::ParkOnFault()) {
+                recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_SAPLING_CONNECT, detail);
+            } else {
+                recovery::NoteHeadlessFaultShutdown("DRIFT_SAPLING (ConnectBlock)", detail);
+            }
+            return state.Error("Found SaplingDB inconsistency, node quarantined");
         }
     }
     nBlocksTotal++;
@@ -3163,7 +3174,8 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
     std::optional<MNListUpdates> mnlist_updates_opt{std::nullopt};
-    if (!m_chain_helper->special_tx->ProcessSpecialTxsInBlock(block, pindex, view, fJustCheck, fScriptChecks, state, mnlist_updates_opt, fVerifyOnly)) {
+    // Its fVerifyOnly only skips the Sapling state.
+    if (!m_chain_helper->special_tx->ProcessSpecialTxsInBlock(block, pindex, view, fJustCheck, fScriptChecks, state, mnlist_updates_opt, /*fVerifyOnly=*/!fSapling)) {
         return error("ConnectBlock(KRGN): ProcessSpecialTxsInBlock for block %s failed with %s",
                      pindex->GetBlockHash().ToString(), state.ToString());
     }
@@ -4109,9 +4121,9 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // Commit deferred Sapling state (nullifiers, tree roots, best block).
     // This must happen after all validation checks pass to avoid persisting
     // state for blocks that fail masternode/superblock checks.
-    // Skip during VerifyDB; no pending batch was built (Sapling processing
-    // was skipped via fVerifyOnly), but guard against the VerifyDB code path.
-    if (!fVerifyOnly) {
+    // Skip when no pending batch was built (Sapling processing was skipped
+    // via fSapling), but guard against those code paths.
+    if (fSapling) {
         if (!m_chain_helper->sapling_state->CommitBlock()) {
             return AbortNode(state, "Failed to commit Sapling state");
         }
@@ -7056,28 +7068,10 @@ bool CChainState::ReplayBlocks()
         if (fDIP0003Active && !m_evoDb.VerifyBestBlock(pindexOld->GetBlockHash())) {
             return error("ReplayBlocks(KRGN): Found EvoDB inconsistency");
         }
-        // Verify SaplingDB consistency for blocks at or after Sapling activation.
-        // Tolerate Sapling-ahead state: if a prior crash occurred after Sapling commits
-        // but before the final coin-state flush, SaplingDB's best block may be ahead
-        // of the coin-state. This is safe because ProcessBlock is idempotent and
-        // skips blocks already committed to SaplingDB.
+        // ReconcileSaplingState brought the Sapling state to the old tip.
         if (sapling::IsSaplingActive(m_params.GetConsensus(), pindexOld->nHeight) &&
             !m_chain_helper->sapling_state->VerifyBestBlock(pindexOld->GetBlockHash())) {
-            // Check if SaplingDB is at a block between pindexFork and pindexNew (ahead but valid)
-            uint256 saplingBest = m_chain_helper->sapling_state->GetBestBlock();
-            bool saplingAhead = false;
-            if (!saplingBest.IsNull() && m_blockman.m_block_index.count(saplingBest)) {
-                const CBlockIndex* pSaplingBest = &m_blockman.m_block_index[saplingBest];
-                if (pSaplingBest->nHeight > pindexOld->nHeight && pSaplingBest->nHeight <= pindexNew->nHeight) {
-                    saplingAhead = true;
-                    LogPrintf("ReplayBlocks(): SaplingDB ahead at height %d (coin-state at %d), "
-                              "will skip already-committed blocks\n",
-                              pSaplingBest->nHeight, pindexOld->nHeight);
-                }
-            }
-            if (!saplingAhead) {
-                return error("ReplayBlocks(): Found SaplingDB inconsistency, reindex required");
-            }
+            return error("ReplayBlocks(): Found SaplingDB inconsistency, reindex required");
         }
     }
 

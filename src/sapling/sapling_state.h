@@ -171,7 +171,8 @@ public:
     /**
      * Process all Sapling transactions in a block.
      *
-     * Called from ProcessSpecialTxsInBlock (before UTXO updates).
+     * Called from ProcessSpecialTxsInBlock (before UTXO updates), with the
+     * state at pindex->pprev (ConnectBlock checks it).
      *  1. Extract nullifiers from all Sapling txs
      *  2. Check for double-spends (against DB + within block)
      *  3. Build DB batch (nullifiers, tree root, frontier, best block)

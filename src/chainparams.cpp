@@ -231,7 +231,6 @@ public:
         consensus.MN_RRHeight = 2100000000; // Effectively never (no MN reward reallocation in Kerrigan)
         consensus.WithdrawalsHeight = 2100000000; // Effectively never
         consensus.SaplingHeight = 500; // Sapling activates after ~16 hours of mining (500 blocks * 120s)
-        consensus.nSaplingStrictnessHeight = 15500; // Tolerate pre-v8 SaplingDB mismatches below this height
         consensus.HMPHeight = 100; // Hivemind HMP Stage 2 (commitments) at block 100
         // 4-stage HMP bootstrap:
         // Stage 1 (< 100): Pure PoW, no HMP processing (pre-activation)
@@ -846,7 +845,6 @@ public:
         consensus.MN_RRHeight = 2100000000;
         consensus.WithdrawalsHeight = 2100000000;
         consensus.SaplingHeight = 100; // Sapling active early on testnet
-        consensus.nSaplingStrictnessHeight = 15500;
         consensus.HMPHeight = 20; // Hivemind HMP Stage 2 at block 20
         // 4-stage HMP bootstrap:
         consensus.nHMPStage2Height = 20;   // commitments open (faster for testing)
@@ -1087,7 +1085,6 @@ public:
         consensus.MN_RRHeight = 2;   // MN_RR activated immediately on devnet
         consensus.WithdrawalsHeight = 2;   // withdrawals activated immediately on devnet
         consensus.SaplingHeight = 2;       // Sapling activated immediately on devnet
-        consensus.nSaplingStrictnessHeight = 0; // Strict from genesis on devnet
         consensus.HMPHeight = 2;            // Hivemind HMP Stage 2 at block 2
         // 4-stage HMP bootstrap:
         consensus.nHMPStage2Height = 2;    // commitments open early on devnet
@@ -1379,7 +1376,6 @@ public:
         consensus.MN_RRHeight = consensus.V20Height; // MN_RR does not really have effect before v20 activation
         consensus.WithdrawalsHeight = 600;
         consensus.SaplingHeight = 0; // Sapling active from genesis on regtest
-        consensus.nSaplingStrictnessHeight = 0; // Strict from genesis on regtest
         consensus.HMPHeight = 0;    // Hivemind HMP active from genesis on regtest
         // 4-stage HMP bootstrap: all active immediately for unit tests
         consensus.nHMPStage2Height = 0;

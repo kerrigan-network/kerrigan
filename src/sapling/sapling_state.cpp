@@ -292,18 +292,6 @@ bool CSaplingState::ProcessBlock(const CBlock& block, const CBlockIndex* pindex,
         return true;
     }
 
-    // Idempotency: if SaplingDB already committed this block or a later one
-    // (crash after SaplingDB flush but before CoinsTip flush), skip processing.
-    // This allows ReplayBlocks rollforward to succeed without reindex.
-    {
-        LOCK(cs);
-        if (m_lastFrontierHeight >= pindex->nHeight) {
-            LogPrintf("CSaplingState::ProcessBlock: skipping block %d (SaplingDB at height %d)\n",
-                      pindex->nHeight, m_lastFrontierHeight);
-            return true;
-        }
-    }
-
     // Discard any stale pending batch from a previous failed ConnectBlock.
     {
         LOCK(cs);
