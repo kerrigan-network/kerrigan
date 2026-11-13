@@ -8,6 +8,8 @@
 - Stop the node and restart it with -reindex. Verify that the node has reindexed up to block 3.
 - Stop the node and restart it with -reindex-chainstate. Verify that the node has reindexed up to block 3.
 - Verify that out-of-order blocks are correctly processed, see LoadExternalBlockFile()
+- Restart it with -reindex and BIP34 active from the genesis block, as on mainnet and testnet.
+  Verify that the node accepts the genesis block and reindexes up to the tip.
 """
 
 import os
@@ -74,6 +76,14 @@ class ReindexTest(BitcoinTestFramework):
         # All blocks should be accepted and processed.
         assert_equal(self.nodes[0].getblockcount(), 24)
 
+    # Mainnet and testnet set BIP34Height=0, so the coinbase height rule applies from the genesis
+    # block on. -reindex checks the genesis block like any other block, and its coinbase has no height.
+    def bip34_at_genesis(self):
+        blockcount = self.nodes[0].getblockcount()
+        with self.nodes[0].assert_debug_log(expected_msgs=[], unexpected_msgs=['bad-cb-height']):
+            self.restart_node(0, extra_args=["-reindex", "-testactivationheight=bip34@0"])
+        assert_equal(self.nodes[0].getblockcount(), blockcount)
+
     def run_test(self):
         for txindex in [0, 1]:
             self.reindex(False, txindex)
@@ -82,6 +92,7 @@ class ReindexTest(BitcoinTestFramework):
             self.reindex(True, txindex)
 
         self.out_of_order()
+        self.bip34_at_genesis()
 
 
 if __name__ == '__main__':

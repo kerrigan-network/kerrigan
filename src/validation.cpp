@@ -5852,7 +5852,9 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     // Enforce rule that the coinbase starts with serialized block height
     // After DIP3/DIP4 activation, we don't enforce the height in the input script anymore.
     // The CbTx special transaction payload will then contain the height, which is checked in CheckCbTx
-    if (DeploymentActiveAfter(pindexPrev, chainman.GetConsensus(), Consensus::DEPLOYMENT_HEIGHTINCB) && !fDIP0003Active_context)
+    // Guard: pindexPrev is null only for the genesis block, which -reindex checks here. BIP34Height=0
+    // makes DeploymentActiveAfter(nullptr) return true, but the genesis coinbase predates the rule.
+    if (pindexPrev != nullptr && DeploymentActiveAfter(pindexPrev, chainman.GetConsensus(), Consensus::DEPLOYMENT_HEIGHTINCB) && !fDIP0003Active_context)
     {
         CScript expect = CScript() << nHeight;
         if (block.vtx[0]->vin[0].scriptSig.size() < expect.size() ||
