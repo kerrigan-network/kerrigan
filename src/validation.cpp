@@ -83,6 +83,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <deque>
 #include <numeric>
 #include <optional>
@@ -2236,6 +2237,23 @@ int ApplyTxInUndo(Coin&& undo, CCoinsViewCache& view, const COutPoint& out)
     return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
 }
 
+/** The governance proposal an escrow release names: the hash in its first
+ *  OP_RETURN output that pushes "KRGN" and the hash (36 bytes). */
+static std::optional<uint256> GetEscrowReleaseProposal(const CTransaction& tx)
+{
+    static constexpr unsigned char KRGN_MAGIC[]{'K', 'R', 'G', 'N'};
+    for (const auto& txout : tx.vout) {
+        const CScript& script = txout.scriptPubKey;
+        if (script.size() == 38 && script[0] == OP_RETURN && script[1] == 0x24 /* push 36 bytes */ &&
+            std::equal(std::begin(KRGN_MAGIC), std::end(KRGN_MAGIC), script.begin() + 2)) {
+            uint256 proposalHash;
+            memcpy(proposalHash.begin(), script.data() + 6, 32);
+            return proposalHash;
+        }
+    }
+    return std::nullopt;
+}
+
 /** Undo the effects of this block (with given index) on the UTXO set represented by coins.
  *  When FAILED is returned, view is left in an indeterminate state. */
 DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view, bool fVerifyOnly)
@@ -2276,24 +2294,18 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
     if (!fVerifyOnly &&
         sapling::IsSaplingActive(m_params.GetConsensus(), pindex->nHeight) &&
         !m_chain_helper->sapling_state->VerifyBestBlock(pindex->GetBlockHash())) {
-        // Tolerate SaplingDB being ahead of coin-state: after a crash where
-        // SaplingDB committed but CoinsTip did not, the rollback loop may
-        // disconnect blocks that SaplingDB already unwound past. UndoBlock
-        // handles this idempotently (mirrors connect-path fix).
-        int saplingHeight = m_chain_helper->sapling_state->GetBestBlockHeight();
-        if (saplingHeight <= pindex->nHeight) {
-            // Same consistency-drift class as the EvoDB check above.
-            // PARK-VS-EXIT: GUI parks (quarantine); headless goes DOWN via the
-            // original AbortNode semantics (non-zero exit).
-            const std::string detail = strprintf("SaplingDB best-block mismatch disconnecting %s (height %d, sapling height %d)",
-                                                 pindex->GetBlockHash().ToString(), pindex->nHeight, saplingHeight);
-            if (recovery::ParkOnFault()) {
-                recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_SAPLING_DISCONNECT, detail);
-            } else {
-                recovery::NoteHeadlessFaultShutdown("DRIFT_SAPLING (DisconnectBlock)", detail);
-            }
-            return DISCONNECT_FAILED;
+        // Same consistency-drift class as the EvoDB check above.
+        // PARK-VS-EXIT: GUI parks (quarantine); headless goes DOWN via the
+        // original AbortNode semantics (non-zero exit).
+        const std::string detail = strprintf("SaplingDB best-block mismatch disconnecting %s (height %d, sapling height %d)",
+                                             pindex->GetBlockHash().ToString(), pindex->nHeight,
+                                             m_chain_helper->sapling_state->GetBestBlockHeight());
+        if (recovery::ParkOnFault()) {
+            recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_SAPLING_DISCONNECT, detail);
+        } else {
+            recovery::NoteHeadlessFaultShutdown("DRIFT_SAPLING (DisconnectBlock)", detail);
         }
+        return DISCONNECT_FAILED;
     }
 
     auto start = Now<SteadyMilliseconds>();
@@ -2415,21 +2427,13 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
             // At this point, all of txundo.vprevout should have been moved out.
         }
 
-        // Undo escrow release execution records
-        static const std::vector<unsigned char> KRGN_MAGIC{'K', 'R', 'G', 'N'};
-        for (const auto& txout : tx.vout) {
-            if (txout.scriptPubKey.size() == 38 &&
-                txout.scriptPubKey[0] == OP_RETURN &&
-                txout.scriptPubKey[1] == 0x24 &&
-                std::equal(KRGN_MAGIC.begin(), KRGN_MAGIC.end(), txout.scriptPubKey.begin() + 2))
-            {
-                uint256 proposalHash;
-                memcpy(proposalHash.begin(), txout.scriptPubKey.data() + 6, 32);
-                UnmarkEscrowReleaseExecuted(m_evoDb, proposalHash);
-                LogPrintf("%s: undoing escrow release execution %s at height %d\n",
-                          __func__, proposalHash.ToString(), pindex->nHeight);
-                break;
-            }
+        // Undo escrow release execution records. Only the record this block
+        // wrote: the marker alone does not make a release, and a record
+        // erased for another block's release would let it run again.
+        if (const auto proposalHash = GetEscrowReleaseProposal(tx);
+            proposalHash && UnmarkEscrowReleaseExecuted(m_evoDb, *proposalHash, pindex->nHeight)) {
+            LogPrintf("%s: undoing escrow release execution %s at height %d\n",
+                      __func__, proposalHash->ToString(), pindex->nHeight);
         }
     }
 
@@ -2696,26 +2700,14 @@ static bool CheckGovernanceEscrowSpend(
     }
 
     // 1. Find OP_RETURN output with "KRGN" + 32-byte governance proposal hash
-    static const std::vector<unsigned char> KRGN_MAGIC{'K', 'R', 'G', 'N'};
-    uint256 proposalHash;
-    bool foundMarker = false;
-    for (const auto& txout : tx.vout) {
-        if (txout.scriptPubKey.size() == 38 &&
-            txout.scriptPubKey[0] == OP_RETURN &&
-            txout.scriptPubKey[1] == 0x24 /* push 36 bytes */ &&
-            std::equal(KRGN_MAGIC.begin(), KRGN_MAGIC.end(), txout.scriptPubKey.begin() + 2))
-        {
-            memcpy(proposalHash.begin(), txout.scriptPubKey.data() + 6, 32);
-            foundMarker = true;
-            break;
-        }
-    }
-    if (!foundMarker) {
+    const std::optional<uint256> marker = GetEscrowReleaseProposal(tx);
+    if (!marker) {
         LogPrintf("ERROR: %s: tx %s spends escrow without governance reference\n",
                   __func__, tx.GetHash().ToString());
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
             "bad-escrow-no-proposal", "escrow spend missing OP_RETURN governance proposal reference");
     }
+    const uint256& proposalHash = *marker;
 
     // 2. Anti-replay: check if this proposal has already been executed
     if (IsEscrowReleaseExecuted(evodb, proposalHash)) {
@@ -2830,6 +2822,27 @@ static bool CheckGovernanceEscrowSpend(
               __func__, proposalHash.ToString(), nBlockHeight,
               FormatMoney(approvedAmount), strAddress);
     return true;
+}
+
+/** Write again the anti-replay record of an escrow release in a block that
+ *  ConnectBlock accepted, for RollforwardBlock: the same transactions as
+ *  ConnectBlock passes to CheckGovernanceEscrowSpend, which marked them.
+ *  view holds the coins as they were before tx. */
+static void RedoEscrowReleaseRecord(const CTransaction& tx, const CCoinsViewCache& view, int nBlockHeight,
+                                    const Consensus::Params& consensus, CEvoDB& evodb)
+{
+    const bool spends_escrow = std::any_of(tx.vin.begin(), tx.vin.end(), [&](const CTxIn& txin) {
+        const Coin& coin = view.AccessCoin(txin.prevout);
+        return !coin.IsSpent() && consensus.IsGrowthEscrowScript(std::vector<unsigned char>(coin.out.scriptPubKey.begin(),
+                                                                                            coin.out.scriptPubKey.end()));
+    });
+    if (!spends_escrow) return;
+    if (consensus.nEscrowBurnHeight > 0 && nBlockHeight >= consensus.nEscrowBurnHeight && IsPureEscrowBurn(tx, view, consensus)) {
+        return;
+    }
+    if (const auto proposalHash = GetEscrowReleaseProposal(tx)) {
+        MarkEscrowReleaseExecuted(evodb, *proposalHash, nBlockHeight);
+    }
 }
 
 // ===========================================================================
@@ -3001,6 +3014,10 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     uint256 hashPrevBlock = pindex->pprev == nullptr ? uint256() : pindex->pprev->GetBlockHash();
     assert(hashPrevBlock == view.GetBestBlock());
 
+    // The Sapling state follows the active chainstate's tip: VerifyDB
+    // (fVerifyOnly) and a background chainstate (assumeutxo) leave it alone.
+    const bool fSapling = !fVerifyOnly && this == &m_chainman.ActiveChainstate();
+
     if (pindex->pprev) {
         bool fDIP0003Active = DeploymentActiveAt(*pindex, m_params.GetConsensus(), Consensus::DEPLOYMENT_DIP0003);
         if (fDIP0003Active && !m_evoDb.VerifyBestBlock(pindex->pprev->GetBlockHash())) {
@@ -3018,6 +3035,19 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
                 recovery::NoteHeadlessFaultShutdown("DRIFT_EVODB (ConnectBlock)", detail);
             }
             return state.Error("Found EvoDB inconsistency, node quarantined");
+        }
+        // Same for the Sapling state.
+        if (fSapling && sapling::IsSaplingActive(m_params.GetConsensus(), pindex->nHeight) &&
+            !m_chain_helper->sapling_state->VerifyBestBlock(pindex->pprev->GetBlockHash())) {
+            const std::string detail = strprintf("SaplingDB best-block mismatch connecting %s (height %d, sapling height %d)",
+                                                 pindex->GetBlockHash().ToString(), pindex->nHeight,
+                                                 m_chain_helper->sapling_state->GetBestBlockHeight());
+            if (recovery::ParkOnFault()) {
+                recovery::EnterQuarantine(recovery::QuarantineReason::DRIFT_SAPLING_CONNECT, detail);
+            } else {
+                recovery::NoteHeadlessFaultShutdown("DRIFT_SAPLING (ConnectBlock)", detail);
+            }
+            return state.Error("Found SaplingDB inconsistency, node quarantined");
         }
     }
     nBlocksTotal++;
@@ -3144,7 +3174,8 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
     // MUST process special txes before updating UTXO to ensure consistency between mempool and block processing
     std::optional<MNListUpdates> mnlist_updates_opt{std::nullopt};
-    if (!m_chain_helper->special_tx->ProcessSpecialTxsInBlock(block, pindex, view, fJustCheck, fScriptChecks, state, mnlist_updates_opt, fVerifyOnly)) {
+    // Its fVerifyOnly only skips the Sapling state.
+    if (!m_chain_helper->special_tx->ProcessSpecialTxsInBlock(block, pindex, view, fJustCheck, fScriptChecks, state, mnlist_updates_opt, /*fVerifyOnly=*/!fSapling)) {
         return error("ConnectBlock(KRGN): ProcessSpecialTxsInBlock for block %s failed with %s",
                      pindex->GetBlockHash().ToString(), state.ToString());
     }
@@ -4090,9 +4121,9 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // Commit deferred Sapling state (nullifiers, tree roots, best block).
     // This must happen after all validation checks pass to avoid persisting
     // state for blocks that fail masternode/superblock checks.
-    // Skip during VerifyDB; no pending batch was built (Sapling processing
-    // was skipped via fVerifyOnly), but guard against the VerifyDB code path.
-    if (!fVerifyOnly) {
+    // Skip when no pending batch was built (Sapling processing was skipped
+    // via fSapling), but guard against those code paths.
+    if (fSapling) {
         if (!m_chain_helper->sapling_state->CommitBlock()) {
             return AbortNode(state, "Failed to commit Sapling state");
         }
@@ -4276,6 +4307,14 @@ bool CChainState::FlushStateToDisk(
                 // Flush the chainstate (which may refer to block index entries).
                 if (!CoinsTip().Flush())
                     return AbortNode(state, "Failed to write to coin database");
+            }
+            if (m_params.IsMockableChain()) {
+                // Test only: stop between the two writes, as a kill or a full disk can.
+                const int64_t crash_at{gArgs.GetIntArg("-crashbeforeevodbflush", -1)};
+                if (crash_at >= 0 && m_chain.Height() >= crash_at) {
+                    LogPrintf("Simulating a crash between the coins and EvoDB writes. Goodbye.\n");
+                    std::_Exit(0);
+                }
             }
             {
                 LOG_TIME_SECONDS("write evodb cache to disk");
@@ -5813,7 +5852,9 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     // Enforce rule that the coinbase starts with serialized block height
     // After DIP3/DIP4 activation, we don't enforce the height in the input script anymore.
     // The CbTx special transaction payload will then contain the height, which is checked in CheckCbTx
-    if (DeploymentActiveAfter(pindexPrev, chainman.GetConsensus(), Consensus::DEPLOYMENT_HEIGHTINCB) && !fDIP0003Active_context)
+    // Guard: pindexPrev is null only for the genesis block, which -reindex checks here. BIP34Height=0
+    // makes DeploymentActiveAfter(nullptr) return true, but the genesis coinbase predates the rule.
+    if (pindexPrev != nullptr && DeploymentActiveAfter(pindexPrev, chainman.GetConsensus(), Consensus::DEPLOYMENT_HEIGHTINCB) && !fDIP0003Active_context)
     {
         CScript expect = CScript() << nHeight;
         if (block.vtx[0]->vin[0].scriptSig.size() < expect.size() ||
@@ -6606,6 +6647,8 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
                 }
             }
 
+            RedoEscrowReleaseRecord(*tx, inputs, pindex->nHeight, m_params.GetConsensus(), m_evoDb);
+
             for (const CTxIn &txin : tx->vin) {
                 inputs.SpendCoin(txin.prevout);
             }
@@ -6794,6 +6837,205 @@ bool CChainState::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& i
     return true;
 }
 
+bool CChainState::ReconcileEvoDB()
+{
+    AssertLockHeld(cs_main);
+
+    // A coins flush that was itself interrupted is marked already, and
+    // ReplayBlocks checks EvoDB against the block that flush started from.
+    if (!CoinsDB().GetHeadBlocks().empty()) return true;
+    const uint256 coins_hash = CoinsDB().GetBestBlock();
+    uint256 evo_hash;
+    if (coins_hash.IsNull() || !m_evoDb.Read(EVODB_BEST_BLOCK, evo_hash) || evo_hash == coins_hash) return true;
+
+    const CBlockIndex* coins_tip = m_blockman.LookupBlockIndex(coins_hash);
+    const CBlockIndex* evo_tip = m_blockman.LookupBlockIndex(evo_hash);
+    // A stop between the two writes of a flush leaves EvoDB at the block of
+    // an earlier flush: behind the coins, or on a branch a reorg left since.
+    // A stop after EvoDB was committed alone leaves it ahead of the coins,
+    // on blocks that may have been invalidated since. EvoDB's blocks were
+    // connected once, so their undo data undoes them either way.
+    if (!coins_tip || !evo_tip) return true; // left to the startup checks
+    const CBlockIndex* fork = LastCommonAncestor(coins_tip, evo_tip);
+
+    LogPrintf("EvoDB is at %s (height %d) but the coins at %s (height %d), after a stop between their writes\n",
+              evo_hash.ToString(), evo_tip->nHeight, coins_hash.ToString(), coins_tip->nHeight);
+
+    // ReplayBlocks undoes both tips' blocks down to the fork (EvoDB's with
+    // EvoDB, the coins' in the coins alone) and connects the coins' blocks
+    // from there. With EvoDB ahead, the fork is the coins' block: it only
+    // undoes EvoDB's.
+    for (const CBlockIndex* tip : {evo_tip, coins_tip}) {
+        for (const CBlockIndex* p = tip; p != fork; p = p->pprev) {
+            if (!(p->nStatus & BLOCK_HAVE_DATA) || !(p->nStatus & BLOCK_HAVE_UNDO)) {
+                LogPrintf("EvoDB: block %s (height %d) is not on disk, cannot replay\n", p->GetBlockHash().ToString(), p->nHeight);
+                return true;
+            }
+        }
+    }
+
+    if (!CoinsDB().MarkFlushInterrupted(coins_hash, evo_hash)) {
+        return error("%s: failed to mark the coins database for a replay", __func__);
+    }
+    LogPrintf("EvoDB: replaying with the coins: undoing %d of its blocks above height %d, connecting %d of the coins'\n",
+              evo_tip->nHeight - fork->nHeight, fork->nHeight, coins_tip->nHeight - fork->nHeight);
+    return true;
+}
+
+bool CChainState::ReconcileSaplingState(const std::function<bool()>& shutdown_requested)
+{
+    AssertLockHeld(cs_main);
+    if (!m_chain_helper || !m_chain_helper->sapling_state) return true;
+    sapling::CSaplingState& sapling = *m_chain_helper->sapling_state;
+    const Consensus::Params& consensus = m_params.GetConsensus();
+
+    // The block the coins hold. After an interrupted flush they are between
+    // two blocks, and ReplayBlocks rolls them, Sapling included, from the old
+    // one, so that is the one the Sapling state must hold.
+    const std::vector<uint256> heads = CoinsDB().GetHeadBlocks();
+    if (!heads.empty() && heads.size() != 2) return true; // ReplayBlocks reports it
+    const uint256 coins_hash = heads.empty() ? CoinsDB().GetBestBlock() : heads[1];
+    const CBlockIndex* coins_tip{nullptr};
+    if (!coins_hash.IsNull()) {
+        coins_tip = m_blockman.LookupBlockIndex(coins_hash);
+        if (!coins_tip) return true; // ReplayBlocks or LoadChainTip report it
+    }
+
+    // The genesis block never reaches ProcessBlock: the state must hold the
+    // coins tip if a Sapling-active block was connected up to it, and be
+    // empty otherwise.
+    const int first_height = std::max(consensus.SaplingHeight, 1);
+    const CBlockIndex* want = (coins_tip && coins_tip->nHeight >= first_height) ? coins_tip : nullptr;
+    const uint256 best = sapling.GetBestBlock();
+    const int best_height = sapling.GetBestBlockHeight();
+
+    // The per-block records an older build left (it neither writes nor
+    // erases them) may name blocks it undid; drop them before relying on
+    // any, so that every record names the state's block at its height.
+    if (!sapling.HasTrustedBlockMeta() && !sapling.ResetBlockMeta()) {
+        return error("%s: failed to reset the Sapling per-block records", __func__);
+    }
+
+    if (want ? best == want->GetBlockHash() : (best.IsNull() && best_height < 0)) {
+        return true;
+    }
+    LogPrintf("Sapling state is at %s (height %d) but the coins at %s (height %d), after an unclean stop "
+              "or a failed write; reconciling\n",
+              best.ToString(), best_height, coins_hash.ToString(), coins_tip ? coins_tip->nHeight : -1);
+
+    // 1. The highest height whose state belongs to want's chain, from the
+    //    per-block records, then drop everything above it (nothing, when the
+    //    state is at want's ancestor, as after an interrupted rebuild).
+    //    Records exist for the blocks this build connected; below them (an
+    //    older build connected those blocks) the search stops.
+    int keep{-1};
+    const int search_top = want ? std::min(want->nHeight, best_height) : -1;
+    for (int h = search_top; h >= first_height; --h) {
+        sapling::CSaplingState::BlockMeta meta;
+        if (!sapling.GetBlockMeta(h, meta)) break;
+        if (meta.hash == want->GetAncestor(h)->GetBlockHash()) {
+            keep = h;
+            break;
+        }
+    }
+    if (keep >= 0 && keep < best_height && !sapling.RollbackToHeight(keep)) {
+        return error("%s: failed to roll the Sapling state back to height %d", __func__, keep);
+    }
+
+    // 2. Otherwise (no shared block, or a state an older build wrote) start over.
+    if (keep < 0) {
+        LogPrintf("Rebuilding Sapling state from the block files, up to height %d\n", want ? want->nHeight : 0);
+        sapling.Wipe();
+    }
+
+    // 3. Roll forward along want's chain from the block files.
+    if (want) {
+        const int from = keep < 0 ? first_height : keep + 1;
+        const int stop_at = m_params.IsMockableChain() ? gArgs.GetIntArg("-stopsaplingreplayat", -1) : -1;
+        int last_percent{-1};
+        for (int h = from; h <= want->nHeight; ++h) {
+            if (h == stop_at) {
+                LogPrintf("Sapling rebuild stopped for testing at height %d\n", h);
+                return false;
+            }
+            if ((h - from) % 1000 == 999 && shutdown_requested && shutdown_requested()) {
+                LogPrintf("Sapling rebuild interrupted at height %d; the next start continues it\n", h);
+                return false;
+            }
+            const CBlockIndex* pindex = want->GetAncestor(h);
+            CBlock block;
+            if (!ReadBlockFromDisk(block, pindex, consensus)) {
+                return error("%s: cannot read block %s (height %d) to rebuild the Sapling state",
+                             __func__, pindex->GetBlockHash().ToString(), h);
+            }
+            if (!sapling.ProcessBlock(block, pindex, consensus, /*fJustCheck=*/false) ||
+                !sapling.CommitBlock(/*fSync=*/h == want->nHeight)) {
+                return error("%s: the Sapling state rejected block %s (height %d) while being rebuilt",
+                             __func__, pindex->GetBlockHash().ToString(), h);
+            }
+            const int percent = want->nHeight > from ? (h - from) * 100 / (want->nHeight - from) : 100;
+            if (percent != last_percent) {
+                last_percent = percent;
+                uiInterface.ShowProgress(_("Rebuilding Sapling state…").translated, percent, false);
+                if (percent % 10 == 0) {
+                    LogPrintf("Rolling Sapling state forward: height %d of %d\n", h, want->nHeight);
+                }
+            }
+        }
+        uiInterface.ShowProgress("", 100, false);
+    }
+
+    const uint256 now = sapling.GetBestBlock();
+    if (want ? now != want->GetBlockHash() : !now.IsNull()) {
+        return error("%s: the Sapling state is at %s after reconciling, not at the coins tip %s",
+                     __func__, now.ToString(), coins_hash.ToString());
+    }
+    LogPrintf("Reconciled Sapling state with the coins at %s (height %d), value pool %s\n",
+              coins_hash.ToString(), coins_tip ? coins_tip->nHeight : -1, FormatMoney(sapling.GetValuePool()));
+    return true;
+}
+
+/** Undo the effects of a block on the coins alone, as DisconnectBlock does,
+ *  for ReplayBlocks; EvoDB, the Sapling state and the indexes are left as
+ *  they are. */
+static DisconnectResult DisconnectBlockCoins(const CBlock& block, const CBlockIndex* pindex, CCoinsViewCache& view)
+{
+    CBlockUndo blockUndo;
+    if (!UndoReadFromDisk(blockUndo, pindex)) {
+        error("%s: failure reading undo data", __func__);
+        return DISCONNECT_FAILED;
+    }
+    if (blockUndo.vtxundo.size() + 1 != block.vtx.size()) {
+        error("%s: block and undo data inconsistent", __func__);
+        return DISCONNECT_FAILED;
+    }
+
+    bool fClean = true;
+    for (int i = block.vtx.size() - 1; i >= 0; i--) {
+        const CTransaction& tx = *block.vtx[i];
+        for (size_t o = 0; o < tx.vout.size(); o++) {
+            if (!tx.vout[o].scriptPubKey.IsUnspendable()) {
+                fClean = view.SpendCoin(COutPoint(tx.GetHash(), o)) && fClean;
+            }
+        }
+        if (i > 0) { // not coinbases
+            CTxUndo& txundo = blockUndo.vtxundo[i - 1];
+            if (txundo.vprevout.size() != tx.vin.size()) {
+                error("%s: transaction and undo data inconsistent", __func__);
+                return DISCONNECT_FAILED;
+            }
+            for (unsigned int j = tx.vin.size(); j > 0;) {
+                --j;
+                const int res = ApplyTxInUndo(std::move(txundo.vprevout[j]), view, tx.vin[j].prevout);
+                if (res == DISCONNECT_FAILED) return DISCONNECT_FAILED;
+                fClean = fClean && res != DISCONNECT_UNCLEAN;
+            }
+        }
+    }
+    view.SetBestBlock(pindex->pprev->GetBlockHash());
+    return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
+}
+
 bool CChainState::ReplayBlocks()
 {
     LOCK(cs_main);
@@ -6828,32 +7070,38 @@ bool CChainState::ReplayBlocks()
         if (fDIP0003Active && !m_evoDb.VerifyBestBlock(pindexOld->GetBlockHash())) {
             return error("ReplayBlocks(KRGN): Found EvoDB inconsistency");
         }
-        // Verify SaplingDB consistency for blocks at or after Sapling activation.
-        // Tolerate Sapling-ahead state: if a prior crash occurred after Sapling commits
-        // but before the final coin-state flush, SaplingDB's best block may be ahead
-        // of the coin-state. This is safe because ProcessBlock is idempotent and
-        // skips blocks already committed to SaplingDB.
+        // ReconcileSaplingState brought the Sapling state to the old tip.
         if (sapling::IsSaplingActive(m_params.GetConsensus(), pindexOld->nHeight) &&
             !m_chain_helper->sapling_state->VerifyBestBlock(pindexOld->GetBlockHash())) {
-            // Check if SaplingDB is at a block between pindexFork and pindexNew (ahead but valid)
-            uint256 saplingBest = m_chain_helper->sapling_state->GetBestBlock();
-            bool saplingAhead = false;
-            if (!saplingBest.IsNull() && m_blockman.m_block_index.count(saplingBest)) {
-                const CBlockIndex* pSaplingBest = &m_blockman.m_block_index[saplingBest];
-                if (pSaplingBest->nHeight > pindexOld->nHeight && pSaplingBest->nHeight <= pindexNew->nHeight) {
-                    saplingAhead = true;
-                    LogPrintf("ReplayBlocks(): SaplingDB ahead at height %d (coin-state at %d), "
-                              "will skip already-committed blocks\n",
-                              pSaplingBest->nHeight, pindexOld->nHeight);
-                }
-            }
-            if (!saplingAhead) {
-                return error("ReplayBlocks(): Found SaplingDB inconsistency, reindex required");
-            }
+            return error("ReplayBlocks(): Found SaplingDB inconsistency, reindex required");
         }
     }
 
+    // Special transactions are checked with the BLS scheme of their block,
+    // which switches at V19 activation. At startup it is still the default
+    // until the chain tip sets it, after this, so set it for the old tip;
+    // rolling back and forward switch it as DisconnectBlock and ConnectBlock do.
+    bls::bls_legacy_scheme.store(!DeploymentActiveAfter(pindexOld, m_params.GetConsensus(), Consensus::DEPLOYMENT_V19));
+
     auto dbTx = m_evoDb.BeginTransaction();
+
+    // Rolling forward checks each block's special transactions, and builds
+    // the indexes, against the coins as they were before it. The coins hold
+    // the new tip, or a mix of both tips after an interrupted flush, so take
+    // them back along the new branch first. Like the steps below, undoing a
+    // block is idempotent, so the result does not depend on that mix.
+    if (pindexNew != pindexFork && pindexNew->nHeight > 0) {
+        LogPrintf("Taking the coins back from height %d to %d\n", pindexNew->nHeight, pindexFork ? pindexFork->nHeight : 0);
+    }
+    for (const CBlockIndex* pindex = pindexNew; pindex != pindexFork && pindex->nHeight > 0; pindex = pindex->pprev) {
+        CBlock block;
+        if (!ReadBlockFromDisk(block, pindex, m_params.GetConsensus())) {
+            return error("ReplayBlocks(): ReadBlockFromDisk() failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
+        }
+        if (DisconnectBlockCoins(block, pindex, cache) == DISCONNECT_FAILED) {
+            return error("ReplayBlocks(): failed to undo the coins of block %s (height %d)", pindex->GetBlockHash().ToString(), pindex->nHeight);
+        }
+    }
 
     // Rollback along the old branch.
     while (pindexOld != pindexFork) {

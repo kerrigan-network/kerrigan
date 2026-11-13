@@ -981,6 +981,8 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-limitdescendantsize=<n>", strprintf("Do not accept transactions if any ancestor would have more than <n> kilobytes of in-mempool descendants (default: %u).", DEFAULT_DESCENDANT_SIZE_LIMIT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-stopafterblockimport", strprintf("Stop running after importing blocks from disk (default: %u)", DEFAULT_STOPAFTERBLOCKIMPORT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-stopatheight", strprintf("Stop running after reaching the given height in the main chain (default: %u)", DEFAULT_STOPATHEIGHT), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-stopsaplingreplayat=<n>", "Fail startup when rebuilding the Sapling state after an unclean shutdown reaches the given height (regression testing only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-crashbeforeevodbflush=<n>", "Exit without shutting down at the first full flush at or above the given height, after the coins are written and before EvoDB is (regression testing only)", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-watchquorums=<n>", strprintf("Watch and validate quorum communication (default: %u)", llmq::DEFAULT_WATCH_QUORUMS), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-capturemessages", "Capture all P2P messages to disk", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-disablegovernance", strprintf("Disable governance validation (0-1, default: %u)", 0), ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST);
@@ -3164,6 +3166,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                    "rebuild the chainstate database."));
             case ChainstateLoadingError::ERROR_REPLAYBLOCKS_FAILED:
                 strLoadError = _("Unable to replay blocks. You will need to rebuild the database using -reindex-chainstate.");
+                break;
+            case ChainstateLoadingError::ERROR_SAPLING_STATE_FAILED:
+                strLoadError = _("Unable to rebuild the Sapling state after an unclean shutdown (see debug.log). "
+                                 "You will need to rebuild the database using -reindex-chainstate, or -reindex "
+                                 "if block files are missing.");
                 break;
             case ChainstateLoadingError::ERROR_LOADCHAINTIP_FAILED:
                 strLoadError = _("Error initializing block database");

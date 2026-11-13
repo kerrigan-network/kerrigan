@@ -754,6 +754,39 @@ public:
     /** Remove invalidity status from a block and its descendants. */
     void ResetBlockFailureFlags(CBlockIndex* pindex, bool ignore_chainlocks = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /**
+     * A full flush writes the coins and then EvoDB, two separate databases.
+     * If the process stopped between the two (a kill, an OOM kill, a crash
+     * or a full disk), EvoDB holds the block of the previous flush and the
+     * coins a later one; after a commit of EvoDB alone, EvoDB is ahead.
+     * Mark the coins database as an interrupted flush from EvoDB's block to
+     * the coins' block, so that ReplayBlocks undoes EvoDB's blocks above
+     * their common ancestor and connects the coins' blocks again, EvoDB, the
+     * Sapling state and the coins together. Leaves an unknown block, or
+     * blocks missing on disk, to the startup checks. Runs before
+     * ReconcileSaplingState and ReplayBlocks.
+     *
+     * @returns false only if the mark could not be written.
+     */
+    bool ReconcileEvoDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Bring the Sapling state (SaplingDB) to the block the coins database
+     * holds, or, when a coins flush was interrupted, to the block
+     * ReplayBlocks rolls forward from. SaplingDB is synced at every block and
+     * the coins only at flushes, so after an unclean stop SaplingDB is ahead
+     * of the coins, or on another branch after a reorg. Rolls it back to the
+     * last block both share, from its own per-block records, or else
+     * rebuilds it from scratch; then rolls it forward from the block files.
+     * Runs before ReplayBlocks.
+     *
+     * @returns false if the state cannot be rebuilt (a block missing on
+     *          disk, or rejected) or a shutdown interrupted the rebuild; the
+     *          state then holds a prefix of the chain, and the next start
+     *          continues from there.
+     */
+    bool ReconcileSaplingState(const std::function<bool()>& shutdown_requested) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Replay blocks that aren't fully applied to the database. */
     bool ReplayBlocks();
     /** Ensures we have a genesis block in the block tree, possibly writing one to disk. */

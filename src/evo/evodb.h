@@ -138,9 +138,16 @@ inline void MarkEscrowReleaseExecuted(CEvoDB& evodb, const uint256& hash, int he
     evodb.Write(EscrowExecKey(hash), static_cast<int32_t>(height));
 }
 
-inline void UnmarkEscrowReleaseExecuted(CEvoDB& evodb, const uint256& hash)
+/** Erase the record of a release, when undoing the block at height that
+ *  executed it. Any transaction can carry a release's marker, so a record
+ *  from another height belongs to another block's release and stays.
+ *  @returns whether the record was erased. */
+inline bool UnmarkEscrowReleaseExecuted(CEvoDB& evodb, const uint256& hash, int height)
 {
+    int32_t recorded;
+    if (!evodb.Read(EscrowExecKey(hash), recorded) || recorded != height) return false;
     evodb.Erase(EscrowExecKey(hash));
+    return true;
 }
 
 #endif // BITCOIN_EVO_EVODB_H

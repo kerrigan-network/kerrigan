@@ -183,6 +183,22 @@ std::optional<ChainstateLoadingError> LoadChainstate(bool fReset,
             return ChainstateLoadingError::ERROR_CHAINSTATE_UPGRADE_FAILED;
         }
 
+        // A flush writes the coins and then EvoDB: if the node stopped in
+        // between, or after a commit of EvoDB alone, have ReplayBlocks bring
+        // EvoDB to the coins.
+        if (&chainman.ActiveChainstate() == chainstate && !chainstate->ReconcileEvoDB()) {
+            return ChainstateLoadingError::ERROR_REPLAYBLOCKS_FAILED;
+        }
+
+        // The Sapling state is synced at every block and the coins only at
+        // flushes: after an unclean stop, bring it back to the coins (a no-op
+        // after a clean stop, and with -reindex or -reindex-chainstate).
+        if (&chainman.ActiveChainstate() == chainstate &&
+            !chainstate->ReconcileSaplingState(shutdown_requested)) {
+            if (shutdown_requested && shutdown_requested()) return ChainstateLoadingError::SHUTDOWN_PROBED;
+            return ChainstateLoadingError::ERROR_SAPLING_STATE_FAILED;
+        }
+
         // ReplayBlocks is a no-op if we cleared the coinsviewdb with -reindex or -reindex-chainstate
         if (!chainstate->ReplayBlocks()) {
             return ChainstateLoadingError::ERROR_REPLAYBLOCKS_FAILED;

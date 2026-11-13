@@ -165,6 +165,14 @@ bool CCoinsViewDB::BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, boo
     return ret;
 }
 
+bool CCoinsViewDB::MarkFlushInterrupted(const uint256& new_tip, const uint256& old_tip)
+{
+    CDBBatch batch(*m_db);
+    batch.Erase(DB_BEST_BLOCK);
+    batch.Write(DB_HEAD_BLOCKS, Vector(new_tip, old_tip));
+    return m_db->WriteBatch(batch, /*fSync=*/true);
+}
+
 size_t CCoinsViewDB::EstimateSize() const
 {
     return m_db->EstimateSize(DB_COIN, uint8_t(DB_COIN + 1));

@@ -620,23 +620,9 @@ bool CSpecialTxProcessor::ProcessSpecialTxsInBlock(const CBlock& block, const CB
         nTimeLoop += nTime3 - nTime2;
         LogPrint(BCLog::BENCHMARK, "      - Loop: %.2fms [%.2fs]\n", 0.001 * (nTime3 - nTime2), nTimeLoop * 0.000001);
 
-        // Skip Sapling DB during VerifyDB -- writes to LevelDB without rollback
+        // Skip Sapling DB during VerifyDB -- writes to LevelDB without rollback.
+        // ConnectBlock checked that the state holds the previous block.
         if (!fVerifyOnly) {
-            // Tolerate SaplingDB ahead of coin-state after crash
-            if (sapling::IsSaplingActive(m_consensus_params, pindex->nHeight) && pindex->pprev) {
-                if (!m_sapling_state.VerifyBestBlock(pindex->pprev->GetBlockHash())) {
-                    int saplingHeight = m_sapling_state.GetBestBlockHeight();
-                    if (saplingHeight < pindex->nHeight) {
-                        if (pindex->nHeight >= m_consensus_params.nSaplingStrictnessHeight) {
-                            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-sapling-state-inconsistency",
-                                                 "Sapling state inconsistency detected, you must reindex");
-                        }
-                        LogPrintf("WARNING: SaplingDB mismatch at height %d (saplingHeight=%d), tolerating pre-v8 block\n",
-                                  pindex->nHeight, saplingHeight);
-                    }
-                }
-            }
-
             if (!m_sapling_state.ProcessBlock(block, pindex, m_consensus_params, fJustCheck)) {
                 return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-sapling-state",
                                      "Failed to process Sapling state");
@@ -796,19 +782,9 @@ bool CSpecialTxProcessor::UndoSpecialTxsInBlock(const CBlock& block, const CBloc
             return false;
         }
 
-        // Skip Sapling DB during VerifyDB -- writes to LevelDB without rollback
+        // Skip Sapling DB during VerifyDB -- writes to LevelDB without rollback.
+        // DisconnectBlock checked that the state holds this block.
         if (!fVerifyOnly) {
-            // Tolerate SaplingDB ahead after crash (#1012, mirrors #1007)
-            if (sapling::IsSaplingActive(m_consensus_params, pindex->nHeight)) {
-                if (!m_sapling_state.VerifyBestBlock(pindex->GetBlockHash())) {
-                    int saplingHeight = m_sapling_state.GetBestBlockHeight();
-                    if (saplingHeight <= pindex->nHeight) {
-                        LogPrintf("ERROR: Sapling state inconsistency detected at height %d, reindex required\n", pindex->nHeight);
-                        return false;
-                    }
-                }
-            }
-
             if (!m_sapling_state.UndoBlock(block, pindex, m_consensus_params)) {
                 return false;
             }

@@ -42,6 +42,13 @@ struct TreeDataKey {
     SERIALIZE_METHODS(TreeDataKey, obj) { READWRITE(obj.prefix, obj.height); }
 };
 
+struct BlockMetaKey {
+    uint8_t prefix;
+    int32_t height;
+    explicit BlockMetaKey(int h) : prefix(CSaplingState::DB_BLOCK_META), height(h) {}
+    SERIALIZE_METHODS(BlockMetaKey, obj) { READWRITE(obj.prefix, obj.height); }
+};
+
 /**
  * Extract all nullifiers, note commitments, and total value balance from
  * Sapling txs in a block. Pure function, no DB access, no side effects.
@@ -99,7 +106,8 @@ bool CollectSaplingData(const CBlock& block,
 } // namespace
 
 CSaplingState::CSaplingState(const fs::path& db_path, size_t nCacheSize, bool fMemory, bool fWipe)
-    : db(std::make_unique<CDBWrapper>(db_path, nCacheSize, fMemory, fWipe, true))
+    : db(std::make_unique<CDBWrapper>(db_path, nCacheSize, fMemory, fWipe, true)),
+      m_db_path(db_path), m_cache_size(nCacheSize), m_memory(fMemory)
 {
     LOCK(cs);
     RebuildAnchorIndex();
@@ -284,18 +292,6 @@ bool CSaplingState::ProcessBlock(const CBlock& block, const CBlockIndex* pindex,
         return true;
     }
 
-    // Idempotency: if SaplingDB already committed this block or a later one
-    // (crash after SaplingDB flush but before CoinsTip flush), skip processing.
-    // This allows ReplayBlocks rollforward to succeed without reindex.
-    {
-        LOCK(cs);
-        if (m_lastFrontierHeight >= pindex->nHeight) {
-            LogPrintf("CSaplingState::ProcessBlock: skipping block %d (SaplingDB at height %d)\n",
-                      pindex->nHeight, m_lastFrontierHeight);
-            return true;
-        }
-    }
-
     // Discard any stale pending batch from a previous failed ConnectBlock.
     {
         LOCK(cs);
@@ -349,7 +345,9 @@ bool CSaplingState::ProcessBlock(const CBlock& block, const CBlockIndex* pindex,
                 m_pendingBatch->Write(TreeDataKey(pindex->nHeight), treeData);
             }
 
+            m_pendingBatch->Write(BlockMetaKey(pindex->nHeight), BlockMeta{pindex->GetBlockHash(), m_nSaplingValuePool});
             m_pendingBatch->Write(DB_BEST_BLOCK, pindex->GetBlockHash());
+            m_pendingBatch->Write(DB_META_BEST, pindex->GetBlockHash());
             m_pendingHeight = pindex->nHeight;
             m_pendingValuePoolDelta = 0;
         }
@@ -468,10 +466,12 @@ bool CSaplingState::ProcessBlock(const CBlock& block, const CBlockIndex* pindex,
     }
 
     m_pendingBatch->Write(DB_BEST_BLOCK, pindex->GetBlockHash());
+    m_pendingBatch->Write(DB_META_BEST, pindex->GetBlockHash());
 
     // ZIP-209: write updated value pool to batch
     int64_t newPool = m_nSaplingValuePool + m_pendingValuePoolDelta;
     m_pendingBatch->Write(DB_VALUE_POOL, newPool);
+    m_pendingBatch->Write(BlockMetaKey(pindex->nHeight), BlockMeta{pindex->GetBlockHash(), newPool});
 
     m_pendingTreeRoot = treeRoot;
     m_pendingHeight = pindex->nHeight;
@@ -479,7 +479,7 @@ bool CSaplingState::ProcessBlock(const CBlock& block, const CBlockIndex* pindex,
     return true;
 }
 
-bool CSaplingState::CommitBlock()
+bool CSaplingState::CommitBlock(bool fSync)
 {
     LOCK(cs);
 
@@ -487,7 +487,7 @@ bool CSaplingState::CommitBlock()
         return true; // nothing to commit (fJustCheck, or no Sapling-active block)
     }
 
-    if (!db->WriteBatch(*m_pendingBatch, /*fSync=*/true)) {
+    if (!db->WriteBatch(*m_pendingBatch, fSync)) {
         LogPrintf("ERROR: CSaplingState::CommitBlock: failed to write batch at height %d\n",
                   m_pendingHeight);
         m_pendingBatch.reset();
@@ -554,9 +554,11 @@ bool CSaplingState::UndoBlock(const CBlock& block, const CBlockIndex* pindex,
 
         batch.Erase(TreeRootKey(pindex->nHeight));
         batch.Erase(TreeDataKey(pindex->nHeight));
+        batch.Erase(BlockMetaKey(pindex->nHeight));
 
         if (pindex->pprev) {
             batch.Write(DB_BEST_BLOCK, pindex->pprev->GetBlockHash());
+            batch.Write(DB_META_BEST, pindex->pprev->GetBlockHash());
         }
         if (!db->WriteBatch(batch, /*fSync=*/true)) {
             LogPrintf("ERROR: CSaplingState::UndoBlock: failed to update best block at height %d\n",
@@ -615,9 +617,11 @@ bool CSaplingState::UndoBlock(const CBlock& block, const CBlockIndex* pindex,
 
     batch.Erase(TreeRootKey(pindex->nHeight));
     batch.Erase(TreeDataKey(pindex->nHeight));
+    batch.Erase(BlockMetaKey(pindex->nHeight));
 
     if (pindex->pprev) {
         batch.Write(DB_BEST_BLOCK, pindex->pprev->GetBlockHash());
+        batch.Write(DB_META_BEST, pindex->pprev->GetBlockHash());
     }
 
     // ZIP-209: reverse the value pool delta for this block.
@@ -662,6 +666,132 @@ bool CSaplingState::UndoBlock(const CBlock& block, const CBlockIndex* pindex,
     m_nSaplingValuePool = newPool;
 
     return true;
+}
+
+bool CSaplingState::HasTrustedBlockMeta() const
+{
+    LOCK(cs);
+    // Every write that moves DB_BEST_BLOCK also moves DB_META_BEST, unless it
+    // came from a build that predates both. The two agree only if no such
+    // build moved the best block since; a block hash commits to its ancestry,
+    // so they then name the same chain the DB_BLOCK_META records were written
+    // for.
+    uint256 best, meta_best;
+    return db->Read(DB_BEST_BLOCK, best) && db->Read(DB_META_BEST, meta_best) && best == meta_best;
+}
+
+bool CSaplingState::ResetBlockMeta()
+{
+    LOCK(cs);
+    uint256 best;
+    if (!db->Read(DB_BEST_BLOCK, best)) return true; // empty state, nothing to trust
+
+    CDBBatch batch(*db);
+    size_t erased{0};
+    {
+        std::unique_ptr<CDBIterator> pcursor(db->NewIterator());
+        for (pcursor->Seek(BlockMetaKey(0)); pcursor->Valid(); pcursor->Next()) {
+            std::pair<uint8_t, int32_t> key;
+            if (!pcursor->GetKey(key) || key.first != DB_BLOCK_META) break;
+            batch.Erase(key);
+            ++erased;
+        }
+    }
+    // The best block's own record is known: it is the state as it stands.
+    if (m_lastFrontierHeight >= 0) {
+        batch.Write(BlockMetaKey(m_lastFrontierHeight), BlockMeta{best, m_nSaplingValuePool});
+    }
+    batch.Write(DB_META_BEST, best);
+    if (!db->WriteBatch(batch, /*fSync=*/true)) {
+        LogPrintf("ERROR: CSaplingState::ResetBlockMeta: failed to write\n");
+        return false;
+    }
+    LogPrintf("CSaplingState: dropped %u per-block records an older build did not maintain\n", erased);
+    return true;
+}
+
+bool CSaplingState::GetBlockMeta(int nHeight, BlockMeta& meta) const
+{
+    LOCK(cs);
+    return db->Read(BlockMetaKey(nHeight), meta);
+}
+
+bool CSaplingState::RollbackToHeight(int nHeight)
+{
+    LOCK(cs);
+
+    BlockMeta meta;
+    if (nHeight > m_lastFrontierHeight || !db->Read(BlockMetaKey(nHeight), meta)) {
+        LogPrintf("ERROR: CSaplingState::RollbackToHeight: no record of the block at height %d (state at %d)\n",
+                  nHeight, m_lastFrontierHeight);
+        return false;
+    }
+    const int top = m_lastFrontierHeight;
+
+    CDBBatch batch(*db);
+
+    // Nullifiers are keyed by value, and record the height that spent them.
+    size_t erased_nullifiers{0};
+    {
+        std::unique_ptr<CDBIterator> pcursor(db->NewIterator());
+        for (pcursor->Seek(NullifierKey(uint256())); pcursor->Valid(); pcursor->Next()) {
+            std::pair<uint8_t, uint256> key;
+            if (!pcursor->GetKey(key) || key.first != DB_NULLIFIER) break;
+            int32_t height;
+            if (!pcursor->GetValue(height)) {
+                LogPrintf("ERROR: CSaplingState::RollbackToHeight: unreadable nullifier %s\n", key.second.ToString());
+                return false;
+            }
+            if (height > nHeight) {
+                batch.Erase(key);
+                ++erased_nullifiers;
+            }
+        }
+    }
+
+    // Per-height records. Every block writes all three, and none exists above
+    // the highest tree root (m_lastFrontierHeight).
+    for (int h = nHeight + 1; h <= top; ++h) {
+        batch.Erase(TreeRootKey(h));
+        batch.Erase(TreeDataKey(h));
+        batch.Erase(BlockMetaKey(h));
+    }
+
+    batch.Write(DB_VALUE_POOL, meta.pool);
+    batch.Write(DB_BEST_BLOCK, meta.hash);
+    batch.Write(DB_META_BEST, meta.hash);
+
+    if (!db->WriteBatch(batch, /*fSync=*/true)) {
+        LogPrintf("ERROR: CSaplingState::RollbackToHeight: failed to write the rollback to height %d\n", nHeight);
+        return false;
+    }
+
+    m_pendingBatch.reset();
+    m_pendingHeight = -1;
+    m_pendingTreeRoot.SetNull();
+    m_pendingValuePoolDelta = 0;
+    m_anchor_heights.clear();
+    m_lastFrontierHeight = -1;
+    RebuildAnchorIndex();
+    m_nSaplingValuePool = meta.pool;
+
+    LogPrintf("CSaplingState: rolled back from height %d to %d (%s): %u nullifiers erased, value pool %lld\n",
+              top, nHeight, meta.hash.ToString(), erased_nullifiers, meta.pool);
+    return true;
+}
+
+void CSaplingState::Wipe()
+{
+    LOCK(cs);
+    m_pendingBatch.reset();
+    m_pendingHeight = -1;
+    m_pendingTreeRoot.SetNull();
+    m_pendingValuePoolDelta = 0;
+    db.reset();
+    db = std::make_unique<CDBWrapper>(m_db_path, m_cache_size, m_memory, /*fWipe=*/true, /*obfuscate=*/true);
+    m_anchor_heights.clear();
+    m_lastFrontierHeight = -1;
+    m_nSaplingValuePool = 0;
 }
 
 } // namespace sapling

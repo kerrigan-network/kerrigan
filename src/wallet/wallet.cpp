@@ -1483,7 +1483,7 @@ void CWallet::transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRe
     }
 }
 
-void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch)
+void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& batch, bool defer_witnesses)
 {
     AssertLockHeld(cs_wallet);
     if (m_sapling_key_manager.IsEmpty()) return;
@@ -1523,7 +1523,7 @@ void CWallet::ProcessSaplingBlock(const CBlock& block, int height, WalletBatch& 
     // and never recurses into this defer path.
     // kMaxInlineWitnessAppends bounds the connect-thread hold; it is far above
     // any normal wallet's commitments x notes and only abnormal load trips it.
-    if (!blockCmus.empty()) {
+    if (!blockCmus.empty() && !defer_witnesses) {
         static constexpr uint64_t kMaxInlineWitnessAppends = 10'000'000;
         const bool inRebuild = m_sapling_rebuild_active.load(std::memory_order_acquire);
         const uint64_t work = static_cast<uint64_t>(blockCmus.size()) *
@@ -1736,6 +1736,7 @@ void CWallet::RunSaplingWitnessRebuildBackground(std::shared_ptr<CWallet> pwalle
             snapshot.push_back(hh);
         }
         snapshotTipHash = snapshot.back();
+        pwallet->m_sapling_witnesses_deferred = true;
 
         pwallet->WalletLogPrintf(
             "Sapling witness rebuild: detected %u stale witnesses at heights %d..%d, "
@@ -1751,6 +1752,9 @@ void CWallet::RunSaplingWitnessRebuildBackground(std::shared_ptr<CWallet> pwalle
     // "flag cleared on disk". See tail-drain rationale below.
     LOCK(pwallet->cs_wallet);
     WalletBatch batch(pwallet->GetDatabase());
+    // blockConnected applies witnesses again once cs_wallet is released; the
+    // blocks it deferred are the tail drained below while it is held.
+    pwallet->m_sapling_witnesses_deferred = false;
 
     if (applied < 0) {
         pwallet->WalletLogPrintf("ERROR: Sapling witness auto-rebuild aborted; "
@@ -1779,15 +1783,12 @@ void CWallet::RunSaplingWitnessRebuildBackground(std::shared_ptr<CWallet> pwalle
     // The chunked replay released cs_wallet between chunks (kRebuildChunkBlocks
     // at a time) so wallet RPCs and the scheduler stayed responsive. During
     // those gaps, blockConnected can have landed new blocks at
-    // snapshotTipHeight+1..currentTip and called ProcessSaplingBlock →
-    // UpdateWitnesses on partial witness state: notes with witnesses already
-    // reconstructed by an earlier chunk received the new cmus, but notes
-    // whose witnesses were reconstructed in a LATER chunk missed them. Those
-    // later-reconstructed witnesses only cover the snapshot range and will
-    // be permanently desynced: anchor mismatch → DetectStaleWitnesses fires
-    // again → another rebuild → another tip movement → rebuild loop.
+    // snapshotTipHeight+1..currentTip. It recorded their notes and spends but
+    // left the witnesses alone (m_sapling_witnesses_deferred): applied then,
+    // to partially rebuilt witnesses, they would reach some witnesses and
+    // not others, and the replay would append older blocks after them.
     //
-    // Break the loop by draining [snapshotTipHeight+1 .. currentTip] under
+    // Apply them by draining [snapshotTipHeight+1 .. currentTip] under
     // the continuously-held cs_wallet before clearing the persistent flag.
     // The tail is bounded by the replay duration (minutes of chain blocks),
     // so the additional blocking hold is bounded; blockConnected cannot
@@ -1867,6 +1868,7 @@ int CWallet::RebuildSaplingWitnessesSynchronous(int fromHeight)
             snapshot.push_back(hh);
         }
         snapshotTipHash = snapshot.back();
+        m_sapling_witnesses_deferred = true;
     } // cs_wallet released; batch flushed on destruction
 
     // Phase 2: chunked replay, cs_wallet re-acquired per chunk.
@@ -1879,6 +1881,7 @@ int CWallet::RebuildSaplingWitnessesSynchronous(int fromHeight)
     // for full rationale).
     LOCK(cs_wallet);
     WalletBatch batch(GetDatabase());
+    m_sapling_witnesses_deferred = false; // see RunSaplingWitnessRebuildBackground
     if (applied < 0) {
         WalletLogPrintf("ERROR: Sapling witness rebuild aborted; persistent marker retained\n");
         return applied;
@@ -1895,9 +1898,8 @@ int CWallet::RebuildSaplingWitnessesSynchronous(int fromHeight)
     }
 
     // Drain tail [snapshotTipHeight+1 .. currentTip] under the held lock to
-    // absorb any blocks that landed during the chunked replay. Without this,
-    // blockConnected's between-chunk UpdateWitnesses calls desync later-
-    // reconstructed witnesses, re-firing DetectStaleWitnesses in a loop.
+    // apply the witnesses of the blocks that landed during the chunked
+    // replay, which blockConnected deferred (m_sapling_witnesses_deferred).
     const int currentTip = m_last_block_processed_height;
     if (currentTip > snapshotTipHeight) {
         WalletLogPrintf("Sapling witness rebuild: draining tail %d..%d under held lock\n",
@@ -2158,7 +2160,11 @@ void CWallet::blockConnected(const CBlock& block, int height)
         transactionRemovedFromMempool(block.vtx[index], MemPoolRemovalReason::BLOCK);
     }
 
-    ProcessSaplingBlock(block, height, batch);
+    // A rebuild replaying with cs_wallet released applies this block's
+    // witnesses in its tail drain (m_sapling_witnesses_deferred).
+    const bool defer_witnesses = m_sapling_witnesses_deferred &&
+                                 m_sapling_rebuild_active.load(std::memory_order_acquire);
+    ProcessSaplingBlock(block, height, batch, defer_witnesses);
     AddSaplingTransactions(block, height, /*rescanning_old_block=*/false);
 
     // reset cache to make sure no longer immature coins are included

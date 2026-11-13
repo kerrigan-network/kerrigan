@@ -99,6 +99,8 @@ BASE_SCRIPTS = [
     # Kerrigan-specific tests (multi-algo PoW + Sapling shielded transactions)
     'feature_multialgo_stress.py',
     'feature_sapling_reorg.py',
+    'feature_sapling_crash_recovery.py --descriptors',
+    'feature_evodb_crash_recovery.py --descriptors',
     'feature_invalidateblock.py',
     'feature_sapling.py',
     'feature_coordinator_supervisor.py',
@@ -112,7 +114,7 @@ BASE_SCRIPTS = [
     'wallet_sapling_viewingkey_norelay.py',
     'feature_sapling_spent_note_integrity.py',
     'feature_sapling_islock_mining.py',
-    'feature_recovery_selfheal.py',
+    'feature_recovery_selfheal.py --descriptors',
     'feature_multi_algo_mining.py',
     'feature_llmq_data_recovery.py',
     'wallet_hd.py --legacy-wallet',
