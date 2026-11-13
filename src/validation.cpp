@@ -6925,55 +6925,31 @@ bool CChainState::ReconcileSaplingState(const std::function<bool()>& shutdown_re
               best.ToString(), best_height, coins_hash.ToString(), coins_tip ? coins_tip->nHeight : -1);
 
     // 1. The highest height whose state belongs to want's chain, from the
-    //    per-block records, then drop everything above it. Records exist for
-    //    the blocks this build connected; below them (an older build
-    //    connected those blocks) the search stops.
+    //    per-block records, then drop everything above it (nothing, when the
+    //    state is at want's ancestor, as after an interrupted rebuild).
+    //    Records exist for the blocks this build connected; below them (an
+    //    older build connected those blocks) the search stops.
     int keep{-1};
     const int search_top = want ? std::min(want->nHeight, best_height) : -1;
-    if (search_top >= first_height) {
-        for (int h = search_top; h >= first_height; --h) {
-            sapling::CSaplingState::BlockMeta meta;
-            if (!sapling.GetBlockMeta(h, meta)) break;
-            if (meta.hash == want->GetAncestor(h)->GetBlockHash()) {
-                keep = h;
-                break;
-            }
-        }
-        if (keep >= 0 && !sapling.RollbackToHeight(keep)) {
-            return error("%s: failed to roll the Sapling state back to height %d", __func__, keep);
+    for (int h = search_top; h >= first_height; --h) {
+        sapling::CSaplingState::BlockMeta meta;
+        if (!sapling.GetBlockMeta(h, meta)) break;
+        if (meta.hash == want->GetAncestor(h)->GetBlockHash()) {
+            keep = h;
+            break;
         }
     }
-
-    // 2. A state without those records (written by an older build): undo
-    //    it block by block down to the fork with want's chain, if its best
-    //    block and the blocks down to the fork are known and on disk.
-    if (keep < 0 && want && !best.IsNull()) {
-        const CBlockIndex* pbest = m_blockman.LookupBlockIndex(best);
-        const CBlockIndex* fork = pbest ? LastCommonAncestor(pbest, want) : nullptr;
-        if (pbest && pbest->nHeight == best_height && fork && fork->nHeight >= first_height) {
-            bool undone{true};
-            for (const CBlockIndex* pindex = pbest; pindex != fork; pindex = pindex->pprev) {
-                CBlock block;
-                if (!(pindex->nStatus & BLOCK_HAVE_DATA) || !ReadBlockFromDisk(block, pindex, consensus) ||
-                    !sapling.UndoBlock(block, pindex, consensus)) {
-                    undone = false;
-                    break;
-                }
-            }
-            if (undone && sapling.GetBestBlock() == fork->GetBlockHash()) {
-                keep = fork->nHeight;
-                LogPrintf("Sapling state undone block by block to height %d\n", keep);
-            }
-        }
+    if (keep >= 0 && keep < best_height && !sapling.RollbackToHeight(keep)) {
+        return error("%s: failed to roll the Sapling state back to height %d", __func__, keep);
     }
 
-    // 3. Otherwise start over.
+    // 2. Otherwise (no shared block, or a state an older build wrote) start over.
     if (keep < 0) {
         LogPrintf("Rebuilding Sapling state from the block files, up to height %d\n", want ? want->nHeight : 0);
         sapling.Wipe();
     }
 
-    // 4. Roll forward along want's chain from the block files.
+    // 3. Roll forward along want's chain from the block files.
     if (want) {
         const int from = keep < 0 ? first_height : keep + 1;
         const int stop_at = m_params.IsMockableChain() ? gArgs.GetIntArg("-stopsaplingreplayat", -1) : -1;

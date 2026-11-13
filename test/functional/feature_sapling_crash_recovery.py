@@ -258,7 +258,8 @@ class SaplingCrashRecoveryTest(BitcoinTestFramework):
         log = self.restart_after_kill(0)
         # Continued from the blocks the failed start rebuilt, not from scratch.
         assert "Rebuilding Sapling state from the block files" not in log
-        assert "rolled back from height 59 to 59" in log
+        assert "rolled back from height" not in log
+        assert "Rolling Sapling state forward: height 60 of" in log
         self.connect_nodes(0, 1)
         self.sync_blocks([n0, self.nodes[1]])
         self.assert_in_sync()
